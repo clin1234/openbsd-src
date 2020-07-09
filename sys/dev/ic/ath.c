@@ -1,4 +1,4 @@
-/*      $OpenBSD: ath.c,v 1.116 2018/01/31 11:27:03 stsp Exp $  */
+/*      $OpenBSD: ath.c,v 1.118 2020/02/19 11:05:04 claudio Exp $  */
 /*	$NetBSD: ath.c,v 1.37 2004/08/18 21:59:39 dyoung Exp $	*/
 
 /*-
@@ -1795,6 +1795,7 @@ ath_rxbuf_init(struct ath_softc *sc, struct ath_buf *bf)
 void
 ath_rx_proc(void *arg, int npending)
 {
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
 #define	PA2DESC(_sc, _pa) \
 	((struct ath_desc *)((caddr_t)(_sc)->sc_desc + \
 		((_pa) - (_sc)->sc_desc_paddr)))
@@ -1921,8 +1922,6 @@ ath_rx_proc(void *arg, int npending)
 
 #if NBPFILTER > 0
 		if (sc->sc_drvbpf) {
-			struct mbuf mb;
-
 			sc->sc_rxtap.wr_flags = IEEE80211_RADIOTAP_F_FCS;
 			sc->sc_rxtap.wr_rate =
 			    sc->sc_hwmap[ds->ds_rxstat.rs_rate] &
@@ -1931,13 +1930,8 @@ ath_rx_proc(void *arg, int npending)
 			sc->sc_rxtap.wr_rssi = ds->ds_rxstat.rs_rssi;
 			sc->sc_rxtap.wr_max_rssi = ic->ic_max_rssi;
 
-			mb.m_data = (caddr_t)&sc->sc_rxtap;
-			mb.m_len = sc->sc_rxtap_len;
-			mb.m_next = m;
-			mb.m_nextpkt = NULL;
-			mb.m_type = 0;
-			mb.m_flags = 0;
-			bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_IN);
+			bpf_mtap_hdr(sc->sc_drvbpf, &sc->sc_rxtap,
+			    sc->sc_rxtap_len, m, BPF_DIRECTION_IN);
 		}
 #endif
 		m_adj(m, -IEEE80211_CRC_LEN);
@@ -1946,7 +1940,7 @@ ath_rx_proc(void *arg, int npending)
 		if (!ath_softcrypto && (wh->i_fc[1] & IEEE80211_FC1_WEP)) {
 			/*
 			 * WEP is decrypted by hardware. Clear WEP bit
-			 * and trim WEP header for ieee80211_input().
+			 * and trim WEP header for ieee80211_inputm().
 			 */
 			wh->i_fc[1] &= ~IEEE80211_FC1_WEP;
 			bcopy(wh, &whbuf, sizeof(whbuf));
@@ -1988,7 +1982,7 @@ ath_rx_proc(void *arg, int npending)
 		 */
 		rxi.rxi_rssi = ds->ds_rxstat.rs_rssi;
 		rxi.rxi_tstamp = ds->ds_rxstat.rs_tstamp;
-		ieee80211_input(ifp, m, ni, &rxi);
+		ieee80211_inputm(ifp, m, ni, &rxi, &ml);
 
 		/* Handle the rate adaption */
 		ieee80211_rssadapt_input(ic, ni, &an->an_rssadapt,
@@ -2004,6 +1998,8 @@ ath_rx_proc(void *arg, int npending)
 	rx_next:
 		TAILQ_INSERT_TAIL(&sc->sc_rxbuf, bf, bf_list);
 	} while (ath_rxbuf_init(sc, bf) == 0);
+
+	if_input(ifp, &ml);
 
 	ath_hal_set_rx_signal(ah);		/* rx signal state monitoring */
 	ath_hal_start_rx(ah);			/* in case of RXEOL */
@@ -2304,8 +2300,6 @@ ath_tx_start(struct ath_softc *sc, struct ieee80211_node *ni,
 		bpf_mtap(ic->ic_rawbpf, m0, BPF_DIRECTION_OUT);
 
 	if (sc->sc_drvbpf) {
-		struct mbuf mb;
-
 		sc->sc_txtap.wt_flags = 0;
 		if (shortPreamble)
 			sc->sc_txtap.wt_flags |= IEEE80211_RADIOTAP_F_SHORTPRE;
@@ -2317,13 +2311,8 @@ ath_tx_start(struct ath_softc *sc, struct ieee80211_node *ni,
 		sc->sc_txtap.wt_antenna = antenna;
 		sc->sc_txtap.wt_hwqueue = hwqueue;
 
-		mb.m_data = (caddr_t)&sc->sc_txtap;
-		mb.m_len = sc->sc_txtap_len;
-		mb.m_next = m0;
-		mb.m_nextpkt = NULL;
-		mb.m_type = 0;
-		mb.m_flags = 0;
-		bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_OUT);
+		bpf_mtap_hdr(sc->sc_drvbpf, &sc->sc_txtap, sc->sc_txtap_len,
+		    m0, BPF_DIRECTION_OUT);
 	}
 #endif
 

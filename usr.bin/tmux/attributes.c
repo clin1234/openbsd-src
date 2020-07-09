@@ -1,4 +1,4 @@
-/* $OpenBSD: attributes.c,v 1.9 2019/05/13 20:10:23 nicm Exp $ */
+/* $OpenBSD: attributes.c,v 1.11 2020/05/16 14:13:37 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Joshua Elsasser <josh@elsasser.org>
@@ -31,7 +31,8 @@ attributes_tostring(int attr)
 	if (attr == 0)
 		return ("none");
 
-	len = xsnprintf(buf, sizeof buf, "%s%s%s%s%s%s%s%s%s%s%s%s%s",
+	len = xsnprintf(buf, sizeof buf, "%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+	    (attr & GRID_ATTR_CHARSET) ? "acs," : "",
 	    (attr & GRID_ATTR_BRIGHT) ? "bright," : "",
 	    (attr & GRID_ATTR_DIM) ? "dim," : "",
 	    (attr & GRID_ATTR_UNDERSCORE) ? "underscore," : "",
@@ -59,9 +60,10 @@ attributes_fromstring(const char *str)
 	size_t		end;
 	u_int		i;
 	struct {
-		const char*	name;
-		int		attr;
+		const char	*name;
+		int		 attr;
 	} table[] = {
+		{ "acs", GRID_ATTR_CHARSET },
 		{ "bright", GRID_ATTR_BRIGHT },
 		{ "bold", GRID_ATTR_BRIGHT },
 		{ "dim", GRID_ATTR_DIM },

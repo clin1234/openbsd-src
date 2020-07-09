@@ -1,4 +1,4 @@
-/*	$OpenBSD: uaudio.c,v 1.144 2019/05/09 07:09:04 ratchov Exp $	*/
+/*	$OpenBSD: uaudio.c,v 1.160 2020/06/11 16:00:10 ratchov Exp $	*/
 /*
  * Copyright (c) 2018 Alexandre Ratchov <alex@caoua.org>
  *
@@ -171,6 +171,12 @@
 #define UAUDIO_SPF_DIV			327680
 
 /*
+ * names of DAC and ADC unit names
+ */
+#define UAUDIO_NAME_PLAY	"dac"
+#define UAUDIO_NAME_REC		"record"
+
+/*
  * read/write pointers for secure sequencial access of binary data,
  * ex. usb descriptors, tables and alike. Bytes are read using the
  * read pointer up to the write pointer.
@@ -214,6 +220,9 @@ struct uaudio_softc {
 		unsigned int nch;
 		int type, id;
 
+		/* terminal or clock type */
+		unsigned int term;
+
 		/* clock source, if a terminal or selector */
 		struct uaudio_unit *clock;
 
@@ -221,10 +230,9 @@ struct uaudio_softc {
 		struct uaudio_ranges rates;
 
 		/* mixer(4) bits */
-#define UAUDIO_CLASS_REC	0
-#define UAUDIO_CLASS_OUT	1
-#define UAUDIO_CLASS_IN		2
-#define UAUDIO_CLASS_COUNT	3
+#define UAUDIO_CLASS_OUT	0
+#define UAUDIO_CLASS_IN		1
+#define UAUDIO_CLASS_COUNT	2
 		int mixer_class;
 		struct uaudio_mixent {
 			struct uaudio_mixent *next;
@@ -243,6 +251,11 @@ struct uaudio_softc {
 	 * Current clock, UAC v2.0 only
 	 */
 	struct uaudio_unit *clock;
+
+	/*
+	 * Number of input and output terminals
+	 */
+	unsigned int nin, nout;
 
 	/*
 	 * When unique names are needed, they are generated using a
@@ -403,7 +416,8 @@ int uaudio_open(void *, int);
 void uaudio_close(void *);
 int uaudio_set_params(void *, int, int, struct audio_params *,
     struct audio_params *);
-int uaudio_round_blocksize(void *, int);
+unsigned int uaudio_set_blksz(void *, int,
+    struct audio_params *, struct audio_params *, unsigned int);
 int uaudio_trigger_output(void *, void *, void *, int,
     void (*)(void *), void *, struct audio_params *);
 int uaudio_trigger_input(void *, void *, void *, int,
@@ -457,7 +471,7 @@ struct audio_hw_if uaudio_hw_if = {
 	uaudio_open,		/* open */
 	uaudio_close,		/* close */
 	uaudio_set_params,	/* set_params */
-	uaudio_round_blocksize,	/* round_blocksize */
+	NULL,			/* round_blocksize */
 	NULL,			/* commit_settings */
 	NULL,			/* init_output */
 	NULL,			/* init_input */
@@ -477,7 +491,8 @@ struct audio_hw_if uaudio_hw_if = {
 	uaudio_trigger_output,	/* trigger_output */
 	uaudio_trigger_input,	/* trigger_input */
 	uaudio_copy_output,	/* copy_output */
-	uaudio_underrun		/* underrun */
+	uaudio_underrun,	/* underrun */
+	uaudio_set_blksz	/* set_blksz */
 };
 
 /*
@@ -600,7 +615,7 @@ uaudio_unit_byid(struct uaudio_softc *sc, unsigned int id)
  * Return a terminal name for the given terminal type.
  */
 char *
-uaudio_tname(unsigned int type, int isout)
+uaudio_tname(struct uaudio_softc *sc, unsigned int type, int isout)
 {
 	unsigned int hi, lo;
 	char *name;
@@ -608,11 +623,21 @@ uaudio_tname(unsigned int type, int isout)
 	hi = type >> 8;
 	lo = type & 0xff;
 
+	/* usb data stream */
+	if (hi == 1)
+		return isout ? UAUDIO_NAME_REC : UAUDIO_NAME_PLAY;
+
+	/* if theres only one input (output) use "input" ("output") */
+	if (isout) {
+		if (sc->nout == 1)
+			return "output";
+	} else {
+		if (sc->nin == 1)
+			return "input";
+	}
+
+	/* determine name from USB terminal type */
 	switch (hi) {
-	case 1:
-		/* usb data stream */
-		name = isout ? "record" : "play";
-		break;
 	case 2:
 		/* embedded inputs */
 		name = isout ? "mic-out" : "mic";
@@ -1055,7 +1080,13 @@ uaudio_clock_id(struct uaudio_softc *sc)
 int
 uaudio_getrates(struct uaudio_softc *sc, struct uaudio_params *p)
 {
-	return uaudio_alt_getrates(sc, p->palt ? p->palt : p->ralt);
+	switch (sc->version) {
+	case UAUDIO_V1:
+		return p->v1_rates;
+	case UAUDIO_V2:
+		return uaudio_alt_getrates(sc, p->palt ? p->palt : p->ralt);
+	}
+	return 0;
 }
 
 /*
@@ -1244,7 +1275,7 @@ uaudio_process_unit(struct uaudio_softc *sc,
 {
 	struct uaudio_blob p;
 	struct uaudio_unit *u, *s;
-	unsigned int i, j, term, size, attr, ctl, type, subtype, assoc, clk;
+	unsigned int i, j, size, ctl, type, subtype, assoc, clk;
 #ifdef UAUDIO_DEBUG
 	unsigned int bit;
 #endif
@@ -1261,6 +1292,7 @@ uaudio_process_unit(struct uaudio_softc *sc,
 		u = malloc(sizeof(struct uaudio_unit), M_DEVBUF, M_WAITOK);
 		u->id = id;
 		u->type = subtype;
+		u->term = 0;
 		u->src_list = NULL;
 		u->dst_list = NULL;
 		u->clock = NULL;
@@ -1294,10 +1326,12 @@ uaudio_process_unit(struct uaudio_softc *sc,
 
 	switch (u->type) {
 	case UAUDIO_AC_INPUT:
-		if (!uaudio_getnum(&p, 2, &term))
+		if (!uaudio_getnum(&p, 2, &u->term))
 			return 0;
 		if (!uaudio_getnum(&p, 1, &assoc))
 			return 0;
+		if (u->term >> 8 != 1)
+			sc->nin++;
 		switch (sc->version) {
 		case UAUDIO_V1:
 			break;
@@ -1311,13 +1345,12 @@ uaudio_process_unit(struct uaudio_softc *sc,
 		}
 		if (!uaudio_getnum(&p, 1, &u->nch))
 			return 0;
-		uaudio_mkname(sc, uaudio_tname(term, 0), u->name);
 		DPRINTF("%02u: "
 		    "in, nch = %d, term = 0x%x, assoc = %d\n",
-		    u->id, u->nch, term, assoc);
+		    u->id, u->nch, u->term, assoc);
 		break;
 	case UAUDIO_AC_OUTPUT:
-		if (!uaudio_getnum(&p, 2, &term))
+		if (!uaudio_getnum(&p, 2, &u->term))
 			return 0;
 		if (!uaudio_getnum(&p, 1, &assoc))
 			return 0;
@@ -1325,6 +1358,8 @@ uaudio_process_unit(struct uaudio_softc *sc,
 			return 0;
 		if (!uaudio_process_unit(sc, u, id, units, &s))
 			return 0;
+		if (u->term >> 8 != 1)
+			sc->nout++;
 		switch (sc->version) {
 		case UAUDIO_V1:
 			break;
@@ -1339,10 +1374,9 @@ uaudio_process_unit(struct uaudio_softc *sc,
 		u->src_list = s;
 		s->src_next = NULL;
 		u->nch = s->nch;
-		uaudio_mkname(sc, uaudio_tname(term, 1), u->name);
 		DPRINTF("%02u: "
 		    "out, id = %d, nch = %d, term = 0x%x, assoc = %d\n",
-		    u->id, id, u->nch, term, assoc);
+		    u->id, id, u->nch, u->term, assoc);
 		break;
 	case UAUDIO_AC_MIXER:
 		if (!uaudio_process_srcs(sc, u, units, &p))
@@ -1411,6 +1445,7 @@ uaudio_process_unit(struct uaudio_softc *sc,
 		}
 		DPRINTF("%02d: feature id = %d, nch = %d, size = %d\n",
 		    u->id, id, u->nch, size);
+
 		if (!uaudio_getnum(&p, size, &ctl))
 			return 0;
 		ctl = uaudio_feature_fixup(sc, ctl);
@@ -1419,6 +1454,13 @@ uaudio_process_unit(struct uaudio_softc *sc,
 				uaudio_feature_addent(sc, u, i, -1);
 			ctl >>= 2;
 		}
+
+		/*
+		 * certain devices provide no per-channel control descriptors
+		 */
+		if (p.wptr - p.rptr == 1)
+			break;
+
 		for (j = 0; j < u->nch; j++) {
 			if (!uaudio_getnum(&p, size, &ctl))
 				return 0;
@@ -1458,13 +1500,12 @@ uaudio_process_unit(struct uaudio_softc *sc,
 		}
 		break;
 	case UAUDIO_AC_CLKSRC:
-		if (!uaudio_getnum(&p, 1, &attr))
+		if (!uaudio_getnum(&p, 1, &u->term))
 			return 0;
 		if (!uaudio_getnum(&p, 1, &ctl))
 			return 0;
 		DPRINTF("%02u: clock source, attr = 0x%x, ctl = 0x%x\n",
-		    u->id, attr, ctl);
-		uaudio_mkname(sc, uaudio_clkname(attr), u->name);
+		    u->id, u->term, ctl);
 		break;
 	case UAUDIO_AC_CLKSEL:
 		DPRINTF("%02u: clock sel\n", u->id);
@@ -1475,7 +1516,6 @@ uaudio_process_unit(struct uaudio_softc *sc,
 			    DEVNAME(sc), u->id);
 			return 0;
 		}
-		uaudio_mkname(sc, "clksel", u->name);
 		break;
 	case UAUDIO_AC_CLKMULT:
 		DPRINTF("%02u: clock mult\n", u->id);
@@ -1879,6 +1919,25 @@ uaudio_mixer_nchan(struct uaudio_mixent *m, struct uaudio_mixent **rnext)
 }
 
 /*
+ * Skip redundant mixer entries that we don't want to expose to userland.
+ * For instance if there is a mute-all-channels control and per-channel
+ * mute controls, we don't want both (we expose the per-channel mute)
+ */
+void
+uaudio_mixer_skip(struct uaudio_mixent **pm)
+{
+	struct uaudio_mixent *m = *pm;
+
+	if (m != NULL &&
+	    m->chan == -1 &&
+	    m->next != NULL &&
+	    strcmp(m->fname, m->next->fname) == 0)
+		m = m->next;
+
+	*pm = m;
+}
+
+/*
  * Return pointer to the unit and mixer entry which have the given
  * index exposed by the mixer(4) API.
  */
@@ -1895,6 +1954,7 @@ uaudio_mixer_byindex(struct uaudio_softc *sc, int index,
 	for (u = sc->unit_list; u != NULL; u = u->unit_next) {
 		m = u->mixent_list;
 		while (1) {
+			uaudio_mixer_skip(&m);
 			if (m == NULL)
 				break;
 			if (index == i) {
@@ -2035,7 +2095,7 @@ uaudio_process_ac(struct uaudio_softc *sc, struct uaudio_blob *p, int ifnum)
 	 * descriptor. This avoids relying on the wTotalLength field.
 	 */
 	savepos = p->rptr;
-	units.rptr = p->rptr;
+	units.rptr = units.wptr = p->rptr;
 	while (p->rptr != p->wptr) {
 		if (!uaudio_getdesc(p, &pu))
 			return 0;
@@ -2067,10 +2127,22 @@ uaudio_process_ac(struct uaudio_softc *sc, struct uaudio_blob *p, int ifnum)
 	}
 
 	/*
-	 * set effect and processor unit names
+	 * set terminal, effect, and processor unit names
 	 */
 	for (u = sc->unit_list; u != NULL; u = u->unit_next) {
 		switch (u->type) {
+		case UAUDIO_AC_INPUT:
+			uaudio_mkname(sc, uaudio_tname(sc, u->term, 0), u->name);
+			break;
+		case UAUDIO_AC_OUTPUT:
+			uaudio_mkname(sc, uaudio_tname(sc, u->term, 1), u->name);
+			break;
+		case UAUDIO_AC_CLKSRC:
+			uaudio_mkname(sc, uaudio_clkname(u->term), u->name);
+			break;
+		case UAUDIO_AC_CLKSEL:
+			uaudio_mkname(sc, "clksel", u->name);
+			break;
 		case UAUDIO_AC_EFFECT:
 			uaudio_mkname(sc, "fx", u->name);
 			break;
@@ -2109,11 +2181,11 @@ uaudio_process_ac(struct uaudio_softc *sc, struct uaudio_blob *p, int ifnum)
 	for (u = sc->unit_list; u != NULL; u = u->unit_next) {
 		if (u->type != UAUDIO_AC_FEATURE)
 			continue;
-		if (uaudio_setname_dsts(sc, u, "record")) {
-			u->mixer_class = UAUDIO_CLASS_REC;
+		if (uaudio_setname_dsts(sc, u, UAUDIO_NAME_REC)) {
+			u->mixer_class = UAUDIO_CLASS_IN;
 			continue;
 		}
-		if (uaudio_setname_srcs(sc, u, "play")) {
+		if (uaudio_setname_srcs(sc, u, UAUDIO_NAME_PLAY)) {
 			u->mixer_class = UAUDIO_CLASS_OUT;
 			continue;
 		}
@@ -2843,6 +2915,10 @@ uaudio_stream_open(struct uaudio_softc *sc, int dir,
 
 	/* max spf can't exceed the device usb packet size */
 	spf_max = (a->maxpkt / bpa) * UAUDIO_SPF_DIV;
+	if (s->spf > spf_max) {
+		printf("%s: samples per frame too large\n", DEVNAME(sc));
+		return EIO;
+	}
 	if (s->spf_max > spf_max)
 		s->spf_max = spf_max;
 
@@ -2860,7 +2936,7 @@ uaudio_stream_open(struct uaudio_softc *sc, int dir,
 	 *
 	 *		UAUDIO_NXFERS * (blksz - min_blksz)
 	 */
-	min_blksz = (((uint64_t)blksz << 32) / s->spf_max * s->spf_max) >> 32;
+	min_blksz = (((uint64_t)blksz << 32) / s->spf_max * s->spf_min) >> 32;
 
 	/* round to sample size */
 	min_blksz -= min_blksz % bpa;
@@ -3046,7 +3122,7 @@ uaudio_adjspf(struct uaudio_softc *sc)
 	s->spf = (uint64_t)(sc->rate - diff) * UAUDIO_SPF_DIV / sc->ufps;
 	if (s->spf > s->spf_max)
 		s->spf = s->spf_max;
-	if (s->spf < s->spf_min)
+	else if (s->spf < s->spf_min)
 		s->spf = s->spf_min;
 #ifdef UAUDIO_DEBUG
 	if (uaudio_debug >= 2)
@@ -3643,8 +3719,14 @@ uaudio_print(struct uaudio_softc *sc)
 	int nctl = 0;
 
 	for (u = sc->unit_list; u != NULL; u = u->unit_next) {
-		for (m = u->mixent_list; m != NULL; m = m->next)
+		m = u->mixent_list;
+		while (1) {
+			uaudio_mixer_skip(&m);
+			if (m == NULL)
+				break;
+			m = m->next;
 			nctl++;
+		}
 	}
 
 	for (p = sc->params_list; p != NULL; p = p->next) {
@@ -3772,6 +3854,8 @@ uaudio_detach(struct device *self, int flags)
 
 	rv = config_detach_children(self, flags);
 
+	usbd_ref_wait(sc->udev);
+
 	while ((alt = sc->alts) != NULL) {
 		sc->alts = alt->next;
 		free(alt, M_DEVBUF, sizeof(struct uaudio_alt));
@@ -3810,6 +3894,8 @@ uaudio_open(void *self, int flags)
 	if (usbd_is_dying(sc->udev))
 		return EIO;
 
+	usbd_ref_incr(sc->udev);
+
 	flags &= (FREAD | FWRITE);
 
 	for (p = sc->params_list; p != NULL; p = p->next) {
@@ -3832,6 +3918,7 @@ uaudio_open(void *self, int flags)
 		}
 	}
 
+	usbd_ref_decr(sc->udev);
 	return ENXIO;
 }
 
@@ -3841,6 +3928,7 @@ uaudio_close(void *self)
 	struct uaudio_softc *sc = self;
 
 	sc->mode = 0;
+	usbd_ref_decr(sc->udev);
 }
 
 int
@@ -3962,57 +4050,43 @@ uaudio_set_params(void *self, int setmode, int usemode,
 	return 0;
 }
 
-int
-uaudio_round_blocksize(void *self, int blksz)
+unsigned int
+uaudio_set_blksz(void *self, int mode,
+    struct audio_params *p, struct audio_params *r, unsigned int blksz)
 {
 	struct uaudio_softc *sc = self;
-	struct uaudio_alt *a;
-	unsigned int rbpf, pbpf;
-	unsigned int blksz_max;
+	unsigned int fps, fps_min;
+	unsigned int blksz_max, blksz_min;
 
 	/*
-	 * XXX: We don't know if we're called for the play or record
-	 * direction, so we can't calculate maximum blksz. This would
-	 * require a change in the audio(9) interface. Meanwhile, we
-	 * use the direction with the greatest sample size; it gives
-	 * the correct result: indeed, if we return:
-	 *
-	 *	blksz_max = max(pbpf, rbpf) * nsamp_max
-	 *
-	 * in turn the audio(4) layer will use:
-	 *
-	 *	min(blksz_max / pbpf, blksz_max / rbpf)
-	 *
-	 * which is exactly nsamp_max.
+	 * minimum block size is two transfers, see uaudio_stream_open()
 	 */
-
-	if (sc->mode & AUMODE_PLAY) {
-		a = sc->params->palt;
-		pbpf = a->bps * a->nch;
-	} else
-		pbpf = 1;
-
-	if (sc->mode & AUMODE_RECORD) {
-		a = sc->params->ralt;
-		rbpf = a->bps * a->nch;
-	} else
-		rbpf = 1;
+	fps_min = sc->ufps;
+	if (mode & AUMODE_PLAY) {
+		fps = sc->params->palt->fps;
+		if (fps_min > fps)
+			fps_min = fps;
+	}
+	if (mode & AUMODE_RECORD) {
+		fps = sc->params->ralt->fps;
+		if (fps_min > fps)
+			fps_min = fps;
+	}
+	blksz_min = (sc->rate * 2 + fps_min - 1) / fps_min;
 
 	/*
-	 * Limit the block size to (slightly more than):
-	 *
-	 *	sc->host_nframes / UAUDIO_NXFERS_MIN
-	 *
-	 * (micro-)frames of audio. Transfers are slightly larger than
-	 * the audio block size (few bytes to make the "safe" block
-	 * size plus one extra millisecond). We reserve an extra 15%
-	 * for that.
+	 * max block size is only limited by the number of frames the
+	 * host can schedule
 	 */
-	blksz_max = (pbpf > rbpf ? pbpf : rbpf) *
-	    sc->rate * (sc->host_nframes / UAUDIO_NXFERS_MIN) / sc->ufps *
-	    85 / 100;
+	blksz_max = sc->rate * (sc->host_nframes / UAUDIO_NXFERS_MIN) /
+	    sc->ufps * 85 / 100;
 
-	return blksz < blksz_max ? blksz : blksz_max;
+	if (blksz > blksz_max)
+		blksz = blksz_max;
+	else if (blksz < blksz_min)
+		blksz = blksz_min;
+
+	return blksz;
 }
 
 int
@@ -4115,9 +4189,8 @@ uaudio_get_props(void *self)
 }
 
 int
-uaudio_get_port(void *arg, struct mixer_ctrl *ctl)
+uaudio_get_port_do(struct uaudio_softc *sc, struct mixer_ctrl *ctl)
 {
-	struct uaudio_softc *sc = arg;
 	struct uaudio_unit *u;
 	struct uaudio_mixent *m;
 	unsigned char req_buf[4];
@@ -4185,9 +4258,8 @@ uaudio_get_port(void *arg, struct mixer_ctrl *ctl)
 }
 
 int
-uaudio_set_port(void *arg, struct mixer_ctrl *ctl)
+uaudio_set_port_do(struct uaudio_softc *sc, struct mixer_ctrl *ctl)
 {
-	struct uaudio_softc *sc = arg;
 	struct uaudio_unit *u;
 	struct uaudio_mixent *m;
 	unsigned char req_buf[4];
@@ -4244,20 +4316,14 @@ uaudio_set_port(void *arg, struct mixer_ctrl *ctl)
 }
 
 int
-uaudio_query_devinfo(void *arg, struct mixer_devinfo *devinfo)
+uaudio_query_devinfo_do(struct uaudio_softc *sc, struct mixer_devinfo *devinfo)
 {
-	struct uaudio_softc *sc = arg;
 	struct uaudio_unit *u;
 	struct uaudio_mixent *m;
 
 	devinfo->next = -1;
 	devinfo->prev = -1;
 	switch (devinfo->index) {
-	case UAUDIO_CLASS_REC:
-		strlcpy(devinfo->label.name, AudioCrecord, MAX_AUDIO_DEV_LEN);
-		devinfo->type = AUDIO_MIXER_CLASS;
-		devinfo->mixer_class = -1;
-		return 0;
 	case UAUDIO_CLASS_IN:
 		strlcpy(devinfo->label.name, AudioCinputs, MAX_AUDIO_DEV_LEN);
 		devinfo->type = AUDIO_MIXER_CLASS;
@@ -4283,8 +4349,13 @@ uaudio_query_devinfo(void *arg, struct mixer_devinfo *devinfo)
 		 */
 		strlcpy(devinfo->label.name, u->name, MAX_AUDIO_DEV_LEN);
 	} else {
-		snprintf(devinfo->label.name,
-		    MAX_AUDIO_DEV_LEN, "%s_%s", u->name, m->fname);
+		if (m->chan == -1) {
+			snprintf(devinfo->label.name, MAX_AUDIO_DEV_LEN,
+			    "%s_%s", u->name, m->fname);
+		} else {
+			snprintf(devinfo->label.name, MAX_AUDIO_DEV_LEN,
+			    "%s_%s%u", u->name, m->fname, m->chan);
+		}
 	}
 
 	devinfo->mixer_class = u->mixer_class;
@@ -4311,4 +4382,40 @@ uaudio_query_devinfo(void *arg, struct mixer_devinfo *devinfo)
 		break;
 	}
 	return 0;
+}
+
+int
+uaudio_get_port(void *arg, struct mixer_ctrl *ctl)
+{
+	struct uaudio_softc *sc = arg;
+	int rc;
+
+	usbd_ref_incr(sc->udev);
+	rc = uaudio_get_port_do(sc, ctl);
+	usbd_ref_decr(sc->udev);
+	return rc;
+}
+
+int
+uaudio_set_port(void *arg, struct mixer_ctrl *ctl)
+{
+	struct uaudio_softc *sc = arg;
+	int rc;
+
+	usbd_ref_incr(sc->udev);
+	rc = uaudio_set_port_do(sc, ctl);
+	usbd_ref_decr(sc->udev);
+	return rc;
+}
+
+int
+uaudio_query_devinfo(void *arg, struct mixer_devinfo *devinfo)
+{
+	struct uaudio_softc *sc = arg;
+	int rc;
+
+	usbd_ref_incr(sc->udev);
+	rc = uaudio_query_devinfo_do(sc, devinfo);
+	usbd_ref_decr(sc->udev);
+	return rc;
 }

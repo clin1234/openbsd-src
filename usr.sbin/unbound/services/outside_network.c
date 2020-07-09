@@ -293,6 +293,9 @@ outnet_tcp_take_into_use(struct waiting_tcp* w, uint8_t* pkt, size_t pkt_len)
 	/* open socket */
 	s = outnet_get_tcp_fd(&w->addr, w->addrlen, w->outnet->tcp_mss);
 
+	if(s == -1)
+		return 0;
+
 	if(!pick_outgoing_tcp(w, s))
 		return 0;
 
@@ -364,6 +367,8 @@ outnet_tcp_take_into_use(struct waiting_tcp* w, uint8_t* pkt, size_t pkt_len)
 			comm_point_close(pend->c);
 			return 0;
 		}
+		verbose(VERB_ALGO, "the query is using TLS encryption, for %s",
+			(w->tls_auth_name?w->tls_auth_name:"an unauthenticated connection"));
 #ifdef USE_WINSOCK
 		comm_point_tcp_win_bio_cb(pend->c, pend->c->ssl);
 #endif
@@ -404,6 +409,8 @@ outnet_tcp_take_into_use(struct waiting_tcp* w, uint8_t* pkt, size_t pkt_len)
 			}
 			SSL_set_verify(pend->c->ssl, SSL_VERIFY_PEER, NULL);
 		}
+#else
+		verbose(VERB_ALGO, "the query has an auth_name, but libssl has no call to perform TLS authentication");
 #endif /* HAVE_SSL_SET1_HOST */
 	}
 	w->pkt = NULL;
@@ -1967,7 +1974,6 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 
 	sq->pending = NULL; /* removed after callback */
 	if(error == NETEVENT_TIMEOUT) {
-		int rto = 0;
 		if(sq->status == serviced_query_UDP_EDNS && sq->last_rtt < 5000) {
 			/* fallback to 1480/1280 */
 			sq->status = serviced_query_UDP_EDNS_FRAG;
@@ -1983,9 +1989,9 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 			sq->status = serviced_query_UDP_EDNS;
 		}
 		sq->retry++;
-		if(!(rto=infra_rtt_update(outnet->infra, &sq->addr, sq->addrlen,
+		if(!infra_rtt_update(outnet->infra, &sq->addr, sq->addrlen,
 			sq->zone, sq->zonelen, sq->qtype, -1, sq->last_rtt,
-			(time_t)now.tv_sec)))
+			(time_t)now.tv_sec))
 			log_err("out of memory in UDP exponential backoff");
 		if(sq->retry < OUTBOUND_UDP_RETRY) {
 			log_name_addr(VERB_ALGO, "retry query", sq->qbuf+10,
@@ -2130,18 +2136,14 @@ outnet_serviced_query(struct outside_network* outnet,
 		if(outnet->do_udp && !(tcp_upstream || ssl_upstream)) {
 			if(!serviced_udp_send(sq, buff)) {
 				(void)rbtree_delete(outnet->serviced, sq);
-				free(sq->qbuf);
-				free(sq->zone);
-				free(sq);
+				serviced_node_del(&sq->node, NULL);
 				free(cb);
 				return NULL;
 			}
 		} else {
 			if(!serviced_tcp_send(sq, buff)) {
 				(void)rbtree_delete(outnet->serviced, sq);
-				free(sq->qbuf);
-				free(sq->zone);
-				free(sq);
+				serviced_node_del(&sq->node, NULL);
 				free(cb);
 				return NULL;
 			}
@@ -2277,11 +2279,60 @@ outnet_comm_point_for_udp(struct outside_network* outnet,
 	return cp;
 }
 
+/** setup SSL for comm point */
+static int
+setup_comm_ssl(struct comm_point* cp, struct outside_network* outnet,
+	int fd, char* host)
+{
+	cp->ssl = outgoing_ssl_fd(outnet->sslctx, fd);
+	if(!cp->ssl) {
+		log_err("cannot create SSL object");
+		return 0;
+	}
+#ifdef USE_WINSOCK
+	comm_point_tcp_win_bio_cb(cp, cp->ssl);
+#endif
+	cp->ssl_shake_state = comm_ssl_shake_write;
+	/* https verification */
+#ifdef HAVE_SSL_SET1_HOST
+	if((SSL_CTX_get_verify_mode(outnet->sslctx)&SSL_VERIFY_PEER)) {
+		/* because we set SSL_VERIFY_PEER, in netevent in
+		 * ssl_handshake, it'll check if the certificate
+		 * verification has succeeded */
+		/* SSL_VERIFY_PEER is set on the sslctx */
+		/* and the certificates to verify with are loaded into
+		 * it with SSL_load_verify_locations or
+		 * SSL_CTX_set_default_verify_paths */
+		/* setting the hostname makes openssl verify the
+		 * host name in the x509 certificate in the
+		 * SSL connection*/
+		if(!SSL_set1_host(cp->ssl, host)) {
+			log_err("SSL_set1_host failed");
+			return 0;
+		}
+	}
+#elif defined(HAVE_X509_VERIFY_PARAM_SET1_HOST)
+	/* openssl 1.0.2 has this function that can be used for
+	 * set1_host like verification */
+	if((SSL_CTX_get_verify_mode(outnet->sslctx)&SSL_VERIFY_PEER)) {
+		X509_VERIFY_PARAM* param = SSL_get0_param(cp->ssl);
+		X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+		if(!X509_VERIFY_PARAM_set1_host(param, host, strlen(host))) {
+			log_err("X509_VERIFY_PARAM_set1_host failed");
+			return 0;
+		}
+	}
+#else
+	(void)host;
+#endif /* HAVE_SSL_SET1_HOST */
+	return 1;
+}
+
 struct comm_point*
 outnet_comm_point_for_tcp(struct outside_network* outnet,
 	comm_point_callback_type* cb, void* cb_arg,
 	struct sockaddr_storage* to_addr, socklen_t to_addrlen,
-	sldns_buffer* query, int timeout)
+	sldns_buffer* query, int timeout, int ssl, char* host)
 {
 	struct comm_point* cp;
 	int fd = outnet_get_tcp_fd(to_addr, to_addrlen, outnet->tcp_mss);
@@ -2301,6 +2352,16 @@ outnet_comm_point_for_tcp(struct outside_network* outnet,
 	}
 	cp->repinfo.addrlen = to_addrlen;
 	memcpy(&cp->repinfo.addr, to_addr, to_addrlen);
+
+	/* setup for SSL (if needed) */
+	if(ssl) {
+		if(!setup_comm_ssl(cp, outnet, fd, host)) {
+			log_err("cannot setup XoT");
+			comm_point_delete(cp);
+			return NULL;
+		}
+	}
+
 	/* set timeout on TCP connection */
 	comm_point_start_listening(cp, fd, timeout);
 	/* copy scratch buffer to cp->buffer */
@@ -2357,48 +2418,11 @@ outnet_comm_point_for_http(struct outside_network* outnet,
 
 	/* setup for SSL (if needed) */
 	if(ssl) {
-		cp->ssl = outgoing_ssl_fd(outnet->sslctx, fd);
-		if(!cp->ssl) {
+		if(!setup_comm_ssl(cp, outnet, fd, host)) {
 			log_err("cannot setup https");
 			comm_point_delete(cp);
 			return NULL;
 		}
-#ifdef USE_WINSOCK
-		comm_point_tcp_win_bio_cb(cp, cp->ssl);
-#endif
-		cp->ssl_shake_state = comm_ssl_shake_write;
-		/* https verification */
-#ifdef HAVE_SSL_SET1_HOST
-		if((SSL_CTX_get_verify_mode(outnet->sslctx)&SSL_VERIFY_PEER)) {
-			/* because we set SSL_VERIFY_PEER, in netevent in
-			 * ssl_handshake, it'll check if the certificate
-			 * verification has succeeded */
-			/* SSL_VERIFY_PEER is set on the sslctx */
-			/* and the certificates to verify with are loaded into
-			 * it with SSL_load_verify_locations or
-			 * SSL_CTX_set_default_verify_paths */
-			/* setting the hostname makes openssl verify the
-			 * host name in the x509 certificate in the
-			 * SSL connection*/
-		 	if(!SSL_set1_host(cp->ssl, host)) {
-				log_err("SSL_set1_host failed");
-				comm_point_delete(cp);
-				return NULL;
-			}
-		}
-#elif defined(HAVE_X509_VERIFY_PARAM_SET1_HOST)
-		/* openssl 1.0.2 has this function that can be used for
-		 * set1_host like verification */
-		if((SSL_CTX_get_verify_mode(outnet->sslctx)&SSL_VERIFY_PEER)) {
-			X509_VERIFY_PARAM* param = SSL_get0_param(cp->ssl);
-			X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-			if(!X509_VERIFY_PARAM_set1_host(param, host, strlen(host))) {
-				log_err("X509_VERIFY_PARAM_set1_host failed");
-				comm_point_delete(cp);
-				return NULL;
-			}
-		}
-#endif /* HAVE_SSL_SET1_HOST */
 	}
 
 	/* set timeout on TCP connection */

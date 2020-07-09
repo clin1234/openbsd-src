@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile.i386,v 1.134 2019/04/14 14:07:06 deraadt Exp $
+#	$OpenBSD: Makefile.i386,v 1.138 2020/06/08 04:47:58 jsg Exp $
 
 # For instructions on building kernels consult the config(8) and options(4)
 # manual pages.
@@ -23,7 +23,8 @@ _archdir?=	$S/arch/${_arch}
 
 INCLUDES=	-nostdinc -I$S -I${.OBJDIR} -I$S/arch \
 		-I$S/dev/pci/drm/include \
-		-I$S/dev/pci/drm/include/uapi
+		-I$S/dev/pci/drm/include/uapi \
+		-I$S/dev/pci/drm/i915
 CPPFLAGS=	${INCLUDES} ${IDENT} ${PARAM} -D_KERNEL -MD -MP
 CWARNFLAGS=	-Werror -Wall -Wimplicit-function-declaration \
 		-Wno-uninitialized -Wno-pointer-sign \
@@ -66,7 +67,7 @@ HOSTED_C=	${HOSTCC} ${HOSTED_CFLAGS} ${HOSTED_CPPFLAGS} -c $<
 
 NORMAL_C_NOP=	${CC} ${CFLAGS} ${CPPFLAGS} -c $<
 NORMAL_C=	${CC} ${CFLAGS} ${CPPFLAGS} ${PROF} -c $<
-NORMAL_S=	${CC} ${AFLAGS} ${CPPFLAGS} -c $<
+NORMAL_S=	${CC} ${AFLAGS} ${CPPFLAGS} ${PROF} -c $<
 
 %OBJS
 
@@ -165,14 +166,13 @@ depend obj:
 
 locore0.o: ${_machdir}/${_mach}/locore0.S assym.h
 locore.o mutex.o in_cksum.o mptramp.o: assym.h
-kvm86call.o acpi_wakecode.o: assym.h
+acpi_wakecode.o: assym.h
 
 hardlink-obsd:
 	[[ ! -f /bsd ]] || cmp -s bsd /bsd || ln -f /bsd /obsd
 
 newinstall:
-	umask 077 && cp bsd /nbsd && mv /nbsd /bsd && \
-	    sha256 -h /var/db/kernel.SHA256 /bsd
+	install -F -m 700 bsd /bsd && sha256 -h /var/db/kernel.SHA256 /bsd
 
 install: update-link hardlink-obsd newinstall
 

@@ -1,7 +1,7 @@
-/*	$OpenBSD: mandoc.c,v 1.82 2018/12/30 00:48:47 schwarze Exp $ */
+/*	$OpenBSD: mandoc.c,v 1.85 2020/01/19 16:16:32 schwarze Exp $ */
 /*
  * Copyright (c) 2008-2011, 2014 Kristaps Dzonsons <kristaps@bsd.lv>
- * Copyright (c) 2011-2015, 2017, 2018 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2011-2015, 2017-2020 Ingo Schwarze <schwarze@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -489,9 +489,10 @@ time2a(time_t t)
 	size_t		 ssz;
 	int		 isz;
 
+	buf = NULL;
 	tm = localtime(&t);
 	if (tm == NULL)
-		return NULL;
+		goto fail;
 
 	/*
 	 * Reserve space:
@@ -515,7 +516,8 @@ time2a(time_t t)
 	 * of looking at LC_TIME.
 	 */
 
-	if ((isz = snprintf(p, 4 + 1, "%d, ", tm->tm_mday)) == -1)
+	isz = snprintf(p, 4 + 1, "%d, ", tm->tm_mday);
+	if (isz < 0 || isz > 4)
 		goto fail;
 	p += isz;
 
@@ -525,46 +527,63 @@ time2a(time_t t)
 
 fail:
 	free(buf);
-	return NULL;
+	return mandoc_strdup("");
 }
 
 char *
-mandoc_normdate(struct roff_man *man, char *in, int ln, int pos)
+mandoc_normdate(struct roff_node *nch, struct roff_node *nbl)
 {
 	char		*cp;
 	time_t		 t;
 
-	/* No date specified: use today's date. */
+	/* No date specified. */
 
-	if (in == NULL || *in == '\0' || strcmp(in, "$" "Mdocdate$") == 0) {
-		mandoc_msg(MANDOCERR_DATE_MISSING, ln, pos, NULL);
-		return time2a(time(NULL));
+	if (nch == NULL) {
+		if (nbl == NULL)
+			mandoc_msg(MANDOCERR_DATE_MISSING, 0, 0, NULL);
+		else
+			mandoc_msg(MANDOCERR_DATE_MISSING, nbl->line,
+			    nbl->pos, "%s", roff_name[nbl->tok]);
+		return mandoc_strdup("");
 	}
+	if (*nch->string == '\0') {
+		mandoc_msg(MANDOCERR_DATE_MISSING, nch->line,
+		    nch->pos, "%s", roff_name[nbl->tok]);
+		return mandoc_strdup("");
+	}
+	if (strcmp(nch->string, "$" "Mdocdate$") == 0)
+		return time2a(time(NULL));
 
 	/* Valid mdoc(7) date format. */
 
-	if (a2time(&t, "$" "Mdocdate: %b %d %Y $", in) ||
-	    a2time(&t, "%b %d, %Y", in)) {
+	if (a2time(&t, "$" "Mdocdate: %b %d %Y $", nch->string) ||
+	    a2time(&t, "%b %d, %Y", nch->string)) {
 		cp = time2a(t);
 		if (t > time(NULL) + 86400)
-			mandoc_msg(MANDOCERR_DATE_FUTURE, ln, pos, "%s", cp);
-		else if (*in != '$' && strcmp(in, cp) != 0)
-			mandoc_msg(MANDOCERR_DATE_NORM, ln, pos, "%s", cp);
+			mandoc_msg(MANDOCERR_DATE_FUTURE, nch->line,
+			    nch->pos, "%s %s", roff_name[nbl->tok], cp);
+		else if (*nch->string != '$' &&
+		    strcmp(nch->string, cp) != 0)
+			mandoc_msg(MANDOCERR_DATE_NORM, nch->line,
+			    nch->pos, "%s %s", roff_name[nbl->tok], cp);
 		return cp;
 	}
 
 	/* In man(7), do not warn about the legacy format. */
 
-	if (a2time(&t, "%Y-%m-%d", in) == 0)
-		mandoc_msg(MANDOCERR_DATE_BAD, ln, pos, "%s", in);
+	if (a2time(&t, "%Y-%m-%d", nch->string) == 0)
+		mandoc_msg(MANDOCERR_DATE_BAD, nch->line, nch->pos,
+		    "%s %s", roff_name[nbl->tok], nch->string);
 	else if (t > time(NULL) + 86400)
-		mandoc_msg(MANDOCERR_DATE_FUTURE, ln, pos, "%s", in);
-	else if (man->meta.macroset == MACROSET_MDOC)
-		mandoc_msg(MANDOCERR_DATE_LEGACY, ln, pos, "Dd %s", in);
+		mandoc_msg(MANDOCERR_DATE_FUTURE, nch->line, nch->pos,
+		    "%s %s", roff_name[nbl->tok], nch->string);
+	else if (nbl->tok == MDOC_Dd)
+		mandoc_msg(MANDOCERR_DATE_LEGACY, nch->line, nch->pos,
+		    "Dd %s", nch->string);
 
 	/* Use any non-mdoc(7) date verbatim. */
 
-	return mandoc_strdup(in);
+	return mandoc_strdup(nch->string);
 }
 
 int

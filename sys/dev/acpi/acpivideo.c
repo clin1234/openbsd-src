@@ -1,7 +1,7 @@
-/*	$OpenBSD: acpivideo.c,v 1.11 2017/06/30 06:25:29 mlarkin Exp $	*/
+/*	$OpenBSD: acpivideo.c,v 1.13 2020/04/06 00:01:08 pirofti Exp $	*/
 /*
  * Copyright (c) 2008 Federico G. Schwindt <fgsch@openbsd.org>
- * Copyright (c) 2009 Paul Irofti <pirofti@openbsd.org>
+ * Copyright (c) 2009 Paul Irofti <paul@irofti.net>
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -149,7 +149,7 @@ acpi_foundvout(struct aml_node *node, void *arg)
 	if (node->parent != sc->sc_devnode)
 		return (0);
 
-	if (aml_searchname(node, "_BCM") && aml_searchname(node, "_BQC")) {
+	if (aml_searchname(node, "_BCM")) {
 		memset(&aaa, 0, sizeof(aaa));
 		aaa.aaa_iot = sc->sc_acpi->sc_iot;
 		aaa.aaa_memt = sc->sc_acpi->sc_memt;

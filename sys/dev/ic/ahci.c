@@ -1,4 +1,4 @@
-/*	$OpenBSD: ahci.c,v 1.32 2017/08/21 21:43:46 jmatthew Exp $ */
+/*	$OpenBSD: ahci.c,v 1.36 2020/03/14 18:53:13 krw Exp $ */
 
 /*
  * Copyright (c) 2006 David Gwynne <dlg@openbsd.org>
@@ -922,11 +922,6 @@ ahci_default_port_start(struct ahci_port *ap, int fre_only)
 	}
 #endif
 
-	/* Wait for CR to come on */
-	if (!fre_only &&
-	    ahci_pwait_set(ap, AHCI_PREG_CMD, AHCI_PREG_CMD_CR, 1))
-		return (1);
-
 	return (0);
 }
 
@@ -1136,7 +1131,7 @@ ahci_pmp_port_softreset(struct ahci_port *ap, int pmp_port)
 		ahci_pmp_write(ap, pmp_port, SATA_PMREG_SERR, -1);
 
 		/* send first softreset FIS */
-		ccb = ahci_get_pmp_ccb(ap);
+		ccb = ahci_get_pmp_ccb(ap);	/* Always returns non-NULL. */
 		cmd_slot = ccb->ccb_cmd_hdr;
 		memset(ccb->ccb_cmd_table, 0, sizeof(struct ahci_cmd_table));
 
@@ -1156,7 +1151,7 @@ ahci_pmp_port_softreset(struct ahci_port *ap, int pmp_port)
 		    PORTNAME(ap), pmp_port);
 		if (ahci_poll(ccb, 1000, ahci_pmp_probe_timeout) != 0) {
 			printf("%s.%d: PMP port softreset cmd failed\n",
-			       PORTNAME(ap), pmp_port);
+			    PORTNAME(ap), pmp_port);
 			rc = EBUSY;
 			if (count > 0) {
 				/* probably delay a while to allow
@@ -1213,7 +1208,7 @@ int
 ahci_pmp_port_probe(struct ahci_port *ap, int pmp_port)
 {
 	int sig;
-	
+
 	ap->ap_state = AP_S_PMP_PORT_PROBE;
 
 	DPRINTF(AHCI_D_VERBOSE, "%s.%d: probing pmp port\n", PORTNAME(ap),
@@ -1298,8 +1293,9 @@ ahci_pmp_probe_timeout(void *cookie)
 		ap->ap_active &= ~(1 << ccb->ccb_slot);
 		KASSERT(ap->ap_active_cnt > 0);
 		--ap->ap_active_cnt;
-		DPRINTF(AHCI_D_VERBOSE, "%s: timed out %d, active %x, count %d\n",
-		    PORTNAME(ap), ccb->ccb_slot, ap->ap_active, ap->ap_active_cnt);
+		DPRINTF(AHCI_D_VERBOSE, "%s: timed out %d, active %x, "
+		    "active_cnt %d\n", PORTNAME(ap), ccb->ccb_slot,
+		    ap->ap_active, ap->ap_active_cnt);
 		break;
 
 	default:
@@ -1355,7 +1351,7 @@ ahci_pmp_port_portreset(struct ahci_port *ap, int pmp_port)
 		data |= AHCI_PREG_SCTL_SPD_GEN1;
 	} else
 		data |= AHCI_PREG_SCTL_SPD_ANY;
-	
+
 	if (ahci_pmp_write(ap, pmp_port, SATA_PMREG_SCTL, data))
 		goto err;
 
@@ -1589,7 +1585,7 @@ ahci_port_detect_pmp(struct ahci_port *ap)
 		if (r & AHCI_PREG_SERR_DIAG_X)
 			ahci_pwrite(ap, AHCI_PREG_SERR,
 			    AHCI_PREG_SERR_DIAG_X);
-		
+
 		/* Request CLO */
 		ahci_port_clo(ap);
 
@@ -1622,7 +1618,7 @@ ahci_port_detect_pmp(struct ahci_port *ap)
 		/* Prep first command with SRST feature &
 		 * clear busy/reset flags
 		 */
-		ccb = ahci_get_pmp_ccb(ap);
+		ccb = ahci_get_pmp_ccb(ap);	/* Always returns non-NULL. */
 		cmd_slot = ccb->ccb_cmd_hdr;
 		memset(ccb->ccb_cmd_table, 0,
 		    sizeof(struct ahci_cmd_table));
@@ -2482,7 +2478,7 @@ ahci_put_err_ccb(struct ahci_ccb *ccb)
 	/* No commands may be active on the chip */
 	sact = ahci_pread(ap, AHCI_PREG_SACT);
 	if (sact != 0)
-		printf("ahci_port_err_ccb_restore but SACT %08x != 0?\n", sact);
+		printf("ahci_put_err_ccb but SACT %08x != 0?\n", sact);
 	KASSERT(ahci_pread(ap, AHCI_PREG_CI) == 0);
 
 #ifdef DIAGNOSTIC
@@ -2536,14 +2532,14 @@ ahci_put_pmp_ccb(struct ahci_ccb *ccb)
 {
 	struct ahci_port *ap = ccb->ccb_port;
 	u_int32_t sact;
-	
+
 	/* make sure this is the right ccb */
 	KASSERT(ccb == &ap->ap_ccbs[1]);
 
 	/* No commands may be active on the chip */
 	sact = ahci_pread(ap, AHCI_PREG_SACT);
 	if (sact != 0)
-		printf("ahci_port_err_ccb_restore but SACT %08x != 0?\n", sact);
+		printf("ahci_put_pmp_ccb but SACT %08x != 0?\n", sact);
 	KASSERT(ahci_pread(ap, AHCI_PREG_CI) == 0);
 
 	ccb->ccb_xa.state = ATA_S_PUT;
@@ -3009,15 +3005,11 @@ ahci_pmp_read(struct ahci_port *ap, int target, int which, u_int32_t *datap)
 	struct ata_fis_h2d *fis;
 	int error;
 
-	ccb = ahci_get_pmp_ccb(ap);
-	if (ccb == NULL) {
-		printf("%s: NULL ccb!\n", PORTNAME(ap));
-		return (1);
-	}
+	ccb = ahci_get_pmp_ccb(ap);	/* Always returns non-NULL. */
 	ccb->ccb_xa.flags = ATA_F_POLL | ATA_F_GET_RFIS;
 	ccb->ccb_xa.pmp_port = SATA_PMP_CONTROL_PORT;
 	ccb->ccb_xa.state = ATA_S_PENDING;
-	
+
 	memset(ccb->ccb_cmd_table, 0, sizeof(struct ahci_cmd_table));
 	fis = (struct ata_fis_h2d *)ccb->ccb_cmd_table->cfis;
 	fis->type = ATA_FIS_TYPE_H2D;
@@ -3047,11 +3039,7 @@ ahci_pmp_write(struct ahci_port *ap, int target, int which, u_int32_t data)
 	struct ata_fis_h2d *fis;
 	int error;
 
-	ccb = ahci_get_pmp_ccb(ap);
-	if (ccb == NULL) {
-		printf("%s: NULL ccb!\n", PORTNAME(ap));
-		return (1);
-	}
+	ccb = ahci_get_pmp_ccb(ap);	/* Always returns non-NULL. */
 	ccb->ccb_xa.flags = ATA_F_POLL;
 	ccb->ccb_xa.pmp_port = SATA_PMP_CONTROL_PORT;
 	ccb->ccb_xa.state = ATA_S_PENDING;
@@ -3150,11 +3138,9 @@ ahci_hibernate_io_poll(struct ahci_port *ap, struct ahci_ccb *ccb)
 	if (is & AHCI_PREG_IS_DHRS) {
 		u_int32_t tfd;
 		u_int32_t cmd;
-		u_int32_t serr;
 
 		tfd = ahci_pread(ap, AHCI_PREG_TFD);
 		cmd = ahci_pread(ap, AHCI_PREG_CMD);
-		serr = ahci_pread(ap, AHCI_PREG_SERR);
 		if ((tfd & AHCI_PREG_TFD_STS_ERR) &&
 		    (cmd & AHCI_PREG_CMD_CR) == 0) {
 			process_error = 1;
@@ -3191,7 +3177,7 @@ void
 ahci_hibernate_load_prdt(struct ahci_ccb *ccb)
 {
 	struct ata_xfer			*xa = &ccb->ccb_xa;
-	struct ahci_prdt		*prdt = ccb->ccb_cmd_table->prdt, *prd;
+	struct ahci_prdt		*prdt = ccb->ccb_cmd_table->prdt;
 	struct ahci_cmd_hdr		*cmd_slot = ccb->ccb_cmd_hdr;
 	int				i;
 	paddr_t				data_phys;
@@ -3208,12 +3194,10 @@ ahci_hibernate_load_prdt(struct ahci_ccb *ccb)
 	/* derived from i386/amd64 _bus_dma_load_buffer;
 	 * for amd64 the buffer will always be dma safe.
 	 */
-	 
+
 	buflen = xa->datalen;
 	data_addr = (vaddr_t)xa->data;
 	for (i = 0; buflen > 0; i++) {
-		prd = &prdt[i];
-
 		pmap_extract(pmap_kernel(), data_addr, &data_phys);
 		data_bus_phys = data_phys;
 
@@ -3298,7 +3282,7 @@ ahci_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr, size_t size,
 		}
 
 		my->ap = sc->sc_ports[port];
-		
+
 		/* we're going to use the first command slot,
 		 * so ensure it's not already in use
 		 */
@@ -3347,7 +3331,7 @@ ahci_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr, size_t size,
 
 		my->ccb->ccb_cmd_hdr = &my->cmd_hdr[0];
 
-		/* use existing cmd table - don't know why moving to a new one fails */
+		/* use existing cmd table - moving to a new one fails */
 		my->ccb->ccb_cmd_table = my->ap->ap_ccbs[0].ccb_cmd_table;
 		pmap_extract(pmap_kernel(),
 		    (vaddr_t)AHCI_DMA_KVA(my->ap->ap_dmamem_cmd_table),

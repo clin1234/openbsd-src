@@ -1,4 +1,4 @@
-/*	$OpenBSD: exec.h,v 1.38 2018/06/01 03:27:59 mortimer Exp $	*/
+/*	$OpenBSD: exec.h,v 1.42 2020/06/28 09:29:57 kettenis Exp $	*/
 /*	$NetBSD: exec.h,v 1.59 1996/02/09 18:25:09 christos Exp $	*/
 
 /*-
@@ -84,7 +84,6 @@ typedef int (*exec_makecmds_fcn)(struct proc *, struct exec_package *);
 struct execsw {
 	u_int	es_hdrsz;		/* size of header for this format */
 	exec_makecmds_fcn es_check;	/* function to check exec format */
-	struct emul *es_emul;		/* emulation */
 };
 
 struct exec_vmcmd {
@@ -99,6 +98,7 @@ struct exec_vmcmd {
 #define VMCMD_RELATIVE  0x0001  /* ev_addr is relative to base entry */
 #define VMCMD_BASE      0x0002  /* marks a base entry */
 #define VMCMD_STACK     0x0004  /* create with UVM_FLAG_STACK */
+#define VMCMD_SYSCALL   0x0008  /* create with UVM_FLAG_SYSCALL */
 };
 
 #define	EXEC_DEFAULT_VMCMD_SETSIZE	8	/* # of cmds in set to start */
@@ -179,18 +179,18 @@ void	new_vmcmd(struct exec_vmcmd_set *evsp,
 #define NEW_VMCMD(evsp,proc,len,addr,vp,offset,prot) \
 	NEW_VMCMD2(evsp,proc,len,addr,vp,offset,prot,0)
 #define	NEW_VMCMD2(evsp,proc,len,addr,vp,offset,prot,flags) do { \
-	struct exec_vmcmd *vcp; \
+	struct exec_vmcmd *__vcp; \
 	if ((evsp)->evs_used >= (evsp)->evs_cnt) \
 		vmcmdset_extend(evsp); \
-	vcp = &(evsp)->evs_cmds[(evsp)->evs_used++]; \
-	vcp->ev_proc = (proc); \
-	vcp->ev_len = (len); \
-	vcp->ev_addr = (addr); \
-	if ((vcp->ev_vp = (vp)) != NULLVP) \
+	__vcp = &(evsp)->evs_cmds[(evsp)->evs_used++]; \
+	__vcp->ev_proc = (proc); \
+	__vcp->ev_len = (len); \
+	__vcp->ev_addr = (addr); \
+	if ((__vcp->ev_vp = (vp)) != NULLVP) \
 		vref(vp); \
-	vcp->ev_offset = (offset); \
-	vcp->ev_prot = (prot); \
-	vcp->ev_flags = (flags); \
+	__vcp->ev_offset = (offset); \
+	__vcp->ev_prot = (prot); \
+	__vcp->ev_flags = (flags); \
 } while (0)
 
 #endif /* DEBUG */
@@ -288,6 +288,7 @@ struct exec {
 #define	MID_AMD64	157	/* AMD64 */
 #define	MID_MIPS64	158	/* big-endian MIPS64 */
 #define	MID_ARM64	159	/* ARM64 */
+#define	MID_POWERPC64	160	/* big-endian 64-bit PowerPC */
 #define	MID_HP200	200	/* hp200 (68010) BSD binary */
 #define	MID_HP300	300	/* hp300 (68020+68881) BSD binary */
 #define	MID_HPUX	0x20C	/* hp200/300 HP-UX binary */

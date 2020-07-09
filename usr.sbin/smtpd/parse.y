@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.252 2019/05/20 07:04:13 gilles Exp $	*/
+/*	$OpenBSD: parse.y,v 1.278 2020/06/01 05:21:30 chrisz Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -105,10 +105,9 @@ static struct ca	*sca;
 
 struct dispatcher	*dispatcher;
 struct rule		*rule;
-struct processor	*processor;
+struct filter_proc	*processor;
 struct filter_config	*filter_config;
 static uint32_t		 last_dynchain_id = 1;
-static uint32_t		 last_dynproc_id = 1;
 
 enum listen_options {
 	LO_FAMILY	= 0x000001,
@@ -125,7 +124,8 @@ enum listen_options {
 	LO_SENDERS	= 0x000800,
 	LO_RECEIVEDAUTH = 0x001000,
 	LO_MASQUERADE	= 0x002000,
-	LO_CA		= 0x010000
+	LO_CA		= 0x004000,
+	LO_PROXY       	= 0x008000,
 };
 
 static struct listen_opts {
@@ -174,7 +174,7 @@ typedef struct {
 %}
 
 %token	ACTION ALIAS ANY ARROW AUTH AUTH_OPTIONAL
-%token	BACKUP BOUNCE BUILTIN
+%token	BACKUP BOUNCE BYPASS
 %token	CA CERT CHAIN CHROOT CIPHERS COMMIT COMPRESSION CONNECT
 %token	DATA DATA_LINE DHE DISCONNECT DOMAIN
 %token	EHLO ENABLE ENCRYPTION ERROR EXPAND_ONLY 
@@ -188,10 +188,10 @@ typedef struct {
 %token	MAIL_FROM MAILDIR MASK_SRC MASQUERADE MATCH MAX_MESSAGE_SIZE MAX_DEFERRED MBOX MDA MTA MX
 %token	NO_DSN NO_VERIFY NOOP
 %token	ON
-%token	PKI PORT PROC PROC_EXEC
+%token	PHASE PKI PORT PROC PROC_EXEC PROXY_V2
 %token	QUEUE QUIT
 %token	RCPT_TO RDNS RECIPIENT RECEIVEDAUTH REGEX RELAY REJECT REPORT REWRITE RSET
-%token	SCHEDULER SENDER SENDERS SMTP SMTP_IN SMTP_OUT SMTPS SOCKET SRC SUB_ADDR_DELIM
+%token	SCHEDULER SENDER SENDERS SMTP SMTP_IN SMTP_OUT SMTPS SOCKET SRC SRS SUB_ADDR_DELIM
 %token	TABLE TAG TAGGED TLS TLS_REQUIRE TTL
 %token	USER USERBASE
 %token	VERIFY VIRTUAL
@@ -217,6 +217,7 @@ grammar		: /* empty */
 		| grammar queue '\n'
 		| grammar scheduler '\n'
 		| grammar smtp '\n'
+		| grammar srs '\n'
 		| grammar listen '\n'
 		| grammar table '\n'
 		| grammar dispatcher '\n'
@@ -433,7 +434,7 @@ pki_params_opt pki_params
 
 proc:
 PROC STRING STRING {
-	if (dict_get(conf->sc_processors_dict, $2)) {
+	if (dict_get(conf->sc_filter_processes_dict, $2)) {
 		yyerror("processor already exists with that name: %s", $2);
 		free($2);
 		free($3);
@@ -442,7 +443,7 @@ PROC STRING STRING {
 	processor = xcalloc(1, sizeof *processor);
 	processor->command = $3;
 } proc_params {
-	dict_set(conf->sc_processors_dict, $2, processor);
+	dict_set(conf->sc_filter_processes_dict, $2, processor);
 	processor = NULL;
 }
 ;
@@ -528,7 +529,7 @@ SMTP LIMIT limits_smtp
 		free($3);
 		YYERROR;
 	}
-	if (isspace((int)*$3) ||  !isprint((int)*$3) || *$3== '@') {
+	if (isspace((unsigned char)*$3) || !isprint((unsigned char)*$3) || *$3 == '@') {
 		yyerror("sub-addr-delim uses invalid character");
 		free($3);
 		YYERROR;
@@ -537,10 +538,35 @@ SMTP LIMIT limits_smtp
 }
 ;
 
+srs:
+SRS KEY STRING {
+	conf->sc_srs_key = $3;
+}
+| SRS KEY BACKUP STRING {
+	conf->sc_srs_key_backup = $4;
+}
+| SRS TTL STRING {
+	conf->sc_srs_ttl = delaytonum($3);
+	if (conf->sc_srs_ttl == -1) {
+		yyerror("ttl delay \"%s\" is invalid", $3);
+		free($3);
+		YYERROR;
+	}
+
+	conf->sc_srs_ttl /= 86400;
+	if (conf->sc_srs_ttl == 0) {
+		yyerror("ttl delay \"%s\" is too short", $3);
+		free($3);
+		YYERROR;
+	}
+	free($3);
+}
+;
+
 
 dispatcher_local_option:
 USER STRING {
-	if (dispatcher->u.local.requires_root) {
+	if (dispatcher->u.local.is_mbox) {
 		yyerror("user may not be specified for this dispatcher");
 		YYERROR;
 	}
@@ -636,9 +662,8 @@ dispatcher_local_option dispatcher_local_options
 
 dispatcher_local:
 MBOX {
-	dispatcher->u.local.requires_root = 1;
-	dispatcher->u.local.user = xstrdup("root");
-	asprintf(&dispatcher->u.local.command, "/usr/libexec/mail.local -f %%{mbox.from} %%{user.username}");
+	dispatcher->u.local.is_mbox = 1;
+	asprintf(&dispatcher->u.local.command, "/usr/libexec/mail.local -f %%{mbox.from} -- %%{user.username}");
 } dispatcher_local_options
 | MAILDIR {
 	asprintf(&dispatcher->u.local.command, "/usr/libexec/mail.maildir");
@@ -664,11 +689,13 @@ MBOX {
 } dispatcher_local_options
 | LMTP STRING {
 	asprintf(&dispatcher->u.local.command,
-	    "/usr/libexec/mail.lmtp -f \"%%{sender}\" -d %s %%{user.username}", $2);
+	    "/usr/libexec/mail.lmtp -d %s -u", $2);
+	dispatcher->u.local.user = SMTPD_USER;
 } dispatcher_local_options
 | LMTP STRING RCPT_TO {
 	asprintf(&dispatcher->u.local.command,
-	    "/usr/libexec/mail.lmtp -f \"%%{sender}\" -d %s %%{dest}", $2);
+	    "/usr/libexec/mail.lmtp -d %s -r", $2);
+	dispatcher->u.local.user = SMTPD_USER;
 } dispatcher_local_options
 | MDA STRING {
 	asprintf(&dispatcher->u.local.command,
@@ -792,6 +819,27 @@ HELO STRING {
 
 	dispatcher->u.remote.smarthost = strdup(t->t_name);
 }
+| DOMAIN tables {
+	struct table   *t = $2;
+
+	if (dispatcher->u.remote.smarthost) {
+		yyerror("host mapping already specified for this dispatcher");
+		YYERROR;
+	}
+	if (dispatcher->u.remote.backup) {
+		yyerror("backup and domain are mutually exclusive");
+		YYERROR;
+	}
+
+	if (!table_check_use(t, T_DYNAMIC|T_HASH, K_RELAYHOST)) {
+		yyerror("table \"%s\" may not be used for host lookups",
+		    t->t_name);
+		YYERROR;
+	}
+
+	dispatcher->u.remote.smarthost = strdup(t->t_name);
+	dispatcher->u.remote.smarthost_domain = 1;
+}
 | TLS {
 	if (dispatcher->u.remote.tls_required == 1) {
 		yyerror("tls already specified for this dispatcher");
@@ -829,6 +877,57 @@ HELO STRING {
 	}
 
 	dispatcher->u.remote.auth = strdup(t->t_name);
+}
+| FILTER STRING {
+	struct filter_config *fc;
+
+	if (dispatcher->u.remote.filtername) {
+		yyerror("filter already specified for this dispatcher");
+		YYERROR;
+	}
+
+	if ((fc = dict_get(conf->sc_filters_dict, $2)) == NULL) {
+		yyerror("no filter exist with that name: %s", $2);
+		free($2);
+		YYERROR;
+	}
+	fc->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_OUT;
+	dispatcher->u.remote.filtername = $2;
+}
+| FILTER {
+	char	buffer[128];
+	char	*filtername;
+
+	if (dispatcher->u.remote.filtername) {
+		yyerror("filter already specified for this dispatcher");
+		YYERROR;
+	}
+
+	do {
+		(void)snprintf(buffer, sizeof buffer, "<dynchain:%08x>", last_dynchain_id++);
+	} while (dict_check(conf->sc_filters_dict, buffer));
+
+	filtername = xstrdup(buffer);
+	filter_config = xcalloc(1, sizeof *filter_config);
+	filter_config->filter_type = FILTER_TYPE_CHAIN;
+	filter_config->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_OUT;
+	dict_init(&filter_config->chain_procs);
+	dispatcher->u.remote.filtername = filtername;
+} '{' filter_list '}' {
+	dict_set(conf->sc_filters_dict, dispatcher->u.remote.filtername, filter_config);
+	filter_config = NULL;
+}
+| SRS {
+	if (conf->sc_srs_key == NULL) {
+		yyerror("an srs key is required for srs to be specified in an action");
+		YYERROR;
+	}
+	if (dispatcher->u.remote.srs == 1) {
+		yyerror("srs already specified for this dispatcher");
+		YYERROR;
+	}
+
+	dispatcher->u.remote.srs = 1;
 }
 ;
 
@@ -983,7 +1082,7 @@ negation TAG REGEX tables {
 		YYERROR;
 	}
 
-	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_CREDENTIALS)) {
+       	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_STRING|K_CREDENTIALS)) {
 		yyerror("table \"%s\" may not be used for auth lookups",
 		    t->t_name);
 		YYERROR;
@@ -1144,7 +1243,14 @@ negation TAG REGEX tables {
 	rule->flag_from_regex = 1;
 	rule->table_from = strdup(t->t_name);
 }
-
+| negation FROM RDNS {
+	if (rule->flag_from) {
+		yyerror("from already specified for this rule");
+		YYERROR;
+	}
+	rule->flag_from = $1 ? -1 : 1;
+	rule->flag_from_rdns = 1;
+}
 | negation FROM RDNS tables {
 	struct table   *t = $4;
 
@@ -1183,6 +1289,101 @@ negation TAG REGEX tables {
 	rule->table_from = strdup(t->t_name);
 }
 
+| negation FROM AUTH {
+	struct table	*anyhost = table_find(conf, "<anyhost>");
+
+	if (rule->flag_from) {
+		yyerror("from already specified for this rule");
+		YYERROR;
+	}
+
+	rule->flag_from = 1;
+	rule->table_from = strdup(anyhost->t_name);
+	rule->flag_smtp_auth = $1 ? -1 : 1;
+}
+| negation FROM AUTH tables {
+	struct table	*anyhost = table_find(conf, "<anyhost>");
+	struct table	*t = $4;
+
+	if (rule->flag_from) {
+		yyerror("from already specified for this rule");
+		YYERROR;
+	}
+
+       	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_STRING|K_CREDENTIALS)) {
+		yyerror("table \"%s\" may not be used for from lookups",
+		    t->t_name);
+		YYERROR;
+	}
+
+	rule->flag_from = 1;
+	rule->table_from = strdup(anyhost->t_name);
+	rule->flag_smtp_auth = $1 ? -1 : 1;
+	rule->table_smtp_auth = strdup(t->t_name);
+}
+| negation FROM AUTH REGEX tables {
+	struct table	*anyhost = table_find(conf, "<anyhost>");
+	struct table	*t = $5;
+
+	if (rule->flag_from) {
+		yyerror("from already specified for this rule");
+		YYERROR;
+	}
+
+	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_REGEX)) {
+        	yyerror("table \"%s\" may not be used for from lookups",
+		    t->t_name);
+		YYERROR;
+	}
+
+	rule->flag_from = 1;
+	rule->table_from = strdup(anyhost->t_name);
+	rule->flag_smtp_auth = $1 ? -1 : 1;
+	rule->flag_smtp_auth_regex = 1;
+	rule->table_smtp_auth = strdup(t->t_name);
+}
+
+| negation FROM MAIL_FROM tables {
+	struct table	*anyhost = table_find(conf, "<anyhost>");
+	struct table	*t = $4;
+
+	if (rule->flag_from) {
+		yyerror("from already specified for this rule");
+		YYERROR;
+	}
+
+	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_MAILADDR)) {
+		yyerror("table \"%s\" may not be used for from lookups",
+		    t->t_name);
+		YYERROR;
+	}
+
+	rule->flag_from = 1;
+	rule->table_from = strdup(anyhost->t_name);
+	rule->flag_smtp_mail_from = $1 ? -1 : 1;
+	rule->table_smtp_mail_from = strdup(t->t_name);
+}
+| negation FROM MAIL_FROM REGEX tables {
+	struct table	*anyhost = table_find(conf, "<anyhost>");
+	struct table	*t = $5;
+
+	if (rule->flag_from) {
+		yyerror("from already specified for this rule");
+		YYERROR;
+	}
+
+	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_REGEX)) {
+		yyerror("table \"%s\" may not be used for from lookups",
+		    t->t_name);
+		YYERROR;
+	}
+
+	rule->flag_from = 1;
+	rule->table_from = strdup(anyhost->t_name);
+	rule->flag_smtp_mail_from = $1 ? -1 : 1;
+	rule->flag_smtp_mail_from_regex = 1;
+	rule->table_smtp_mail_from = strdup(t->t_name);
+}
 
 | negation FOR LOCAL {
 	struct table   *t = table_find(conf, "<localnames>");
@@ -1239,6 +1440,47 @@ negation TAG REGEX tables {
 	rule->flag_for_regex = 1;
 	rule->table_for = strdup(t->t_name);
 }
+| negation FOR RCPT_TO tables {
+	struct table	*anyhost = table_find(conf, "<anydestination>");
+	struct table	*t = $4;
+
+	if (rule->flag_for) {
+		yyerror("for already specified for this rule");
+		YYERROR;
+	}
+
+	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_MAILADDR)) {
+		yyerror("table \"%s\" may not be used for for lookups",
+		    t->t_name);
+		YYERROR;
+	}
+
+	rule->flag_for = 1;
+	rule->table_for = strdup(anyhost->t_name);
+	rule->flag_smtp_rcpt_to = $1 ? -1 : 1;
+	rule->table_smtp_rcpt_to = strdup(t->t_name);
+}
+| negation FOR RCPT_TO REGEX tables {
+	struct table	*anyhost = table_find(conf, "<anydestination>");
+	struct table	*t = $5;
+
+	if (rule->flag_for) {
+		yyerror("for already specified for this rule");
+		YYERROR;
+	}
+
+	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_REGEX)) {
+		yyerror("table \"%s\" may not be used for for lookups",
+		    t->t_name);
+		YYERROR;
+	}
+
+	rule->flag_for = 1;
+	rule->table_for = strdup(anyhost->t_name);
+	rule->flag_smtp_rcpt_to = $1 ? -1 : 1;
+	rule->flag_smtp_rcpt_to_regex = 1;
+	rule->table_smtp_rcpt_to = strdup(t->t_name);
+}
 ;
 
 match_options:
@@ -1281,11 +1523,27 @@ MATCH {
 ;
 
 filter_action_builtin:
+filter_action_builtin_nojunk
+| JUNK {
+	filter_config->junk = 1;
+}
+| BYPASS {
+	filter_config->bypass = 1;
+}
+;
+
+filter_action_builtin_nojunk:
 REJECT STRING {
 	filter_config->reject = $2;
 }
 | DISCONNECT STRING {
 	filter_config->disconnect = $2;
+}
+| REWRITE STRING {
+	filter_config->rewrite = $2;
+}
+| REPORT STRING {
+	filter_config->report = $2;
 }
 ;
 
@@ -1342,6 +1600,25 @@ negation HELO REGEX tables {
 }
 ;
 
+filter_phase_check_auth:
+negation AUTH {
+	filter_config->not_auth = $1 ? -1 : 1;
+	filter_config->auth = 1;
+}
+;
+filter_phase_check_auth_table:
+negation AUTH tables {
+	filter_config->not_auth_table = $1 ? -1 : 1;
+	filter_config->auth_table = $3;
+}
+;
+filter_phase_check_auth_regex:
+negation AUTH REGEX tables {
+	filter_config->not_auth_regex = $1 ? -1 : 1;
+	filter_config->auth_regex = $4;
+}
+;
+
 filter_phase_check_mail_from_table:
 negation MAIL_FROM tables {
 	filter_config->not_mail_from_table = $1 ? -1 : 1;
@@ -1384,9 +1661,20 @@ filter_phase_check_helo_table |
 filter_phase_check_helo_regex |
 filter_phase_global_options;
 
+filter_phase_auth_options:
+filter_phase_check_helo_table |
+filter_phase_check_helo_regex |
+filter_phase_check_auth |
+filter_phase_check_auth_table |
+filter_phase_check_auth_regex |
+filter_phase_global_options;
+
 filter_phase_mail_from_options:
 filter_phase_check_helo_table |
 filter_phase_check_helo_regex |
+filter_phase_check_auth |
+filter_phase_check_auth_table |
+filter_phase_check_auth_regex |
 filter_phase_check_mail_from_table |
 filter_phase_check_mail_from_regex |
 filter_phase_global_options;
@@ -1394,6 +1682,9 @@ filter_phase_global_options;
 filter_phase_rcpt_to_options:
 filter_phase_check_helo_table |
 filter_phase_check_helo_regex |
+filter_phase_check_auth |
+filter_phase_check_auth_table |
+filter_phase_check_auth_regex |
 filter_phase_check_mail_from_table |
 filter_phase_check_mail_from_regex |
 filter_phase_check_rcpt_to_table |
@@ -1403,6 +1694,9 @@ filter_phase_global_options;
 filter_phase_data_options:
 filter_phase_check_helo_table |
 filter_phase_check_helo_regex |
+filter_phase_check_auth |
+filter_phase_check_auth_table |
+filter_phase_check_auth_regex |
 filter_phase_check_mail_from_table |
 filter_phase_check_mail_from_regex |
 filter_phase_global_options;
@@ -1427,6 +1721,9 @@ filter_phase_global_options;
 filter_phase_commit_options:
 filter_phase_check_helo_table |
 filter_phase_check_helo_regex |
+filter_phase_check_auth |
+filter_phase_check_auth_table |
+filter_phase_check_auth_regex |
 filter_phase_check_mail_from_table |
 filter_phase_check_mail_from_regex |
 filter_phase_global_options;
@@ -1435,45 +1732,50 @@ filter_phase_global_options;
 filter_phase_connect:
 CONNECT {
 	filter_config->phase = FILTER_CONNECT;
-} filter_phase_connect_options filter_action_builtin
+} MATCH filter_phase_connect_options filter_action_builtin
 ;
 
 
 filter_phase_helo:
 HELO {
 	filter_config->phase = FILTER_HELO;
-} filter_phase_helo_options filter_action_builtin
+} MATCH filter_phase_helo_options filter_action_builtin
 ;
 
 filter_phase_ehlo:
 EHLO {
 	filter_config->phase = FILTER_EHLO;
-} filter_phase_helo_options filter_action_builtin
+} MATCH filter_phase_helo_options filter_action_builtin
+;
+
+filter_phase_auth:
+AUTH {
+} MATCH filter_phase_auth_options filter_action_builtin
 ;
 
 filter_phase_mail_from:
 MAIL_FROM {
 	filter_config->phase = FILTER_MAIL_FROM;
-} filter_phase_mail_from_options filter_action_builtin
+} MATCH filter_phase_mail_from_options filter_action_builtin
 ;
 
 filter_phase_rcpt_to:
 RCPT_TO {
 	filter_config->phase = FILTER_RCPT_TO;
-} filter_phase_rcpt_to_options filter_action_builtin
+} MATCH filter_phase_rcpt_to_options filter_action_builtin
 ;
 
 filter_phase_data:
 DATA {
 	filter_config->phase = FILTER_DATA;
-} filter_phase_data_options filter_action_builtin
+} MATCH filter_phase_data_options filter_action_builtin
 ;
 
 /*
 filter_phase_data_line:
 DATA_LINE {
 	filter_config->phase = FILTER_DATA_LINE;
-} filter_action_builtin
+} MATCH filter_action_builtin
 ;
 
 filter_phase_quit:
@@ -1485,20 +1787,20 @@ QUIT {
 filter_phase_rset:
 RSET {
 	filter_config->phase = FILTER_RSET;
-} filter_phase_rset_options filter_action_builtin
+} MATCH filter_phase_rset_options filter_action_builtin
 ;
 
 filter_phase_noop:
 NOOP {
 	filter_config->phase = FILTER_NOOP;
-} filter_phase_noop_options filter_action_builtin
+} MATCH filter_phase_noop_options filter_action_builtin
 ;
 */
 
 filter_phase_commit:
 COMMIT {
 	filter_config->phase = FILTER_COMMIT;
-} filter_phase_commit_options filter_action_builtin
+} MATCH filter_phase_commit_options filter_action_builtin_nojunk
 ;
 
 
@@ -1507,6 +1809,7 @@ filter_phase:
 filter_phase_connect
 | filter_phase_helo
 | filter_phase_ehlo
+| filter_phase_auth
 | filter_phase_mail_from
 | filter_phase_rcpt_to
 | filter_phase_data
@@ -1521,6 +1824,7 @@ filter_phase_connect
 filterel:
 STRING	{
 	struct filter_config   *fr;
+	struct filter_proc     *fp;
 	size_t			i;
 
 	if ((fr = dict_get(conf->sc_filters_dict, $1)) == NULL) {
@@ -1543,7 +1847,7 @@ STRING	{
 	}
 
 	if (fr->proc) {
-		if (dict_check(&filter_config->chain_procs, fr->proc)) {
+		if ((fp = dict_get(&filter_config->chain_procs, fr->proc))) {
 			yyerror("no proc allowed twice within a filter chain: %s", fr->proc);
 			free($1);
 			YYERROR;
@@ -1551,6 +1855,7 @@ STRING	{
 		dict_set(&filter_config->chain_procs, fr->proc, NULL);
 	}
 
+	fr->filter_subsystem |= filter_config->filter_subsystem;
 	filter_config->chain_size += 1;
 	filter_config->chain = reallocarray(filter_config->chain, filter_config->chain_size, sizeof(char *));
 	if (filter_config->chain == NULL)
@@ -1566,13 +1871,15 @@ filterel
 
 filter:
 FILTER STRING PROC STRING {
+	struct filter_proc *fp;
+
 	if (dict_get(conf->sc_filters_dict, $2)) {
 		yyerror("filter already exists with that name: %s", $2);
 		free($2);
 		free($4);
 		YYERROR;
 	}
-	if (! dict_get(conf->sc_processors_dict, $4)) {
+	if ((fp = dict_get(conf->sc_filter_processes_dict, $4)) == NULL) {
 		yyerror("no processor exist with that name: %s", $4);
 		free($4);
 		YYERROR;
@@ -1587,12 +1894,6 @@ FILTER STRING PROC STRING {
 }
 |
 FILTER STRING PROC_EXEC STRING {
-	char	buffer[128];
-
-	do {
-		(void)snprintf(buffer, sizeof buffer, "<dynproc:%08x>", last_dynproc_id++);
-	} while (dict_check(conf->sc_processors_dict, buffer));
-
 	if (dict_get(conf->sc_filters_dict, $2)) {
 		yyerror("filter already exists with that name: %s", $2);
 		free($2);
@@ -1606,15 +1907,15 @@ FILTER STRING PROC_EXEC STRING {
 	filter_config = xcalloc(1, sizeof *filter_config);
 	filter_config->filter_type = FILTER_TYPE_PROC;
 	filter_config->name = $2;
-	filter_config->proc = xstrdup(buffer);
+	filter_config->proc = xstrdup($2);
 	dict_set(conf->sc_filters_dict, $2, filter_config);
 } proc_params {
-	dict_set(conf->sc_processors_dict, filter_config->proc, processor);
+	dict_set(conf->sc_filter_processes_dict, filter_config->proc, processor);
 	processor = NULL;
 	filter_config = NULL;
 }
 |
-FILTER STRING BUILTIN {
+FILTER STRING PHASE {
 	if (dict_get(conf->sc_filters_dict, $2)) {
 		yyerror("filter already exists with that name: %s", $2);
 		free($2);
@@ -1784,16 +2085,19 @@ limits_scheduler: opt_limit_scheduler limits_scheduler
 
 
 opt_sock_listen : FILTER STRING {
+			struct filter_config *fc;
+
 			if (listen_opts.options & LO_FILTER) {
 				yyerror("filter already specified");
 				free($2);
 				YYERROR;
 			}
-			if (dict_get(conf->sc_filters_dict, $2) == NULL) {
+			if ((fc = dict_get(conf->sc_filters_dict, $2)) == NULL) {
 				yyerror("no filter exist with that name: %s", $2);
 				free($2);
 				YYERROR;
 			}
+			fc->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_IN;
 			listen_opts.options |= LO_FILTER;
 			listen_opts.filtername = $2;
 		}
@@ -1813,6 +2117,7 @@ opt_sock_listen : FILTER STRING {
 			listen_opts.filtername = xstrdup(buffer);
 			filter_config = xcalloc(1, sizeof *filter_config);
 			filter_config->filter_type = FILTER_TYPE_CHAIN;
+			filter_config->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_IN;
 			dict_init(&filter_config->chain_procs);
 		} '{' filter_list '}' {
 			dict_set(conf->sc_filters_dict, listen_opts.filtername, filter_config);
@@ -1822,6 +2127,20 @@ opt_sock_listen : FILTER STRING {
 			if (config_lo_mask_source(&listen_opts)) {
 				YYERROR;
 			}
+		}
+		| TAG STRING			{
+			if (listen_opts.options & LO_TAG) {
+				yyerror("tag already specified");
+				YYERROR;
+			}
+			listen_opts.options |= LO_TAG;
+
+			if (strlen($2) >= SMTPD_TAG_SIZE) {
+				yyerror("tag name too long");
+				free($2);
+				YYERROR;
+			}
+			listen_opts.tag = $2;
 		}
 		;
 
@@ -1859,6 +2178,38 @@ opt_if_listen : INET4 {
 			free($2);
 			listen_opts.port = ntohs(servent->s_port);
 		}
+		| PORT SMTP			{
+			struct servent *servent;
+
+			if (listen_opts.options & LO_PORT) {
+				yyerror("port already specified");
+				YYERROR;
+			}
+			listen_opts.options |= LO_PORT;
+
+			servent = getservbyname("smtp", "tcp");
+			if (servent == NULL) {
+				yyerror("invalid port: smtp");
+				YYERROR;
+			}
+			listen_opts.port = ntohs(servent->s_port);
+		}
+		| PORT SMTPS			{
+			struct servent *servent;
+
+			if (listen_opts.options & LO_PORT) {
+				yyerror("port already specified");
+				YYERROR;
+			}
+			listen_opts.options |= LO_PORT;
+
+			servent = getservbyname("smtps", "tcp");
+			if (servent == NULL) {
+				yyerror("invalid port: smtps");
+				YYERROR;
+			}
+			listen_opts.port = ntohs(servent->s_port);
+		}
 		| PORT NUMBER			{
 			if (listen_opts.options & LO_PORT) {
 				yyerror("port already specified");
@@ -1873,15 +2224,18 @@ opt_if_listen : INET4 {
 			listen_opts.port = $2;
 		}
 		| FILTER STRING			{
+			struct filter_config *fc;
+
 			if (listen_opts.options & LO_FILTER) {
 				yyerror("filter already specified");
 				YYERROR;
 			}
-			if (dict_get(conf->sc_filters_dict, $2) == NULL) {
+			if ((fc = dict_get(conf->sc_filters_dict, $2)) == NULL) {
 				yyerror("no filter exist with that name: %s", $2);
 				free($2);
 				YYERROR;
 			}
+			fc->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_IN;
 			listen_opts.options |= LO_FILTER;
 			listen_opts.filtername = $2;
 		}
@@ -1901,6 +2255,7 @@ opt_if_listen : INET4 {
 			listen_opts.filtername = xstrdup(buffer);
 			filter_config = xcalloc(1, sizeof *filter_config);
 			filter_config->filter_type = FILTER_TYPE_CHAIN;
+			filter_config->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_IN;
 			dict_init(&filter_config->chain_procs);
 		} '{' filter_list '}' {
 			dict_set(conf->sc_filters_dict, listen_opts.filtername, filter_config);
@@ -2055,6 +2410,14 @@ opt_if_listen : INET4 {
 			}
 			listen_opts.options |= LO_NODSN;
 			listen_opts.flags &= ~F_EXT_DSN;
+		}
+		| PROXY_V2	{
+			if (listen_opts.options & LO_PROXY) {
+				yyerror("proxy-v2 already specified");
+				YYERROR;
+			}
+			listen_opts.options |= LO_PROXY;
+			listen_opts.flags |= F_PROXY;
 		}
 		| SENDERS tables	{
 			struct table	*t = $2;
@@ -2246,7 +2609,7 @@ lookup(char *s)
 		{ "auth-optional",     	AUTH_OPTIONAL },
 		{ "backup",		BACKUP },
 		{ "bounce",		BOUNCE },
-		{ "builtin",		BUILTIN },
+		{ "bypass",		BYPASS },
 		{ "ca",			CA },
 		{ "cert",		CERT },
 		{ "chain",		CHAIN },
@@ -2298,10 +2661,12 @@ lookup(char *s)
 		{ "no-verify",		NO_VERIFY },
 		{ "noop",		NOOP },
 		{ "on",			ON },
+		{ "phase",		PHASE },
 		{ "pki",		PKI },
 		{ "port",		PORT },
 		{ "proc",		PROC },
 		{ "proc-exec",		PROC_EXEC },
+		{ "proxy-v2",		PROXY_V2 },
 		{ "queue",		QUEUE },
 		{ "quit",		QUIT },
 		{ "rcpt-to",		RCPT_TO },
@@ -2311,6 +2676,8 @@ lookup(char *s)
 		{ "regex",		REGEX },
 		{ "reject",		REJECT },
 		{ "relay",		RELAY },
+		{ "report",		REPORT },
+		{ "rewrite",		REWRITE },
 		{ "rset",		RSET },
 		{ "scheduler",		SCHEDULER },
 		{ "senders",   		SENDERS },
@@ -2320,6 +2687,7 @@ lookup(char *s)
 		{ "smtps",		SMTPS },
 		{ "socket",		SOCKET },
 		{ "src",		SRC },
+		{ "srs",		SRS },
 		{ "sub-addr-delim",	SUB_ADDR_DELIM },
 		{ "table",		TABLE },
 		{ "tag",		TAG },
@@ -2819,7 +3187,6 @@ static void
 create_sock_listener(struct listen_opts *lo)
 {
 	struct listener *l = xcalloc(1, sizeof(*l));
-	lo->tag = "local";
 	lo->hostname = conf->sc_hostname;
 	l->ss.ss_family = AF_LOCAL;
 	l->ss.ss_len = sizeof(struct sockaddr *);
@@ -3161,7 +3528,7 @@ is_if_in_group(const char *ifname, const char *groupname)
 	int			 s;
 	int			 ret = 0;
 
-	if ((s = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+	if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == -1)
 		err(1, "socket");
 
         memset(&ifgr, 0, sizeof(ifgr));

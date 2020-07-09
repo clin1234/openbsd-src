@@ -1,7 +1,7 @@
-.\"	$OpenBSD: mandoc.1,v 1.162 2019/04/30 11:48:03 schwarze Exp $
+.\" $OpenBSD: mandoc.1,v 1.168 2020/06/15 18:05:25 schwarze Exp $
 .\"
+.\" Copyright (c) 2012, 2014-2020 Ingo Schwarze <schwarze@openbsd.org>
 .\" Copyright (c) 2009, 2010, 2011 Kristaps Dzonsons <kristaps@bsd.lv>
-.\" Copyright (c) 2012, 2014-2018 Ingo Schwarze <schwarze@openbsd.org>
 .\"
 .\" Permission to use, copy, modify, and distribute this software for any
 .\" purpose with or without fee is hereby granted, provided that the above
@@ -15,7 +15,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: April 30 2019 $
+.Dd $Mdocdate: June 15 2020 $
 .Dt MANDOC 1
 .Os
 .Sh NAME
@@ -222,7 +222,8 @@ reads from standard input.
 .Pp
 The options
 .Fl fhklw
-are also supported and are documented in man(1).
+are also supported and are documented in
+.Xr man 1 .
 In
 .Fl f
 and
@@ -409,6 +410,23 @@ The file
 is used for an external style-sheet.
 This must be a valid absolute or
 relative URI.
+.It Cm tag Ns Op = Ns Ar term
+Same syntax and semantics as for
+.Sx ASCII Output .
+This is implemented by passing a
+.Ic file://
+URI ending in a fragment identifier to the pager
+rather than passing merely a file name.
+When using this argument, use a pager supporting such URIs, for example
+.Bd -literal -offset 3n
+MANPAGER='lynx -force_html' man -T html -O tag=MANPAGER man
+MANPAGER='w3m -T text/html' man -T html -O tag=toc mandoc
+.Ed
+.Pp
+This argument does not work with
+.Xr more 1
+or
+.Xr less 1 .
 .It Cm toc
 If an input file contains at least two non-standard sections,
 print a table of contents near the beginning of the output.
@@ -442,6 +460,11 @@ This is useful for distributing manual sources to legacy systems
 lacking
 .Xr mdoc 7
 formatters.
+Embedded
+.Xr eqn 7
+and
+.Xr tbl 7
+code is not supported.
 .Pp
 If the input format of a file is
 .Xr man 7 ,
@@ -697,7 +720,7 @@ No input files have been read.
 .It 6
 An operating system error occurred, for example exhaustion
 of memory, file descriptors, or process table entries.
-Such errors cause
+Such errors may cause
 .Nm
 to exit at once, possibly in the middle of parsing or formatting a file.
 .El
@@ -777,6 +800,13 @@ fields.
 .Pp
 Message levels have the following meanings:
 .Bl -tag -width "warning"
+.It Cm syserr
+An operating system error occurred.
+There isn't necessarily anything wrong with the input files.
+Output may all the same be missing or incomplete.
+.It Cm badarg
+Invalid command line arguments were specified.
+No input files have been read and no output is produced.
 .It Cm unsupp
 An input file uses unsupported low-level
 .Xr roff 7
@@ -825,8 +855,7 @@ Messages of the
 .Cm error ,
 and
 .Cm unsupp
-levels except those about non-existent or unreadable input files
-are hidden unless their level, or a lower level, is requested using a
+levels are hidden unless their level, or a lower level, is requested using a
 .Fl W
 option or
 .Fl T Cm lint
@@ -1066,7 +1095,21 @@ macro lacks the mandatory section argument.
 The section number in a
 .Ic \&Dt
 line is invalid, but still used.
-.It Sy "missing date, using today's date"
+.It Sy "filename/section mismatch"
+.Pq mdoc , man
+The name of the input file being processed is known and its file
+name extension starts with a non-zero digit, but the
+.Ic \&Dt
+or
+.Ic \&TH
+macro contains a
+.Ar section
+argument that starts with a different non-zero digit.
+The
+.Ar section
+argument is used as provided anyway.
+Consider checking whether the file name or the argument need a correction.
+.It Sy "missing date, using \(dq\(dq"
 .Pq mdoc, man
 The document was parsed as
 .Xr mdoc 7
@@ -2240,6 +2283,43 @@ or
 macro or of an undefined macro.
 The macro is ignored, and its arguments are handled
 as if they were a text line.
+.El
+.Ss Bad command line arguments
+.Bl -ohang
+.It Sy "bad command line argument"
+The argument following one of the
+.Fl IKMmOTW
+command line options is invalid, or a
+.Ar file
+given as a command line argument cannot be opened.
+.It Sy "duplicate command line argument"
+The
+.Fl I
+command line option was specified twice.
+.It Sy "option has a superfluous value"
+An argument to the
+.Fl O
+option has a value but does not accept one.
+.It Sy "missing option value"
+An argument to the
+.Fl O
+option has no argument but requires one.
+.It Sy "bad option value"
+An argument to the
+.Fl O
+.Cm indent
+or
+.Cm width
+option has an invalid value.
+.It Sy "duplicate option value"
+The same
+.Fl O
+option is specified more than once.
+.It Sy "no such tag"
+The
+.Fl O Cm tag
+option was specified but the tag was not found in any of the displayed
+manual pages.
 .El
 .Sh SEE ALSO
 .Xr apropos 1 ,

@@ -1,4 +1,4 @@
-.\"	$OpenBSD: ospfd.conf.5,v 1.55 2018/12/28 19:25:10 remi Exp $
+.\"	$OpenBSD: ospfd.conf.5,v 1.62 2020/05/16 16:58:12 jmc Exp $
 .\"
 .\" Copyright (c) 2005 Esben Norby <norby@openbsd.org>
 .\" Copyright (c) 2004 Claudio Jeker <claudio@openbsd.org>
@@ -17,7 +17,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: December 28 2018 $
+.Dd $Mdocdate: May 16 2020 $
 .Dt OSPFD.CONF 5
 .Os
 .Sh NAME
@@ -103,7 +103,7 @@ Setting
 to
 .Ic \&no
 will implicitly set the
-.Ic stub Ic router
+.Ic stub router
 option to ensure that no traffic tries to transit via this router.
 .Pp
 .It Ic rdomain Ar tableid
@@ -191,7 +191,7 @@ redistribute static set { metric 300 type 2 }
 .Ed
 .Pp
 The use of
-.Ic redistribute Ar prefix Ns | Ns Ar rtlabel
+.Ic redistribute Ar prefix | rtlabel
 can result in higher CPU usage, since
 .Xr ospfd 8
 will need to process more route updates.
@@ -236,7 +236,7 @@ shortest path first calculations.
 The default value is 5 seconds; the valid range is 10 milliseconds\-5 seconds.
 .Pp
 .It Xo
-.Ic stub Ic router
+.Ic stub router
 .Pq Ic yes Ns | Ns Ic no
 .Xc
 If set to
@@ -245,7 +245,7 @@ all interfaces with active neighbors will have a metric of infinity.
 This ensures that the other routers prefer routes around this router while
 still being able to reach directly connected IP prefixes.
 The
-.Ic stub Ic router
+.Ic stub router
 option is automatically enabled if either the
 .Xr sysctl 8
 variable
@@ -256,11 +256,13 @@ is set to a value other than 1 or if the FIB is not coupled.
 Areas are used for grouping interfaces.
 All interface-specific parameters can
 be configured per area, overruling the global settings.
+These interface-specific parameters need to be defined before the interfaces.
 .Bl -tag -width Ds
-.It Ic area Ar address
+.It Ic area Ar id | address
 Specify an area section, grouping one or more interfaces.
 .Bd -literal -offset indent
 area 0.0.0.0 {
+	hello-interval 3
 	interface em0
 	interface em1 {
 		metric 10
@@ -419,12 +421,17 @@ Router.
 .It Ic transmit-delay Ar seconds
 Set the transmit delay.
 The default value is 1; valid range is 1\-3600 seconds.
+.It Ic type p2p
+Set the interface type to point to point.
+This disables the election of a DR and BDR for the given interface.
 .El
 .Sh FILES
-.Bl -tag -width "/etc/ospfd.conf" -compact
+.Bl -tag -width /etc/examples/ospfd.conf -compact
 .It Pa /etc/ospfd.conf
 .Xr ospfd 8
-configuration file
+configuration file.
+.It Pa /etc/examples/ospfd.conf
+Example configuration file.
 .El
 .Sh SEE ALSO
 .Xr ospfctl 8 ,

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_vnode.c,v 1.103 2018/07/16 16:44:09 helg Exp $	*/
+/*	$OpenBSD: uvm_vnode.c,v 1.106 2020/01/16 15:35:22 kettenis Exp $	*/
 /*	$NetBSD: uvm_vnode.c,v 1.36 2000/11/24 20:34:01 chs Exp $	*/
 
 /*
@@ -147,7 +147,7 @@ uvn_attach(struct vnode *vp, vm_prot_t accessprot)
 	/* first get a lock on the uvn. */
 	while (uvn->u_flags & UVM_VNODE_BLOCKED) {
 		uvn->u_flags |= UVM_VNODE_WANTED;
-		UVM_WAIT(uvn, FALSE, "uvn_attach", 0);
+		tsleep_nsec(uvn, PVM, "uvn_attach", INFSLP);
 	}
 
 	/* if we're mapping a BLK device, make sure it is a disk. */
@@ -351,7 +351,7 @@ uvn_detach(struct uvm_object *uobj)
 	/* wait on any outstanding io */
 	while (uobj->uo_npages && uvn->u_flags & UVM_VNODE_RELKILL) {
 		uvn->u_flags |= UVM_VNODE_IOSYNC;
-		UVM_WAIT(&uvn->u_nio, FALSE, "uvn_term", 0);
+		tsleep_nsec(&uvn->u_nio, PVM, "uvn_term", INFSLP);
 	}
 
 	if ((uvn->u_flags & UVM_VNODE_RELKILL) == 0)
@@ -477,7 +477,7 @@ uvm_vnp_terminate(struct vnode *vp)
 		 */
 #endif
 		uvn->u_flags |= UVM_VNODE_IOSYNC;
-		UVM_WAIT(&uvn->u_nio, FALSE, "uvn_term", 0);
+		tsleep_nsec(&uvn->u_nio, PVM, "uvn_term", INFSLP);
 	}
 
 	/*
@@ -582,9 +582,12 @@ uvn_flush(struct uvm_object *uobj, voff_t start, voff_t stop, int flags)
 	struct uvm_vnode *uvn = (struct uvm_vnode *) uobj;
 	struct vm_page *pp, *ptmp;
 	struct vm_page *pps[MAXBSIZE >> PAGE_SHIFT], **ppsp;
+	struct pglist dead;
 	int npages, result, lcv;
 	boolean_t retval, need_iosync, needs_clean;
 	voff_t curoff;
+
+	TAILQ_INIT(&dead);
 
 	/* get init vals and determine how we are going to traverse object */
 	need_iosync = FALSE;
@@ -667,14 +670,16 @@ uvn_flush(struct uvm_object *uobj, voff_t start, voff_t stop, int flags)
 					atomic_setbits_int(&pp->pg_flags,
 					    PG_WANTED);
 					uvm_unlock_pageq();
-					UVM_WAIT(pp, 0, "uvn_flsh", 0);
+					tsleep_nsec(pp, PVM, "uvn_flsh",
+					    INFSLP);
 					uvm_lock_pageq();
 					curoff -= PAGE_SIZE;
 					continue;
 				} else {
 					pmap_page_protect(pp, PROT_NONE);
 					/* removed page from object */
-					uvm_pagefree(pp);
+					uvm_pageclean(pp);
+					TAILQ_INSERT_HEAD(&dead, pp, pageq);
 				}
 			}
 			continue;
@@ -801,7 +806,8 @@ ReTry:
 					retval = FALSE;
 				}
 				pmap_page_protect(ptmp, PROT_NONE);
-				uvm_pagefree(ptmp);
+				uvm_pageclean(ptmp);
+				TAILQ_INSERT_TAIL(&dead, ptmp, pageq);
 			}
 
 		}		/* end of "lcv" for loop */
@@ -815,12 +821,14 @@ ReTry:
 	if (need_iosync) {
 		while (uvn->u_nio != 0) {
 			uvn->u_flags |= UVM_VNODE_IOSYNC;
-			UVM_WAIT(&uvn->u_nio, FALSE, "uvn_flush", 0);
+			tsleep_nsec(&uvn->u_nio, PVM, "uvn_flush", INFSLP);
 		}
 		if (uvn->u_flags & UVM_VNODE_IOSYNCWANTED)
 			wakeup(&uvn->u_flags);
 		uvn->u_flags &= ~(UVM_VNODE_IOSYNC|UVM_VNODE_IOSYNCWANTED);
 	}
+
+	uvm_pglistfree(&dead);
 
 	return(retval);
 }
@@ -1018,7 +1026,7 @@ uvn_get(struct uvm_object *uobj, voff_t offset, struct vm_page **pps,
 			/* page is there, see if we need to wait on it */
 			if ((ptmp->pg_flags & PG_BUSY) != 0) {
 				atomic_setbits_int(&ptmp->pg_flags, PG_WANTED);
-				UVM_WAIT(ptmp, FALSE, "uvn_get", 0);
+				tsleep_nsec(ptmp, PVM, "uvn_get", INFSLP);
 				continue;	/* goto top of pps while loop */
 			}
 
@@ -1118,7 +1126,7 @@ uvn_io(struct uvm_vnode *uvn, vm_page_t *pps, int npages, int flags, int rw)
 			return(VM_PAGER_AGAIN);
 		}
 		uvn->u_flags |= UVM_VNODE_IOSYNCWANTED;
-		UVM_WAIT(&uvn->u_flags, FALSE, "uvn_iosync", 0);
+		tsleep_nsec(&uvn->u_flags, PVM, "uvn_iosync", INFSLP);
 	}
 
 	/* check size */
@@ -1235,7 +1243,7 @@ uvn_io(struct uvm_vnode *uvn, vm_page_t *pps, int npages, int flags, int rw)
 		return(VM_PAGER_OK);
 	} else {
 		while (rebooting)
-			tsleep(&rebooting, PVM, "uvndead", 0);
+			tsleep_nsec(&rebooting, PVM, "uvndead", INFSLP);
 		return(VM_PAGER_ERROR);
 	}
 }

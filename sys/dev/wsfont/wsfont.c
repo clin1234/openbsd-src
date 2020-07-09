@@ -1,4 +1,4 @@
-/*	$OpenBSD: wsfont.c,v 1.55 2019/01/09 11:23:32 fcambus Exp $ */
+/*	$OpenBSD: wsfont.c,v 1.57 2020/07/09 07:45:13 fcambus Exp $ */
 /*	$NetBSD: wsfont.c,v 1.17 2001/02/07 13:59:24 ad Exp $	*/
 
 /*-
@@ -97,7 +97,7 @@
 #endif
 
 #if !defined(SMALL_KERNEL) && (defined(__amd64__) || defined(__i386__) || \
-    defined(__arm64__))
+    defined(__arm64__) || defined(__armv7__))
 #define FONT_SPLEEN16x32
 #define FONT_SPLEEN32x64
 #endif
@@ -531,42 +531,6 @@ wsfont_add(struct wsdisplay_font *font, int copy)
 	splx(s);
 	return (0);
 }
-
-/*
- * Remove a font.
- */
-#ifdef notyet
-int
-wsfont_remove(int cookie)
-{
-	struct font *ent;
-	int s;
-
-	s = splhigh();
-
-	if ((ent = wsfont_find0(cookie)) == NULL) {
-		splx(s);
-		return (-1);
-	}
-
-	if ((ent->flg & WSFONT_BUILTIN) != 0 || ent->lockcount != 0) {
-		splx(s);
-		return (-1);
-	}
-
-	/* Don't free statically allocated font data */
-	if ((ent->flg & WSFONT_STATIC) != 0) {
-		free(ent->font->data, M_DEVBUF, 0);
-		free(ent->font, M_DEVBUF, 0);
-	}
-
-	/* Remove from list, free entry */
-	TAILQ_REMOVE(&list, ent, chain);
-	free(ent, M_DEVBUF, 0);
-	splx(s);
-	return (0);
-}
-#endif
 
 /*
  * Lock a given font and return new lockcount. This fails if the cookie

@@ -1,11 +1,11 @@
-/*	$OpenBSD: uvm_mmap.c,v 1.156 2019/05/11 20:02:00 deraadt Exp $	*/
+/*	$OpenBSD: uvm_mmap.c,v 1.161 2020/03/04 21:15:39 kettenis Exp $	*/
 /*	$NetBSD: uvm_mmap.c,v 1.49 2001/02/18 21:19:08 chs Exp $	*/
 
 /*
  * Copyright (c) 1997 Charles D. Cranor and Washington University.
- * Copyright (c) 1991, 1993 The Regents of the University of California.  
+ * Copyright (c) 1991, 1993 The Regents of the University of California.
  * Copyright (c) 1988 University of Utah.
- * 
+ *
  * All rights reserved.
  *
  * This code is derived from software contributed to Berkeley by
@@ -23,7 +23,7 @@
  * 3. All advertising materials mentioning features or use of this software
  *    must display the following acknowledgement:
  *      This product includes software developed by the Charles D. Cranor,
- *	Washington University, University of California, Berkeley and 
+ *	Washington University, University of California, Berkeley and
  *	its contributors.
  * 4. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
@@ -218,7 +218,7 @@ sys_mmap(struct proc *p, void *v, register_t *retval)
 	vaddr_t addr;
 	struct vattr va;
 	off_t pos;
-	vsize_t size, pageoff;
+	vsize_t limit, pageoff, size;
 	vm_prot_t prot, maxprot;
 	int flags, fd;
 	vaddr_t vm_min_address = VM_MIN_ADDRESS;
@@ -333,7 +333,7 @@ sys_mmap(struct proc *p, void *v, register_t *retval)
 				flags |= MAP_PRIVATE;	/* for a file */
 		}
 
-		/* 
+		/*
 		 * MAP_PRIVATE device mappings don't make sense (and aren't
 		 * supported anyway).  However, some programs rely on this,
 		 * so just change it to MAP_SHARED.
@@ -383,16 +383,16 @@ sys_mmap(struct proc *p, void *v, register_t *retval)
 		}
 		if ((flags & __MAP_NOFAULT) != 0 ||
 		    ((flags & MAP_PRIVATE) != 0 && (prot & PROT_WRITE) != 0)) {
-			if (p->p_rlimit[RLIMIT_DATA].rlim_cur < size ||
-			    p->p_rlimit[RLIMIT_DATA].rlim_cur - size <
-			    ptoa(p->p_vmspace->vm_dused)) {
+			limit = lim_cur(RLIMIT_DATA);
+			if (limit < size ||
+			    limit - size < ptoa(p->p_vmspace->vm_dused)) {
 				error = ENOMEM;
 				goto out;
 			}
 		}
 		KERNEL_LOCK();
-		error = uvm_mmapfile(&p->p_vmspace->vm_map, &addr, size, prot, maxprot,
-		    flags, vp, pos, p->p_rlimit[RLIMIT_MEMLOCK].rlim_cur, p);
+		error = uvm_mmapfile(&p->p_vmspace->vm_map, &addr, size, prot,
+		    maxprot, flags, vp, pos, lim_cur(RLIMIT_MEMLOCK), p);
 		KERNEL_UNLOCK();
 	} else {		/* MAP_ANON case */
 		if (fd != -1)
@@ -404,10 +404,12 @@ is_anon:	/* label for SunOS style /dev/zero */
 		if ((flags & __MAP_NOFAULT) != 0)
 			return EINVAL;
 
-		if (p->p_rlimit[RLIMIT_DATA].rlim_cur < size ||
-		    p->p_rlimit[RLIMIT_DATA].rlim_cur - size <
-		    ptoa(p->p_vmspace->vm_dused)) {
-			return ENOMEM;
+		if (prot != PROT_NONE) {
+			limit = lim_cur(RLIMIT_DATA);
+			if (limit < size ||
+			    limit - size < ptoa(p->p_vmspace->vm_dused)) {
+				return ENOMEM;
+			}
 		}
 
 		/*
@@ -419,7 +421,7 @@ is_anon:	/* label for SunOS style /dev/zero */
 
 		maxprot = PROT_MASK;
 		error = uvm_mmapanon(&p->p_vmspace->vm_map, &addr, size, prot,
-		    maxprot, flags, p->p_rlimit[RLIMIT_MEMLOCK].rlim_cur, p);
+		    maxprot, flags, lim_cur(RLIMIT_MEMLOCK), p);
 	}
 
 	if (error == 0)
@@ -501,7 +503,7 @@ sys_munmap(struct proc *p, void *v, register_t *retval)
 	/* get syscall args... */
 	addr = (vaddr_t) SCARG(uap, addr);
 	size = (vsize_t) SCARG(uap, len);
-	
+
 	/* align address to a page boundary, and adjust size accordingly */
 	ALIGN_ADDR(addr, size, pageoff);
 
@@ -521,7 +523,7 @@ sys_munmap(struct proc *p, void *v, register_t *retval)
 	vm_map_lock(map);	/* lock map so we can checkprot */
 
 	/*
-	 * interesting system call semantic: make sure entire range is 
+	 * interesting system call semantic: make sure entire range is
 	 * allocated before allowing an unmap.
 	 */
 	if (!uvm_map_checkprot(map, addr, addr + size, PROT_NONE)) {
@@ -561,7 +563,7 @@ sys_mprotect(struct proc *p, void *v, register_t *retval)
 	addr = (vaddr_t)SCARG(uap, addr);
 	size = (vsize_t)SCARG(uap, len);
 	prot = SCARG(uap, prot);
-	
+
 	if ((prot & PROT_MASK) != prot)
 		return (EINVAL);
 	if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC) &&
@@ -584,6 +586,32 @@ sys_mprotect(struct proc *p, void *v, register_t *retval)
 }
 
 /*
+ * sys_msyscall: the msyscall system call
+ */
+int
+sys_msyscall(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_msyscall_args /* {
+		syscallarg(void *) addr;
+		syscallarg(size_t) len;
+	} */ *uap = v;
+	vaddr_t addr;
+	vsize_t size, pageoff;
+
+	addr = (vaddr_t)SCARG(uap, addr);
+	size = (vsize_t)SCARG(uap, len);
+
+	/*
+	 * align the address to a page boundary, and adjust the size accordingly
+	 */
+	ALIGN_ADDR(addr, size, pageoff);
+	if (addr > SIZE_MAX - size)
+		return (EINVAL);		/* disallow wrap-around. */
+
+	return (uvm_map_syscall(&p->p_vmspace->vm_map, addr, addr+size));
+}
+
+/*
  * sys_minherit: the minherit system call
  */
 int
@@ -597,7 +625,7 @@ sys_minherit(struct proc *p, void *v, register_t *retval)
 	vaddr_t addr;
 	vsize_t size, pageoff;
 	vm_inherit_t inherit;
-	
+
 	addr = (vaddr_t)SCARG(uap, addr);
 	size = (vsize_t)SCARG(uap, len);
 	inherit = SCARG(uap, inherit);
@@ -608,7 +636,7 @@ sys_minherit(struct proc *p, void *v, register_t *retval)
 	ALIGN_ADDR(addr, size, pageoff);
 	if (addr > SIZE_MAX - size)
 		return (EINVAL);		/* disallow wrap-around. */
-	
+
 	return (uvm_map_inherit(&p->p_vmspace->vm_map, addr, addr+size,
 	    inherit));
 }
@@ -628,7 +656,7 @@ sys_madvise(struct proc *p, void *v, register_t *retval)
 	vaddr_t addr;
 	vsize_t size, pageoff;
 	int advice, error;
-	
+
 	addr = (vaddr_t)SCARG(uap, addr);
 	size = (vsize_t)SCARG(uap, len);
 	advice = SCARG(uap, behav);
@@ -729,7 +757,7 @@ sys_mlock(struct proc *p, void *v, register_t *retval)
 
 #ifdef pmap_wired_count
 	if (size + ptoa(pmap_wired_count(vm_map_pmap(&p->p_vmspace->vm_map))) >
-			p->p_rlimit[RLIMIT_MEMLOCK].rlim_cur)
+			lim_cur(RLIMIT_MEMLOCK))
 		return (EAGAIN);
 #else
 	if ((error = suser(p)) != 0)
@@ -798,7 +826,7 @@ sys_mlockall(struct proc *p, void *v, register_t *retval)
 #endif
 
 	error = uvm_map_pageable_all(&p->p_vmspace->vm_map, flags,
-	    p->p_rlimit[RLIMIT_MEMLOCK].rlim_cur);
+	    lim_cur(RLIMIT_MEMLOCK));
 	if (error != 0 && error != ENOMEM)
 		return (EAGAIN);
 	return (error);

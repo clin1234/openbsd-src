@@ -1,13 +1,13 @@
-#	$OpenBSD: Makefile,v 1.14 2019/05/03 20:03:58 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.20 2020/05/18 06:20:43 otto Exp $
 
-FS=		miniroot${OSrev}.fs
-FSSIZE=		43008
+FS=		miniroot${OSrev}.img
+FSSIZE=		67584
 FSDISKTYPE=	miniroot
 MOUNT_POINT=	/mnt
 MTREE=		${UTILS}/mtree.conf
 RAMDISK=	RAMDISK
 
-MSDOSSTART=	8192
+MSDOSSTART=	32768
 MSDOSSIZE=	8192
 FFSSTART!=	expr ${MSDOSSTART} + ${MSDOSSIZE}
 
@@ -36,6 +36,9 @@ PIFILES=\
 	bcm2710-rpi-3-b-plus.dtb \
 	bcm2710-rpi-cm3.dtb
 
+PIDTBO=\
+	disable-bt.dtbo
+
 all: ${FS}
 
 ${FS}: bsd.rd
@@ -49,15 +52,19 @@ ${FS}: bsd.rd
 .for FILE in ${PIFILES}
 	cp ${PRPI}/${FILE} ${MOUNT_POINT}/
 .endfor
+	mkdir -p ${MOUNT_POINT}/overlays
+.for FILE in ${PIDTBO}
+	cp ${PRPI}/overlays/${FILE} ${MOUNT_POINT}/overlays/
+.endfor
 	cp ${PUBOOT}/rpi_3/u-boot.bin ${MOUNT_POINT}/
 	mkdir -p ${MOUNT_POINT}/efi/boot
 	cp /usr/mdec/BOOTAA64.EFI ${MOUNT_POINT}/efi/boot/bootaa64.efi
 	echo bootaa64.efi > ${MOUNT_POINT}/efi/boot/startup.nsh
-	echo 'arm_64bit=1\nenable_uart=1\ndevice_tree_address=0x02600000\nkernel=u-boot.bin' > ${MOUNT_POINT}/config.txt
+	echo 'arm_64bit=1\nenable_uart=1\ndtoverlay=disable-bt\nkernel=u-boot.bin' > ${MOUNT_POINT}/config.txt
 	dd if=${PUBOOT}/pine64_plus/u-boot-sunxi-with-spl.bin \
-	    of=/dev/r`cat vnd`c bs=1024 seek=8
+	    of=/dev/r`cat vnd`c bs=1024 seek=8 conv=sync
 	umount ${MOUNT_POINT}
-	newfs -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
+	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
 	install -c -m 555 -o root -g wheel bsd.rd ${MOUNT_POINT}/bsd
 	ln ${MOUNT_POINT}/bsd ${MOUNT_POINT}/bsd.rd

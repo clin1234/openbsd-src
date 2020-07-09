@@ -3,8 +3,8 @@
 # THIS FILE AUTOMATICALLY GENERATED.  DO NOT EDIT.
 # generated from:
 #
-#	OpenBSD: etc.sgi/MAKEDEV.md,v 1.49 2016/09/11 19:59:54 deraadt Exp 
-#	OpenBSD: MAKEDEV.common,v 1.101 2018/08/31 02:32:29 jcs Exp 
+#	OpenBSD: etc.sgi/MAKEDEV.md,v 1.54 2020/07/06 06:11:27 dlg Exp 
+#	OpenBSD: MAKEDEV.common,v 1.111 2020/07/06 06:11:26 dlg Exp 
 #	OpenBSD: MAKEDEV.mi,v 1.83 2016/09/11 03:06:31 deraadt Exp 
 #	OpenBSD: MAKEDEV.sub,v 1.14 2005/02/07 06:14:18 david Exp 
 #
@@ -57,12 +57,14 @@
 #	uall	All USB devices
 #	ugen*	Generic USB devices
 #	uhid*	Generic HID devices
+#	fido	fido/* nodes
 #	ulpt*	Printer devices
 #	usb*	Bus control devices used by usbd for attach/detach
 # Special purpose devices:
 #	audio*	Audio devices
 #	bio	ioctl tunnel pseudo-device
 #	bpf	Berkeley Packet Filter
+#	dt	Dynamic Tracer
 #	diskmap	Disk mapper
 #	fd	fd/* nodes
 #	fuse	Userland Filesystem
@@ -70,6 +72,7 @@
 #	pci*	PCI bus devices
 #	pf*	Packet Filter
 #	pppx*	PPP Multiplexer
+#	pppac*	PPP Access Concentrator
 #	*random	In-kernel random data source
 #	tun*	Network tunnel driver
 #	tap*	Ethernet tunnel driver
@@ -77,6 +80,7 @@
 #	video*	Video V4L2 devices
 #	vscsi*	Virtual SCSI controller
 #	switch*	Switch driver
+#	kstat	Kernel Statistics
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 T=$0
 
@@ -217,6 +221,10 @@ std)
 	M klog		c 6 0 600
 	;;
 
+kstat)
+	M kstat c 51 0 640
+	;;
+
 switch*)
 	M switch$U c 75 $U 600
 	;;
@@ -246,6 +254,10 @@ tun*)
 	M urandom c 33 0 644
 	RMlist[${#RMlist[*]}]=random
 	MKlist[${#MKlist[*]}]=";ln -s urandom random"
+	;;
+
+pppac*)
+	M pppac$U c 77 $U 600
 	;;
 
 pppx*)
@@ -279,6 +291,10 @@ diskmap)
 	M diskmap c 69 0 640 operator
 	;;
 
+dt)
+	M dt c 30 0 600
+	;;
+
 bpf)
 	M bpf c 12 0 600
 	M bpf0 c 12 0 600
@@ -289,37 +305,41 @@ bio)
 	;;
 
 audio*)
-	M audio$U	c 44 $U
-	M mixer$U	c 44 $(($U+16))
-	M audioctl$U	c 44 $(($U+192))
-	MKlist[${#MKlist[*]}]=";[ -e mixer ] || ln -s mixer$U mixer"
+	M audio$U	c 44 $U 660 _sndiop
+	M audioctl$U	c 44 $(($U+192)) 660 _sndiop
 	;;
 
 usb*)
 	[ "$i" = "usb" ] && u= || u=$U
-	M usb$u c 61 $U 660
+	M usb$u c 61 $U 640
 	;;
 
 ulpt*)
-	M ulpt$U c 64 $U 660
+	M ulpt$U c 64 $U 600
+	;;
+
+fido)
+	RMlist[${#RMlist[*]}]=";mkdir -p fido;rm -f" n=0
+	while [ $n -lt 4 ];do M fido/$n c 76 $n 666;n=$(($n+1));done
+	MKlist[${#MKlist[*]}]=";chmod 555 fido"
 	;;
 
 uhid*)
-	M uhid$U c 62 $U 660
+	M uhid$U c 62 $U 600
 	;;
 
 ugen*)
 	n=$(($U*16))
 	for j in 0{0,1,2,3,4,5,6,7,8,9} 1{0,1,2,3,4,5}
 	do
-		M ugen$U.$j c 63 $(($n+10#$j)) 660
+		M ugen$U.$j c 63 $(($n+10#$j)) 600
 	done
 	;;
 
 uall)
 	R ttyU0 ttyU1 ttyU2 ttyU3 ugen0 ugen1 ugen2 ugen3 ugen4 ugen5
-	R ugen6 ugen7 ulpt0 ulpt1 uhid0 uhid1 uhid2 uhid3 uhid4 uhid5
-	R uhid6 uhid7 usb0 usb1 usb2 usb3 usb4 usb5 usb6 usb7
+	R ugen6 ugen7 ulpt0 ulpt1 fido uhid0 uhid1 uhid2 uhid3 uhid4
+	R uhid5 uhid6 uhid7 usb0 usb1 usb2 usb3 usb4 usb5 usb6 usb7
 	;;
 
 ttyU[0-9a-zA-Z])
@@ -343,7 +363,8 @@ wskbd[0-9]*)
 	;;
 
 wscons)
-	R wsmouse0 wsmouse1 wsmouse2 wsmouse3 wskbd0 wskbd1 wskbd2
+	R wsmouse0 wsmouse1 wsmouse2 wsmouse3 wsmouse4 wsmouse5
+	R wsmouse6 wsmouse7 wsmouse8 wsmouse9 wskbd0 wskbd1 wskbd2
 	R wskbd3 wsmux ttyFcfg ttyF0 ttyF1 ttyF2 ttyF3 ttyF4 ttyF5
 	R ttyF6 ttyF7 ttyF8 ttyF9 ttyFa ttyFb ttyEcfg ttyE0 ttyE1
 	R ttyE2 ttyE3 ttyE4 ttyE5 ttyE6 ttyE7 ttyE8 ttyE9 ttyEa ttyEb
@@ -453,11 +474,11 @@ all)
 	R ttya ttyb switch0 switch1 switch2 switch3 vnd0 vnd1 vnd2
 	R vnd3 sd0 sd1 sd2 sd3 sd4 sd5 sd6 sd7 sd8 sd9 cd0 cd1 rd0
 	R tap0 tap1 tap2 tap3 tun0 tun1 tun2 tun3 bio pty0 pty1 pty2
-	R diskmap vscsi0 ch0 audio0 audio1 audio2 bpf fuse pppx
-	R hotplug ptm local wscons pci0 pci1 pci2 pci3 uall video0
-	R video1 uk0 random tty00 tty01 tty02 tty03 tty04 tty05 tty06
-	R tty07 tty08 tty09 tty0a tty0b pf wd0 wd1 wd2 wd3 std st0 st1
-	R fd
+	R diskmap vscsi0 ch0 audio0 audio1 audio2 audio3 kstat dt bpf
+	R fuse pppac pppx hotplug ptm local wscons pci0 pci1 pci2 pci3
+	R uall video0 video1 uk0 random tty00 tty01 tty02 tty03 tty04
+	R tty05 tty06 tty07 tty08 tty09 tty0a tty0b pf wd0 wd1 wd2 wd3
+	R std st0 st1 fd
 	;;
 
 wd*|sd*)

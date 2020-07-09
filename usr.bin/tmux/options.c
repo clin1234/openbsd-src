@@ -1,4 +1,4 @@
-/* $OpenBSD: options.c,v 1.44 2019/05/12 18:16:33 nicm Exp $ */
+/* $OpenBSD: options.c,v 1.59 2020/06/16 08:18:34 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -19,6 +19,7 @@
 #include <sys/types.h>
 
 #include <ctype.h>
+#include <fnmatch.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,9 @@ struct options_entry {
 	const struct options_table_entry	*tableentry;
 	union options_value			 value;
 
+	int					 cached;
+	struct style				 style;
+
 	RB_ENTRY(options_entry)			 entry;
 };
 
@@ -62,6 +66,7 @@ struct options {
 };
 
 static struct options_entry	*options_add(struct options *, const char *);
+static void			 options_remove(struct options_entry *);
 
 #define OPTIONS_IS_STRING(o)						\
 	((o)->tableentry == NULL ||					\
@@ -73,9 +78,6 @@ static struct options_entry	*options_add(struct options *, const char *);
 	    (o)->tableentry->type == OPTIONS_TABLE_COLOUR ||		\
 	    (o)->tableentry->type == OPTIONS_TABLE_FLAG ||		\
 	    (o)->tableentry->type == OPTIONS_TABLE_CHOICE))
-#define OPTIONS_IS_STYLE(o) \
-	((o)->tableentry != NULL &&					\
-	    (o)->tableentry->type == OPTIONS_TABLE_STYLE)
 #define OPTIONS_IS_COMMAND(o) \
 	((o)->tableentry != NULL &&					\
 	    (o)->tableentry->type == OPTIONS_TABLE_COMMAND)
@@ -100,7 +102,7 @@ options_parent_table_entry(struct options *oo, const char *s)
 
 	if (oo->parent == NULL)
 		fatalx("no parent options for %s", s);
-	o = options_get_only(oo->parent, s);
+	o = options_get(oo->parent, s);
 	if (o == NULL)
 		fatalx("%s not in parent options", s);
 	return (o->tableentry);
@@ -116,22 +118,20 @@ options_value_free(struct options_entry *o, union options_value *ov)
 }
 
 static char *
-options_value_tostring(struct options_entry *o, union options_value *ov,
+options_value_to_string(struct options_entry *o, union options_value *ov,
     int numeric)
 {
 	char	*s;
 
 	if (OPTIONS_IS_COMMAND(o))
-		return (cmd_list_print(ov->cmdlist));
-	if (OPTIONS_IS_STYLE(o))
-		return (xstrdup(style_tostring(&ov->style)));
+		return (cmd_list_print(ov->cmdlist, 0));
 	if (OPTIONS_IS_NUMBER(o)) {
 		switch (o->tableentry->type) {
 		case OPTIONS_TABLE_NUMBER:
 			xasprintf(&s, "%lld", ov->number);
 			break;
 		case OPTIONS_TABLE_KEY:
-			s = xstrdup(key_string_lookup_key(ov->number));
+			s = xstrdup(key_string_lookup_key(ov->number, 0));
 			break;
 		case OPTIONS_TABLE_COLOUR:
 			s = xstrdup(colour_tostring(ov->number));
@@ -146,7 +146,6 @@ options_value_tostring(struct options_entry *o, union options_value *ov,
 			s = xstrdup(o->tableentry->choices[ov->number]);
 			break;
 		case OPTIONS_TABLE_STRING:
-		case OPTIONS_TABLE_STYLE:
 		case OPTIONS_TABLE_COMMAND:
 			fatalx("not a number option type");
 		}
@@ -176,6 +175,18 @@ options_free(struct options *oo)
 	RB_FOREACH_SAFE(o, options_tree, &oo->tree, tmp)
 		options_remove(o);
 	free(oo);
+}
+
+struct options *
+options_get_parent(struct options *oo)
+{
+	return (oo->parent);
+}
+
+void
+options_set_parent(struct options *oo, struct options *parent)
+{
+	oo->parent = parent;
 }
 
 struct options_entry *
@@ -252,15 +263,40 @@ options_default(struct options *oo, const struct options_table_entry *oe)
 	case OPTIONS_TABLE_STRING:
 		ov->string = xstrdup(oe->default_str);
 		break;
-	case OPTIONS_TABLE_STYLE:
-		style_set(&ov->style, &grid_default_cell);
-		style_parse(&ov->style, &grid_default_cell, oe->default_str);
-		break;
 	default:
 		ov->number = oe->default_num;
 		break;
 	}
 	return (o);
+}
+
+char *
+options_default_to_string(const struct options_table_entry *oe)
+{
+	char	*s;
+
+	switch (oe->type) {
+	case OPTIONS_TABLE_STRING:
+	case OPTIONS_TABLE_COMMAND:
+		s = xstrdup(oe->default_str);
+		break;
+	case OPTIONS_TABLE_NUMBER:
+		xasprintf(&s, "%lld", oe->default_num);
+		break;
+	case OPTIONS_TABLE_KEY:
+		s = xstrdup(key_string_lookup_key(oe->default_num, 0));
+		break;
+	case OPTIONS_TABLE_COLOUR:
+		s = xstrdup(colour_tostring(oe->default_num));
+		break;
+	case OPTIONS_TABLE_FLAG:
+		s = xstrdup(oe->default_num ? "on" : "off");
+		break;
+	case OPTIONS_TABLE_CHOICE:
+		s = xstrdup(oe->choices[oe->default_num]);
+		break;
+	}
+	return (s);
 }
 
 static struct options_entry *
@@ -280,7 +316,7 @@ options_add(struct options *oo, const char *name)
 	return (o);
 }
 
-void
+static void
 options_remove(struct options_entry *o)
 {
 	struct options	*oo = o->owner;
@@ -290,6 +326,7 @@ options_remove(struct options_entry *o)
 	else
 		options_value_free(o, &o->value);
 	RB_REMOVE(options_tree, &oo->tree, o);
+	free((void *)o->name);
 	free(o);
 }
 
@@ -297,6 +334,12 @@ const char *
 options_name(struct options_entry *o)
 {
 	return (o->name);
+}
+
+struct options *
+options_owner(struct options_entry *o)
+{
+	return (o->owner);
 }
 
 const struct options_table_entry *
@@ -312,6 +355,17 @@ options_array_item(struct options_entry *o, u_int idx)
 
 	a.index = idx;
 	return (RB_FIND(options_array, &o->value.array, &a));
+}
+
+static struct options_array_item *
+options_array_new(struct options_entry *o, u_int idx)
+{
+	struct options_array_item	*a;
+
+	a = xcalloc(1, sizeof *a);
+	a->index = idx;
+	RB_INSERT(options_array, &o->value.array, a);
+	return (a);
 }
 
 static void
@@ -353,8 +407,7 @@ options_array_set(struct options_entry *o, u_int idx, const char *value,
 {
 	struct options_array_item	*a;
 	char				*new;
-	struct cmd_list			*cmdlist;
-	char				*error;
+	struct cmd_parse_result		*pr;
 
 	if (!OPTIONS_IS_ARRAY(o)) {
 		if (cause != NULL)
@@ -362,43 +415,56 @@ options_array_set(struct options_entry *o, u_int idx, const char *value,
 		return (-1);
 	}
 
-	if (OPTIONS_IS_COMMAND(o)) {
-		cmdlist = cmd_string_parse(value, NULL, 0, &error);
-		if (cmdlist == NULL && error != NULL) {
-			if (cause != NULL)
-				*cause = error;
-			else
-				free(error);
-			return (-1);
-		}
-	}
-
-	a = options_array_item(o, idx);
 	if (value == NULL) {
+		a = options_array_item(o, idx);
 		if (a != NULL)
 			options_array_free(o, a);
 		return (0);
 	}
 
+	if (OPTIONS_IS_COMMAND(o)) {
+		pr = cmd_parse_from_string(value, NULL);
+		switch (pr->status) {
+		case CMD_PARSE_EMPTY:
+			if (cause != NULL)
+				*cause = xstrdup("empty command");
+			return (-1);
+		case CMD_PARSE_ERROR:
+			if (cause != NULL)
+				*cause = pr->error;
+			else
+				free(pr->error);
+			return (-1);
+		case CMD_PARSE_SUCCESS:
+			break;
+		}
+
+		a = options_array_item(o, idx);
+		if (a == NULL)
+			a = options_array_new(o, idx);
+		else
+			options_value_free(o, &a->value);
+		a->value.cmdlist = pr->cmdlist;
+		return (0);
+	}
+
 	if (OPTIONS_IS_STRING(o)) {
+		a = options_array_item(o, idx);
 		if (a != NULL && append)
 			xasprintf(&new, "%s%s", a->value.string, value);
 		else
 			new = xstrdup(value);
+		if (a == NULL)
+			a = options_array_new(o, idx);
+		else
+			options_value_free(o, &a->value);
+		a->value.string = new;
+		return (0);
 	}
 
-	if (a == NULL) {
-		a = xcalloc(1, sizeof *a);
-		a->index = idx;
-		RB_INSERT(options_array, &o->value.array, a);
-	} else
-		options_value_free(o, &a->value);
-
-	if (OPTIONS_IS_STRING(o))
-		a->value.string = new;
-	else if (OPTIONS_IS_COMMAND(o))
-		a->value.cmdlist = cmdlist;
-	return (0);
+	if (cause != NULL)
+		*cause = xstrdup("wrong array type");
+	return (-1);
 }
 
 int
@@ -469,19 +535,19 @@ options_array_item_value(struct options_array_item *a)
 }
 
 int
-options_isarray(struct options_entry *o)
+options_is_array(struct options_entry *o)
 {
 	return (OPTIONS_IS_ARRAY(o));
 }
 
 int
-options_isstring(struct options_entry *o)
+options_is_string(struct options_entry *o)
 {
 	return (OPTIONS_IS_STRING(o));
 }
 
 char *
-options_tostring(struct options_entry *o, int idx, int numeric)
+options_to_string(struct options_entry *o, int idx, int numeric)
 {
 	struct options_array_item	*a;
 
@@ -491,9 +557,9 @@ options_tostring(struct options_entry *o, int idx, int numeric)
 		a = options_array_item(o, idx);
 		if (a == NULL)
 			return (xstrdup(""));
-		return (options_value_tostring(o, &a->value, numeric));
+		return (options_value_to_string(o, &a->value, numeric));
 	}
-	return (options_value_tostring(o, &o->value, numeric));
+	return (options_value_to_string(o, &o->value, numeric));
 }
 
 char *
@@ -539,7 +605,7 @@ options_parse_get(struct options *oo, const char *s, int *idx, int only)
 }
 
 char *
-options_match(const char *s, int *idx, int* ambiguous)
+options_match(const char *s, int *idx, int *ambiguous)
 {
 	const struct options_table_entry	*oe, *found;
 	char					*name;
@@ -580,7 +646,7 @@ options_match(const char *s, int *idx, int* ambiguous)
 
 struct options_entry *
 options_match_get(struct options *oo, const char *s, int *idx, int only,
-    int* ambiguous)
+    int *ambiguous)
 {
 	char			*name;
 	struct options_entry	*o;
@@ -623,25 +689,13 @@ options_get_number(struct options *oo, const char *name)
 	return (o->value.number);
 }
 
-struct style *
-options_get_style(struct options *oo, const char *name)
-{
-	struct options_entry	*o;
-
-	o = options_get(oo, name);
-	if (o == NULL)
-		fatalx("missing option %s", name);
-	if (!OPTIONS_IS_STYLE(o))
-		fatalx("option %s is not a style", name);
-	return (&o->value.style);
-}
-
 struct options_entry *
 options_set_string(struct options *oo, const char *name, int append,
     const char *fmt, ...)
 {
 	struct options_entry	*o;
 	va_list			 ap;
+	const char		*separator = "";
 	char			*s, *value;
 
 	va_start(ap, fmt);
@@ -650,7 +704,12 @@ options_set_string(struct options *oo, const char *name, int append,
 
 	o = options_get_only(oo, name);
 	if (o != NULL && append && OPTIONS_IS_STRING(o)) {
-		xasprintf(&value, "%s%s", o->value.string, s);
+		if (*name != '@') {
+			separator = o->tableentry->separator;
+			if (separator == NULL)
+				separator = "";
+		}
+		xasprintf(&value, "%s%s%s", o->value.string, separator, s);
 		free(s);
 	} else
 		value = s;
@@ -666,6 +725,7 @@ options_set_string(struct options *oo, const char *name, int append,
 		fatalx("option %s is not a string", name);
 	free(o->value.string);
 	o->value.string = value;
+	o->cached = 0;
 	return (o);
 }
 
@@ -690,49 +750,102 @@ options_set_number(struct options *oo, const char *name, long long value)
 	return (o);
 }
 
-struct options_entry *
-options_set_style(struct options *oo, const char *name, int append,
-    const char *value)
+int
+options_scope_from_name(struct args *args, int window,
+    const char *name, struct cmd_find_state *fs, struct options **oo,
+    char **cause)
 {
-	struct options_entry	*o;
-	struct style		 sy;
+	struct session				*s = fs->s;
+	struct winlink				*wl = fs->wl;
+	struct window_pane			*wp = fs->wp;
+	const char				*target = args_get(args, 't');
+	const struct options_table_entry	*oe;
+	int					 scope = OPTIONS_TABLE_NONE;
 
 	if (*name == '@')
-		fatalx("user option %s must be a string", name);
+		return (options_scope_from_flags(args, window, fs, oo, cause));
 
-	o = options_get_only(oo, name);
-	if (o != NULL && append && OPTIONS_IS_STYLE(o))
-		style_copy(&sy, &o->value.style);
-	else
-		style_set(&sy, &grid_default_cell);
-	if (style_parse(&sy, &grid_default_cell, value) == -1)
-		return (NULL);
-	if (o == NULL) {
-		o = options_default(oo, options_parent_table_entry(oo, name));
-		if (o == NULL)
-			return (NULL);
+	for (oe = options_table; oe->name != NULL; oe++) {
+		if (strcmp(oe->name, name) == 0)
+			break;
 	}
-
-	if (!OPTIONS_IS_STYLE(o))
-		fatalx("option %s is not a style", name);
-	style_copy(&o->value.style, &sy);
-	return (o);
+	if (oe->name == NULL) {
+		xasprintf(cause, "unknown option: %s", name);
+		return (OPTIONS_TABLE_NONE);
+	}
+	switch (oe->scope) {
+	case OPTIONS_TABLE_SERVER:
+		*oo = global_options;
+		scope = OPTIONS_TABLE_SERVER;
+		break;
+	case OPTIONS_TABLE_SESSION:
+		if (args_has(args, 'g')) {
+			*oo = global_s_options;
+			scope = OPTIONS_TABLE_SESSION;
+		} else if (s == NULL && target != NULL)
+			xasprintf(cause, "no such session: %s", target);
+		else if (s == NULL)
+			xasprintf(cause, "no current session");
+		else {
+			*oo = s->options;
+			scope = OPTIONS_TABLE_SESSION;
+		}
+		break;
+	case OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE:
+		if (args_has(args, 'p')) {
+			if (wp == NULL && target != NULL)
+				xasprintf(cause, "no such pane: %s", target);
+			else if (wp == NULL)
+				xasprintf(cause, "no current pane");
+			else {
+				*oo = wp->options;
+				scope = OPTIONS_TABLE_PANE;
+			}
+			break;
+		}
+		/* FALLTHROUGH */
+	case OPTIONS_TABLE_WINDOW:
+		if (args_has(args, 'g')) {
+			*oo = global_w_options;
+			scope = OPTIONS_TABLE_WINDOW;
+		} else if (wl == NULL && target != NULL)
+			xasprintf(cause, "no such window: %s", target);
+		else if (wl == NULL)
+			xasprintf(cause, "no current window");
+		else {
+			*oo = wl->window->options;
+			scope = OPTIONS_TABLE_WINDOW;
+		}
+		break;
+	}
+	return (scope);
 }
 
-enum options_table_scope
+int
 options_scope_from_flags(struct args *args, int window,
     struct cmd_find_state *fs, struct options **oo, char **cause)
 {
-	struct session	*s = fs->s;
-	struct winlink	*wl = fs->wl;
-	const char	*target= args_get(args, 't');
+	struct session		*s = fs->s;
+	struct winlink		*wl = fs->wl;
+	struct window_pane	*wp = fs->wp;
+	const char		*target = args_get(args, 't');
 
 	if (args_has(args, 's')) {
 		*oo = global_options;
 		return (OPTIONS_TABLE_SERVER);
 	}
 
-	if (window || args_has(args, 'w')) {
+	if (args_has(args, 'p')) {
+		if (wp == NULL) {
+			if (target != NULL)
+				xasprintf(cause, "no such pane: %s", target);
+			else
+				xasprintf(cause, "no current pane");
+			return (OPTIONS_TABLE_NONE);
+		}
+		*oo = wp->options;
+		return (OPTIONS_TABLE_PANE);
+	} else if (window || args_has(args, 'w')) {
 		if (args_has(args, 'g')) {
 			*oo = global_w_options;
 			return (OPTIONS_TABLE_WINDOW);
@@ -761,4 +874,254 @@ options_scope_from_flags(struct args *args, int window,
 		*oo = s->options;
 		return (OPTIONS_TABLE_SESSION);
 	}
+}
+
+struct style *
+options_string_to_style(struct options *oo, const char *name,
+    struct format_tree *ft)
+{
+	struct options_entry	*o;
+	const char		*s;
+	char			*expanded;
+
+	o = options_get(oo, name);
+	if (o == NULL || !OPTIONS_IS_STRING(o))
+		return (NULL);
+
+	if (o->cached)
+		return (&o->style);
+	s = o->value.string;
+	log_debug("%s: %s is '%s'", __func__, name, s);
+
+	style_set(&o->style, &grid_default_cell);
+	o->cached = (strstr(s, "#{") == NULL);
+
+	if (ft != NULL && !o->cached) {
+		expanded = format_expand(ft, s);
+		if (style_parse(&o->style, &grid_default_cell, expanded) != 0) {
+			free(expanded);
+			return (NULL);
+		}
+		free(expanded);
+	} else {
+		if (style_parse(&o->style, &grid_default_cell, s) != 0)
+			return (NULL);
+	}
+	return (&o->style);
+}
+
+static int
+options_from_string_check(const struct options_table_entry *oe,
+    const char *value, char **cause)
+{
+	struct style	sy;
+
+	if (oe == NULL)
+		return (0);
+	if (strcmp(oe->name, "default-shell") == 0 && !checkshell(value)) {
+		xasprintf(cause, "not a suitable shell: %s", value);
+		return (-1);
+	}
+	if (oe->pattern != NULL && fnmatch(oe->pattern, value, 0) != 0) {
+		xasprintf(cause, "value is invalid: %s", value);
+		return (-1);
+	}
+	if ((oe->flags & OPTIONS_TABLE_IS_STYLE) &&
+	    strstr(value, "#{") == NULL &&
+	    style_parse(&sy, &grid_default_cell, value) != 0) {
+		xasprintf(cause, "invalid style: %s", value);
+		return (-1);
+	}
+	return (0);
+}
+
+static int
+options_from_string_flag(struct options *oo, const char *name,
+    const char *value, char **cause)
+{
+	int	flag;
+
+	if (value == NULL || *value == '\0')
+		flag = !options_get_number(oo, name);
+	else if (strcmp(value, "1") == 0 ||
+	    strcasecmp(value, "on") == 0 ||
+	    strcasecmp(value, "yes") == 0)
+		flag = 1;
+	else if (strcmp(value, "0") == 0 ||
+	    strcasecmp(value, "off") == 0 ||
+	    strcasecmp(value, "no") == 0)
+		flag = 0;
+	else {
+		xasprintf(cause, "bad value: %s", value);
+		return (-1);
+	}
+	options_set_number(oo, name, flag);
+	return (0);
+}
+
+static int
+options_from_string_choice(const struct options_table_entry *oe,
+    struct options *oo, const char *name, const char *value, char **cause)
+{
+	const char	**cp;
+	int		  n, choice = -1;
+
+	if (value == NULL) {
+		choice = options_get_number(oo, name);
+		if (choice < 2)
+			choice = !choice;
+	} else {
+		n = 0;
+		for (cp = oe->choices; *cp != NULL; cp++) {
+			if (strcmp(*cp, value) == 0)
+				choice = n;
+			n++;
+		}
+		if (choice == -1) {
+			xasprintf(cause, "unknown value: %s", value);
+			return (-1);
+		}
+	}
+	options_set_number(oo, name, choice);
+	return (0);
+}
+
+int
+options_from_string(struct options *oo, const struct options_table_entry *oe,
+    const char *name, const char *value, int append, char **cause)
+{
+	enum options_table_type	 type;
+	long long		 number;
+	const char		*errstr, *new;
+	char			*old;
+	key_code		 key;
+
+	if (oe != NULL) {
+		if (value == NULL &&
+		    oe->type != OPTIONS_TABLE_FLAG &&
+		    oe->type != OPTIONS_TABLE_CHOICE) {
+			xasprintf(cause, "empty value");
+			return (-1);
+		}
+		type = oe->type;
+	} else {
+		if (*name != '@') {
+			xasprintf(cause, "bad option name");
+			return (-1);
+		}
+		type = OPTIONS_TABLE_STRING;
+	}
+
+	switch (type) {
+	case OPTIONS_TABLE_STRING:
+		old = xstrdup(options_get_string(oo, name));
+		options_set_string(oo, name, append, "%s", value);
+
+		new = options_get_string(oo, name);
+		if (options_from_string_check(oe, new, cause) != 0) {
+			options_set_string(oo, name, 0, "%s", old);
+			free(old);
+			return (-1);
+		}
+		free(old);
+		return (0);
+	case OPTIONS_TABLE_NUMBER:
+		number = strtonum(value, oe->minimum, oe->maximum, &errstr);
+		if (errstr != NULL) {
+			xasprintf(cause, "value is %s: %s", errstr, value);
+			return (-1);
+		}
+		options_set_number(oo, name, number);
+		return (0);
+	case OPTIONS_TABLE_KEY:
+		key = key_string_lookup_string(value);
+		if (key == KEYC_UNKNOWN) {
+			xasprintf(cause, "bad key: %s", value);
+			return (-1);
+		}
+		options_set_number(oo, name, key);
+		return (0);
+	case OPTIONS_TABLE_COLOUR:
+		if ((number = colour_fromstring(value)) == -1) {
+			xasprintf(cause, "bad colour: %s", value);
+			return (-1);
+		}
+		options_set_number(oo, name, number);
+		return (0);
+	case OPTIONS_TABLE_FLAG:
+		return (options_from_string_flag(oo, name, value, cause));
+	case OPTIONS_TABLE_CHOICE:
+		return (options_from_string_choice(oe, oo, name, value, cause));
+	case OPTIONS_TABLE_COMMAND:
+		break;
+	}
+	return (-1);
+}
+
+void
+options_push_changes(const char *name)
+{
+	struct client		*loop;
+	struct session		*s;
+	struct window		*w;
+	struct window_pane	*wp;
+
+	if (strcmp(name, "automatic-rename") == 0) {
+		RB_FOREACH(w, windows, &windows) {
+			if (w->active == NULL)
+				continue;
+			if (options_get_number(w->options, "automatic-rename"))
+				w->active->flags |= PANE_CHANGED;
+		}
+	}
+	if (strcmp(name, "key-table") == 0) {
+		TAILQ_FOREACH(loop, &clients, entry)
+			server_client_set_key_table(loop, NULL);
+	}
+	if (strcmp(name, "user-keys") == 0) {
+		TAILQ_FOREACH(loop, &clients, entry) {
+			if (loop->tty.flags & TTY_OPENED)
+				tty_keys_build(&loop->tty);
+		}
+	}
+	if (strcmp(name, "status") == 0 ||
+	    strcmp(name, "status-interval") == 0)
+		status_timer_start_all();
+	if (strcmp(name, "monitor-silence") == 0)
+		alerts_reset_all();
+	if (strcmp(name, "window-style") == 0 ||
+	    strcmp(name, "window-active-style") == 0) {
+		RB_FOREACH(wp, window_pane_tree, &all_window_panes)
+			wp->flags |= PANE_STYLECHANGED;
+	}
+	if (strcmp(name, "pane-border-status") == 0) {
+		RB_FOREACH(w, windows, &windows)
+			layout_fix_panes(w);
+	}
+	RB_FOREACH(s, sessions, &sessions)
+		status_update_cache(s);
+
+	recalculate_sizes();
+	TAILQ_FOREACH(loop, &clients, entry) {
+		if (loop->session != NULL)
+			server_redraw_client(loop);
+	}
+}
+
+int
+options_remove_or_default(struct options_entry *o, int idx, char **cause)
+{
+	struct options	*oo = o->owner;
+
+	if (idx == -1) {
+		if (o->tableentry != NULL &&
+		    (oo == global_options ||
+		    oo == global_s_options ||
+		    oo == global_w_options))
+			options_default(oo, o->tableentry);
+		else
+			options_remove(o);
+	} else if (options_array_set(o, idx, NULL, 0, cause) != 0)
+		return (-1);
+	return (0);
 }

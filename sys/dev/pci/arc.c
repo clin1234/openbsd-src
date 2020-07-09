@@ -1,4 +1,4 @@
-/*	$OpenBSD: arc.c,v 1.107 2015/09/10 18:10:33 deraadt Exp $ */
+/*	$OpenBSD: arc.c,v 1.113 2020/06/27 17:28:58 krw Exp $ */
 
 /*
  * Copyright (c) 2006 David Gwynne <dlg@openbsd.org>
@@ -604,7 +604,6 @@ int	arc_intr_D(void *);
 
 /* interface for scsi midlayer to talk to */
 void	arc_scsi_cmd(struct scsi_xfer *);
-void	arc_minphys(struct buf *, struct scsi_link *);
 
 /* code to deal with getting bits in and out of the bus space */
 u_int32_t	arc_read(struct arc_softc *, bus_size_t);
@@ -689,7 +688,7 @@ struct cfdriver arc_cd = {
 };
 
 struct scsi_adapter arc_switch = {
-	arc_scsi_cmd, arc_minphys, NULL, NULL, NULL
+	arc_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 /* real stuff for dealing with the hardware */
@@ -805,12 +804,11 @@ arc_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_link.adapter = &arc_switch;
 	sc->sc_link.adapter_softc = sc;
-	sc->sc_link.adapter_target = ARC_MAX_TARGET;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.adapter_buswidth = ARC_MAX_TARGET;
 	sc->sc_link.openings = sc->sc_req_count;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	child = config_found(self, &saa, scsiprint);
@@ -859,7 +857,7 @@ arc_activate(struct device *self, int act)
 		rv = config_activate_children(self, act);
 		break;
 	}
-	return (rv);	
+	return (rv);
 }
 
 int
@@ -935,8 +933,8 @@ arc_intr_C(void *arg)
 	int				ret = 0, throttling;
 
 	intrstat = arc_read(sc, ARC_RC_INTR_STAT);
-	if (!(intrstat & (ARC_RC_INTR_STAT_POSTQUEUE | 
-		ARC_RC_INTR_STAT_DOORBELL)))
+	if (!(intrstat & (ARC_RC_INTR_STAT_POSTQUEUE |
+	    ARC_RC_INTR_STAT_DOORBELL)))
 		return (ret);
 
 	if (intrstat & ARC_RC_INTR_STAT_DOORBELL) {
@@ -966,7 +964,7 @@ arc_intr_C(void *arg)
 				if (obmsg == ARC_FWINFO_SIGNATURE_GET_CONFIG)
 					;	/* handle devices hot-plug */
 			}
-			
+
 		}
 	}
 
@@ -1034,8 +1032,8 @@ arc_intr_D(void *arg)
 	struct arc_HBD_Msgu *pmu;
 
 	intrstat = arc_read(sc, ARC_RD_INTR_STAT);
-	if (!(intrstat & (ARC_RD_INTR_STAT_POSTQUEUE | 
-		ARC_RD_INTR_STAT_DOORBELL)))
+	if (!(intrstat & (ARC_RD_INTR_STAT_POSTQUEUE |
+	    ARC_RD_INTR_STAT_DOORBELL)))
 		return (ret);
 
 	if (intrstat & ARC_RD_INTR_STAT_DOORBELL) {
@@ -1065,7 +1063,6 @@ arc_intr_D(void *arg)
 				if (obmsg == ARC_FWINFO_SIGNATURE_GET_CONFIG)
 					;	/* handle devices hot-plug */
 			}
-			
 		}
 	}
 
@@ -1261,7 +1258,7 @@ arc_load_xs(struct arc_ccb *ccb)
 		sge->sg_hi_addr = htole32((u_int32_t)(addr >> 32));
 		sge->sg_lo_addr = htole32((u_int32_t)addr);
 	}
-	ccb->arc_io_cmd_length = sizeof(struct arc_msg_scsicmd) + 
+	ccb->arc_io_cmd_length = sizeof(struct arc_msg_scsicmd) +
 	    sizeof(struct arc_sge) * dmap->dm_nsegs;
 	msg_length = ccb->arc_io_cmd_length;
 	ccb->ccb_cmd->cmd.msgPages = (msg_length/256) + ((msg_length % 256) ? 1 : 0);
@@ -1339,7 +1336,7 @@ arc_complete(struct arc_softc *sc, struct arc_ccb *nccb, int timeout)
 	u_int16_t	doneq_index;
 	struct arc_HBD_Msgu *phbdmu;
 	int		ret = 0;
-	
+
 	arc_disable_all_intr(sc);
 	do {
 		switch(sc->sc_adp_type) {
@@ -1358,7 +1355,7 @@ arc_complete(struct arc_softc *sc, struct arc_ccb *nccb, int timeout)
 			if((write_ptr & 0xff) == (doneq_index & 0xff)) {
 Loop0:
 				reg = 0xffffffff;
-			}	
+			}
 			else {
 				doneq_index = arcmsr_get_doneq_index(phbdmu);
 				reg = phbdmu->done_qbuffer[(doneq_index & 0xFF)+1].addressLow;
@@ -1396,19 +1393,10 @@ Loop0:
 		    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
 
 		arc_scsi_cmd_done(sc, ccb, error);
-			
 	} while (nccb != ccb);
 	arc_enable_all_intr(sc);
 
 	return (ret);
-}
-
-void
-arc_minphys(struct buf *bp, struct scsi_link *sl)
-{
-	if (bp->b_bcount > MAXPHYS)
-		bp->b_bcount = MAXPHYS;
-	minphys(bp);
 }
 
 void
@@ -1498,7 +1486,7 @@ arc_map_pci_resources(struct arc_softc *sc, struct pci_attach_args *pa)
 				" interface register\n");
 			return(1);
 		}
-		break; 
+		break;
 	}
 
 	arc_disable_all_intr(sc);
@@ -2474,7 +2462,7 @@ arc_msgbuf(struct arc_softc *sc, void *wptr, size_t wbuflen, void *rptr,
 			 * idea of size, if required.
 			 * This deals with the growth of diskinfo struct from
 			 * 128 to 132 bytes.
-			 */ 
+			 */
 			if (sreadok && rdone >= sizeof(struct arc_fw_bufhdr) &&
 			    rlenhdr == 0) {
 				bufhdr = (struct arc_fw_bufhdr *)rbuf;
@@ -2499,7 +2487,7 @@ arc_msgbuf(struct arc_softc *sc, void *wptr, size_t wbuflen, void *rptr,
 		DNPRINTF(ARC_D_DB, "%s:  get_len: 0x%x, req_len: 0x%x\n",
 			DEVNAME(sc), bufhdr->len, rbuflen);
 	}
-	
+
 	bcopy(rbuf + sizeof(struct arc_fw_bufhdr), rptr, bufhdr->len);
 	cksum = arc_msg_cksum(rptr, bufhdr->len);
 	if (rbuf[rlen - 1] != cksum) {
@@ -2571,7 +2559,7 @@ arc_unlock(struct arc_softc *sc)
 void
 arc_wait(struct arc_softc *sc)
 {
-	int				s;
+	int				error, s;
 	u_int32_t int_mask;
 
 	s = splbio();
@@ -2579,7 +2567,8 @@ arc_wait(struct arc_softc *sc)
 	case ARC_HBA_TYPE_A:
 		int_mask = arc_read(sc, ARC_RA_INTRMASK) & ~ARC_RA_INTRMASK_DOORBELL;
 		arc_write(sc, ARC_RA_INTRMASK, int_mask);
-		if (tsleep(sc, PWAIT, "arcdb", hz) == EWOULDBLOCK) {
+		error = tsleep_nsec(sc, PWAIT, "arcdb", SEC_TO_NSEC(1));
+		if (error == EWOULDBLOCK) {
 			int_mask = arc_read(sc, ARC_RA_INTRMASK) | ARC_RA_INTRMASK_DOORBELL;
 			arc_write(sc, ARC_RA_INTRMASK, int_mask);
 		}
@@ -2587,7 +2576,8 @@ arc_wait(struct arc_softc *sc)
 	case ARC_HBA_TYPE_C:
 		int_mask = arc_read(sc, ARC_RC_INTR_MASK) & ~ARC_RC_INTR_MASK_DOORBELL;
 		arc_write(sc, ARC_RC_INTR_MASK, int_mask);
-		if (tsleep(sc, PWAIT, "arcdb", hz) == EWOULDBLOCK) {
+		error = tsleep_nsec(sc, PWAIT, "arcdb", SEC_TO_NSEC(1));
+		if (error == EWOULDBLOCK) {
 			int_mask = arc_read(sc, ARC_RC_INTR_MASK) | ARC_RC_INTR_MASK_DOORBELL;
 			arc_write(sc, ARC_RC_INTR_MASK, int_mask);
 		}
@@ -2595,7 +2585,8 @@ arc_wait(struct arc_softc *sc)
 	case ARC_HBA_TYPE_D:
 		int_mask = arc_read(sc, ARC_RD_INTR_ENABLE) | ARC_RD_INTR_ENABLE_DOORBELL;
 		arc_write(sc, ARC_RD_INTR_ENABLE, int_mask);
-		if (tsleep(sc, PWAIT, "arcdb", hz) == EWOULDBLOCK) {
+		error = tsleep_nsec(sc, PWAIT, "arcdb", SEC_TO_NSEC(1));
+		if (error == EWOULDBLOCK) {
 			int_mask = arc_read(sc, ARC_RD_INTR_ENABLE) & ~ARC_RD_INTR_ENABLE_DOORBELL;
 			arc_write(sc, ARC_RD_INTR_ENABLE, int_mask);
 		}
@@ -2621,7 +2612,7 @@ arc_create_sensors(void *xat)
 	 * XXX * this is bollocks. the firmware has garbage coming out of it
 	 * so we have to wait a bit for it to finish spewing.
 	 */
-	tsleep(sc, PWAIT, "arcspew", 2 * hz);
+	tsleep_nsec(sc, PWAIT, "arcspew", SEC_TO_NSEC(2));
 
 	bzero(&bi, sizeof(bi));
 	if (arc_bio_inq(sc, &bi) != 0) {
@@ -2922,12 +2913,12 @@ arc_alloc_ccbs(struct arc_softc *sc)
 		ccb->cmd_dma_offset = len * i;
 
 		ccb->ccb_cmd = (struct arc_io_cmd *)&cmd[ccb->cmd_dma_offset];
-		ccb->ccb_cmd_post = (ARC_DMA_DVA(sc->sc_requests) + 
+		ccb->ccb_cmd_post = (ARC_DMA_DVA(sc->sc_requests) +
 		    ccb->cmd_dma_offset);
 		if ((sc->sc_adp_type != ARC_HBA_TYPE_C) &&
 		    (sc->sc_adp_type != ARC_HBA_TYPE_D))
-			ccb->ccb_cmd_post = ccb->ccb_cmd_post >> 
-				ARC_RA_POST_QUEUE_ADDR_SHIFT;
+			ccb->ccb_cmd_post = ccb->ccb_cmd_post >>
+			    ARC_RA_POST_QUEUE_ADDR_SHIFT;
 		arc_put_ccb(sc, ccb);
 	}
 	sc->sc_ccb_phys_hi = (u_int64_t)ARC_DMA_DVA(sc->sc_requests) >> 32;

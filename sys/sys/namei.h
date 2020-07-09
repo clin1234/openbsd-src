@@ -1,4 +1,4 @@
-/*	$OpenBSD: namei.h,v 1.40 2019/05/13 22:55:27 beck Exp $	*/
+/*	$OpenBSD: namei.h,v 1.45 2020/03/19 13:55:20 anton Exp $	*/
 /*	$NetBSD: namei.h,v 1.11 1996/02/09 18:25:20 christos Exp $	*/
 
 /*
@@ -38,6 +38,8 @@
 #include <sys/queue.h>
 #include <sys/tree.h>
 #include <sys/uio.h>
+
+struct unveil;
 
 /*
  * Encapsulation of namei parameters.
@@ -203,6 +205,15 @@ int cache_revlookup(struct vnode *, struct vnode **, char **, char *);
 void nchinit(void);
 struct mount;
 void cache_purgevfs(struct mount *);
+
+int unveil_add(struct proc *, struct nameidata *, const char *);
+void unveil_removevnode(struct vnode *);
+void unveil_free_traversed_vnodes(struct nameidata *);
+ssize_t unveil_find_cover(struct vnode *, struct proc *);
+struct unveil *unveil_lookup(struct vnode *, struct process *, ssize_t *);
+void unveil_start_relative(struct proc *, struct nameidata *, struct vnode *);
+void unveil_check_component(struct proc *, struct nameidata *, struct vnode *);
+int unveil_check_final(struct proc *, struct nameidata *);
 
 extern struct pool namei_pool;
 

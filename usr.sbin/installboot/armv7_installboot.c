@@ -1,4 +1,4 @@
-/*	$OpenBSD: armv7_installboot.c,v 1.3 2017/05/07 10:40:17 kettenis Exp $	*/
+/*	$OpenBSD: armv7_installboot.c,v 1.5 2020/06/27 15:35:29 deraadt Exp $	*/
 /*	$NetBSD: installboot.c,v 1.5 1995/11/17 23:23:50 gwr Exp $ */
 
 /*
@@ -53,7 +53,7 @@
 
 #include "installboot.h"
 
-static void	write_efisystem(struct disklabel *, char);
+static void	write_filesystem(struct disklabel *, char);
 static int	findmbrfat(int, struct disklabel *);
 
 void
@@ -73,7 +73,7 @@ md_installboot(int devfd, char *dev)
 	int part;
 
 	/* Get and check disklabel. */
-	if (ioctl(devfd, DIOCGDINFO, &dl) != 0)
+	if (ioctl(devfd, DIOCGDINFO, &dl) == -1)
 		err(1, "disklabel: %s", dev);
 	if (dl.d_magic != DISKMAGIC)
 		errx(1, "bad disklabel magic=0x%08x", dl.d_magic);
@@ -84,14 +84,14 @@ md_installboot(int devfd, char *dev)
 
 	part = findmbrfat(devfd, &dl);
 	if (part != -1) {
-		write_efisystem(&dl, (char)part);
+		write_filesystem(&dl, (char)part);
 		return;
 	}
 }
 
 
 static void
-write_efisystem(struct disklabel *dl, char part)
+write_filesystem(struct disklabel *dl, char part)
 {
 	static char *fsckfmt = "/sbin/fsck_msdos %s >/dev/null";
 	static char *newfsfmt ="/sbin/newfs_msdos %s >/dev/null";

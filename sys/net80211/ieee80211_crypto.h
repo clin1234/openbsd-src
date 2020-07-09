@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_crypto.h,v 1.25 2017/08/18 17:30:12 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_crypto.h,v 1.27 2020/05/15 14:21:09 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2007,2008 Damien Bergamini <damien.bergamini@free.fr>
@@ -78,6 +78,7 @@ struct ieee80211_key {
 #define IEEE80211_KEY_GROUP	0x00000001	/* group data key */
 #define IEEE80211_KEY_TX	0x00000002	/* Tx+Rx */
 #define IEEE80211_KEY_IGTK	0x00000004	/* integrity group key */
+#define IEEE80211_KEY_SWCRYPTO	0x00000080	/* loaded for software crypto */
 
 	u_int			k_len;
 	u_int64_t		k_rsc[IEEE80211_NUM_TID];
@@ -159,6 +160,8 @@ void	ieee80211_tkip_delete_key(struct ieee80211com *,
 	    struct ieee80211_key *);
 struct	mbuf *ieee80211_tkip_encrypt(struct ieee80211com *,
 	    struct mbuf *, struct ieee80211_key *);
+int	ieee80211_tkip_get_tsc(uint64_t *, uint64_t **, struct mbuf *,
+	    struct ieee80211_key *);
 struct	mbuf *ieee80211_tkip_decrypt(struct ieee80211com *,
 	    struct mbuf *, struct ieee80211_key *);
 void	ieee80211_tkip_mic(struct mbuf *, int, const u_int8_t *,
@@ -172,6 +175,8 @@ int	ieee80211_ccmp_set_key(struct ieee80211com *, struct ieee80211_key *);
 void	ieee80211_ccmp_delete_key(struct ieee80211com *,
 	    struct ieee80211_key *);
 struct	mbuf *ieee80211_ccmp_encrypt(struct ieee80211com *, struct mbuf *,
+	    struct ieee80211_key *);
+int	ieee80211_ccmp_get_pn(uint64_t *, uint64_t **, struct mbuf *,
 	    struct ieee80211_key *);
 struct	mbuf *ieee80211_ccmp_decrypt(struct ieee80211com *, struct mbuf *,
 	    struct ieee80211_key *);

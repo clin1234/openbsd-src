@@ -1,4 +1,4 @@
-/*	$OpenBSD: utils.h,v 1.3 2013/05/12 04:58:41 ratchov Exp $	*/
+/*	$OpenBSD: utils.h,v 1.5 2020/01/23 05:40:09 ratchov Exp $	*/
 /*
  * Copyright (c) 2003-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -20,6 +20,11 @@
 
 #include <stddef.h>
 
+struct name {
+	struct name *next;
+	char str[];
+};
+
 void log_puts(char *);
 void log_putx(unsigned long);
 void log_putu(unsigned long);
@@ -30,6 +35,10 @@ void log_flush(void);
 void *xmalloc(size_t);
 char *xstrdup(char *);
 void xfree(void *);
+
+void namelist_add(struct name **, char *);
+void namelist_clear(struct name **);
+char *namelist_byindex(struct name **, unsigned int);
 
 /*
  * Log levels:

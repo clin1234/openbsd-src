@@ -1,4 +1,4 @@
-/*	$OpenBSD: wds.c,v 1.43 2017/09/08 05:36:52 deraadt Exp $	*/
+/*	$OpenBSD: wds.c,v 1.50 2020/07/04 18:50:55 krw Exp $	*/
 /*	$NetBSD: wds.c,v 1.13 1996/11/03 16:20:31 mycroft Exp $	*/
 
 #undef	WDSDIAG
@@ -160,7 +160,6 @@ void    wds_done(struct wds_softc *, struct wds_scb *, u_char);
 int	wds_find(struct isa_attach_args *, struct wds_softc *);
 void	wds_init(struct wds_softc *);
 void	wds_inquire_setup_information(struct wds_softc *);
-void    wdsminphys(struct buf *, struct scsi_link *);
 void    wds_scsi_cmd(struct scsi_xfer *);
 void	wds_sense(struct wds_softc *, struct wds_scb *);
 int	wds_poll(struct wds_softc *, struct scsi_xfer *, int);
@@ -169,10 +168,7 @@ void	wds_timeout(void *);
 int	wdsprint(void *, const char *);
 
 struct scsi_adapter wds_switch = {
-	wds_scsi_cmd,
-	wdsminphys,
-	0,
-	0,
+	wds_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 int	wdsprobe(struct device *, void *, void *);
@@ -285,6 +281,9 @@ wdsattach(struct device *parent, struct device *self, void *aux)
 
 	wds_inquire_setup_information(sc);
 
+	sc->sc_ih = isa_intr_establish(ia->ia_ic, sc->sc_irq, IST_EDGE,
+	    IPL_BIO, wdsintr, sc, sc->sc_dev.dv_xname);
+
 	/*
 	 * fill in the prototype scsi_link.
 	 */
@@ -297,10 +296,6 @@ wdsattach(struct device *parent, struct device *self, void *aux)
 	sc->sc_link.openings = 1;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	sc->sc_ih = isa_intr_establish(ia->ia_ic, sc->sc_irq, IST_EDGE,
-	    IPL_BIO, wdsintr, sc, sc->sc_dev.dv_xname);
-
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	/*
@@ -503,7 +498,7 @@ wds_get_buf(struct wds_softc *sc, int flags)
 		}
 		if ((flags & SCSI_NOSLEEP) != 0)
 			goto out;
-		tsleep(&wds_free_buffer, PRIBIO, "wdsbuf", 0);
+		tsleep_nsec(&wds_free_buffer, PRIBIO, "wdsbuf", INFSLP);
 	}
 
 	buf->busy = 1;
@@ -870,14 +865,6 @@ wds_inquire_setup_information(struct wds_softc *sc)
 out:
 	printf("\n");
 	scsi_io_put(&sc->sc_iopool, scb);
-}
-
-void
-wdsminphys(struct buf *bp, struct scsi_link *sl)
-{
-	if (bp->b_bcount > ((WDS_NSEG - 1) << PGSHIFT))
-		bp->b_bcount = ((WDS_NSEG - 1) << PGSHIFT);
-	minphys(bp);
 }
 
 /*

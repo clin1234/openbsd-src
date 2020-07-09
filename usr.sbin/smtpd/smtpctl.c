@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpctl.c,v 1.163 2019/01/14 09:37:40 eric Exp $	*/
+/*	$OpenBSD: smtpctl.c,v 1.167 2020/02/24 16:16:07 millert Exp $	*/
 
 /*
  * Copyright (c) 2013 Eric Faurot <eric@openbsd.org>
@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <event.h>
 #include <fts.h>
+#include <grp.h>
 #include <imsg.h>
 #include <inttypes.h>
 #include <pwd.h>
@@ -944,7 +945,7 @@ do_encrypt(int argc, struct parameter *argv)
 
 	if (argv)
 		p = argv[0].u.u_str;
-	execl(PATH_ENCRYPT, "encrypt", p, (char *)NULL);
+	execl(PATH_ENCRYPT, "encrypt", "--", p, (char *)NULL);
 	errx(1, "execl");
 }
 
@@ -1124,7 +1125,7 @@ sendmail_compat(int argc, char **argv)
 		 */
 		for (i = 1; i < argc; i++)
 			if (strncmp(argv[i], "-bi", 3) == 0)
-				exit(makemap(P_NEWALIASES, argc, argv));
+				exit(makemap(P_SENDMAIL, argc, argv));
 
 		if (!srv_connect())
 			offlinefp = offline_file();
@@ -1297,20 +1298,10 @@ display(const char *s)
 
 	if (is_encrypted_fp(fp)) {
 		int	i;
-		int	fd;
 		FILE   *ofp = NULL;
-		char	sfn[] = "/tmp/smtpd.XXXXXXXXXX";
 
-		if ((fd = mkstemp(sfn)) == -1 ||
-		    (ofp = fdopen(fd, "w+")) == NULL) {
-			int saved_errno = errno;
-			if (fd != -1) {
-				unlink(sfn);
-				close(fd);
-			}
-			errc(1, saved_errno, "mkstemp");
-		}
-		unlink(sfn);
+		if ((ofp = tmpfile()) == NULL)
+			err(1, "tmpfile");
 
 		for (i = 0; i < 3; i++) {
 			key = getpass("key> ");

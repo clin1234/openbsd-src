@@ -1,4 +1,4 @@
-/* $OpenBSD: layout-set.c,v 1.26 2019/05/14 07:37:50 nicm Exp $ */
+/* $OpenBSD: layout-set.c,v 1.29 2020/04/22 06:57:13 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -18,6 +18,7 @@
 
 #include <sys/types.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "tmux.h"
@@ -158,12 +159,12 @@ layout_set_even(struct window *w, enum layout_type type)
 	layout_spread_cell(w, lc);
 
 	/* Fix cell offsets. */
-	layout_fix_offsets(lc);
+	layout_fix_offsets(w);
 	layout_fix_panes(w);
 
 	layout_print_cell(w->layout_root, __func__, 1);
 
-	window_resize(w, lc->sx, lc->sy);
+	window_resize(w, lc->sx, lc->sy, -1, -1);
 	notify_window("window-layout-changed", w);
 	server_redraw_window(w);
 }
@@ -186,6 +187,8 @@ layout_set_main_h(struct window *w)
 	struct window_pane	*wp;
 	struct layout_cell	*lc, *lcmain, *lcother, *lcchild;
 	u_int			 n, mainh, otherh, sx, sy;
+	char			*cause;
+	const char		*s;
 
 	layout_print_cell(w->layout_root, __func__, 1);
 
@@ -198,8 +201,15 @@ layout_set_main_h(struct window *w)
 	/* Find available height - take off one line for the border. */
 	sy = w->sy - 1;
 
-	/* Get the main pane height and work out the other pane height. */
-	mainh = options_get_number(w->options, "main-pane-height");
+	/* Get the main pane height. */
+	s = options_get_string(w->options, "main-pane-height");
+	mainh = args_string_percentage(s, 0, sy, sy, &cause);
+	if (cause != NULL) {
+		mainh = 24;
+		free(cause);
+	}
+
+	/* Work out the other pane height. */
 	if (mainh + PANE_MINIMUM >= sy) {
 		if (sy <= PANE_MINIMUM + PANE_MINIMUM)
 			mainh = PANE_MINIMUM;
@@ -207,10 +217,12 @@ layout_set_main_h(struct window *w)
 			mainh = sy - PANE_MINIMUM;
 		otherh = PANE_MINIMUM;
 	} else {
-		otherh = options_get_number(w->options, "other-pane-height");
-		if (otherh == 0)
+		s = options_get_string(w->options, "other-pane-height");
+		otherh = args_string_percentage(s, 0, sy, sy, &cause);
+		if (cause != NULL || otherh == 0) {
 			otherh = sy - mainh;
-		else if (otherh > sy || sy - otherh < mainh)
+			free(cause);
+		} else if (otherh > sy || sy - otherh < mainh)
 			otherh = sy - mainh;
 		else
 			mainh = sy - otherh;
@@ -257,12 +269,12 @@ layout_set_main_h(struct window *w)
 	}
 
 	/* Fix cell offsets. */
-	layout_fix_offsets(lc);
+	layout_fix_offsets(w);
 	layout_fix_panes(w);
 
 	layout_print_cell(w->layout_root, __func__, 1);
 
-	window_resize(w, lc->sx, lc->sy);
+	window_resize(w, lc->sx, lc->sy, -1, -1);
 	notify_window("window-layout-changed", w);
 	server_redraw_window(w);
 }
@@ -273,6 +285,8 @@ layout_set_main_v(struct window *w)
 	struct window_pane	*wp;
 	struct layout_cell	*lc, *lcmain, *lcother, *lcchild;
 	u_int			 n, mainw, otherw, sx, sy;
+	char			*cause;
+	const char		*s;
 
 	layout_print_cell(w->layout_root, __func__, 1);
 
@@ -285,8 +299,15 @@ layout_set_main_v(struct window *w)
 	/* Find available width - take off one line for the border. */
 	sx = w->sx - 1;
 
-	/* Get the main pane width and work out the other pane width. */
-	mainw = options_get_number(w->options, "main-pane-width");
+	/* Get the main pane width. */
+	s = options_get_string(w->options, "main-pane-width");
+	mainw = args_string_percentage(s, 0, sx, sx, &cause);
+	if (cause != NULL) {
+		mainw = 80;
+		free(cause);
+	}
+
+	/* Work out the other pane width. */
 	if (mainw + PANE_MINIMUM >= sx) {
 		if (sx <= PANE_MINIMUM + PANE_MINIMUM)
 			mainw = PANE_MINIMUM;
@@ -294,10 +315,12 @@ layout_set_main_v(struct window *w)
 			mainw = sx - PANE_MINIMUM;
 		otherw = PANE_MINIMUM;
 	} else {
-		otherw = options_get_number(w->options, "other-pane-width");
-		if (otherw == 0)
+		s = options_get_string(w->options, "other-pane-width");
+		otherw = args_string_percentage(s, 0, sx, sx, &cause);
+		if (cause != NULL || otherw == 0) {
 			otherw = sx - mainw;
-		else if (otherw > sx || sx - otherw < mainw)
+			free(cause);
+		} else if (otherw > sx || sx - otherw < mainw)
 			otherw = sx - mainw;
 		else
 			mainw = sx - otherw;
@@ -344,12 +367,12 @@ layout_set_main_v(struct window *w)
 	}
 
 	/* Fix cell offsets. */
-	layout_fix_offsets(lc);
+	layout_fix_offsets(w);
 	layout_fix_panes(w);
 
 	layout_print_cell(w->layout_root, __func__, 1);
 
-	window_resize(w, lc->sx, lc->sy);
+	window_resize(w, lc->sx, lc->sy, -1, -1);
 	notify_window("window-layout-changed", w);
 	server_redraw_window(w);
 }
@@ -453,12 +476,12 @@ layout_set_tiled(struct window *w)
 	}
 
 	/* Fix cell offsets. */
-	layout_fix_offsets(lc);
+	layout_fix_offsets(w);
 	layout_fix_panes(w);
 
 	layout_print_cell(w->layout_root, __func__, 1);
 
-	window_resize(w, lc->sx, lc->sy);
+	window_resize(w, lc->sx, lc->sy, -1, -1);
 	notify_window("window-layout-changed", w);
 	server_redraw_window(w);
 }

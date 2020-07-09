@@ -1,4 +1,4 @@
-/*	$OpenBSD: uthum.c,v 1.32 2017/01/09 14:44:28 mpi Exp $   */
+/*	$OpenBSD: uthum.c,v 1.34 2020/02/14 14:55:30 mpi Exp $   */
 
 /*
  * Copyright (c) 2009, 2010 Yojiro UO <yuo@nui.org>
@@ -284,34 +284,36 @@ int
 uthum_issue_cmd(struct uthum_softc *sc, uint8_t target_cmd, int delay)
 {
 	uint8_t cmdbuf[32];
-	int i, actlen;
+	int i, actlen, olen;
+
+	olen = MIN(sc->sc_olen, sizeof(cmdbuf));
 
 	bzero(cmdbuf, sizeof(cmdbuf));
 	memcpy(cmdbuf, cmd_issue, sizeof(cmd_issue));
 	actlen = uhidev_set_report(sc->sc_hdev.sc_parent, UHID_OUTPUT_REPORT,
-	    sc->sc_hdev.sc_report_id, cmdbuf, sc->sc_olen);
-	if (actlen != sc->sc_olen)
+	    sc->sc_hdev.sc_report_id, cmdbuf, olen);
+	if (actlen != olen)
 		return EIO;
 
 	bzero(cmdbuf, sizeof(cmdbuf));
 	cmdbuf[0] = target_cmd;
 	actlen = uhidev_set_report(sc->sc_hdev.sc_parent, UHID_OUTPUT_REPORT,
-	    sc->sc_hdev.sc_report_id, cmdbuf, sc->sc_olen);
-	if (actlen != sc->sc_olen)
+	    sc->sc_hdev.sc_report_id, cmdbuf, olen);
+	if (actlen != olen)
 		return EIO;
 
 	bzero(cmdbuf, sizeof(cmdbuf));
 	for (i = 0; i < 7; i++) {
 		actlen = uhidev_set_report(sc->sc_hdev.sc_parent,
-		    UHID_OUTPUT_REPORT, sc->sc_hdev.sc_report_id, cmdbuf,
-		    sc->sc_olen);
-		if (actlen != sc->sc_olen)
+		    UHID_OUTPUT_REPORT, sc->sc_hdev.sc_report_id, cmdbuf, olen);
+		if (actlen != olen)
 			return EIO;
 	}
 
 	/* wait if required */
 	if (delay > 0)
-		tsleep(&sc->sc_sensortask, 0, "uthum", (delay*hz+999)/1000 + 1);
+		tsleep_nsec(&sc->sc_sensortask, 0, "uthum",
+		    MSEC_TO_NSEC(delay));
 
 	return 0;
 }
@@ -321,6 +323,7 @@ uthum_read_data(struct uthum_softc *sc, uint8_t target_cmd, uint8_t *buf,
 	size_t len, int delay)
 {
 	uint8_t cmdbuf[32], report[256];
+	int olen, flen;
 
 	/* if return buffer is null, do nothing */
 	if ((buf == NULL) || len == 0)
@@ -329,19 +332,23 @@ uthum_read_data(struct uthum_softc *sc, uint8_t target_cmd, uint8_t *buf,
 	if (uthum_issue_cmd(sc, target_cmd, 50))
 		return 0;
 
+	olen = MIN(sc->sc_olen, sizeof(cmdbuf));
+
 	bzero(cmdbuf, sizeof(cmdbuf));
 	memcpy(cmdbuf, cmd_query, sizeof(cmd_query));
 	if (uhidev_set_report(sc->sc_hdev.sc_parent, UHID_OUTPUT_REPORT,
-	    sc->sc_hdev.sc_report_id, cmdbuf, sc->sc_olen) != sc->sc_olen)
+	    sc->sc_hdev.sc_report_id, cmdbuf, olen) != olen)
 		return EIO;
 
 	/* wait if required */
 	if (delay > 0)
-		tsleep(&sc->sc_sensortask, 0, "uthum", (delay*hz+999)/1000 + 1);
+		tsleep_nsec(&sc->sc_sensortask, 0, "uthum",
+		    MSEC_TO_NSEC(delay));
 
 	/* get answer */
+	flen = MIN(sc->sc_flen, sizeof(report));
 	if (uhidev_get_report(sc->sc_hdev.sc_parent, UHID_FEATURE_REPORT,
-	    sc->sc_hdev.sc_report_id, report, sc->sc_flen) != sc->sc_flen)
+	    sc->sc_hdev.sc_report_id, report, flen) != flen)
 		return EIO;
 	memcpy(buf, report, len);
 	return 0;

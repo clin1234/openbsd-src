@@ -1,4 +1,4 @@
-/*	$OpenBSD: viapm.c,v 1.17 2018/07/05 10:09:11 fcambus Exp $	*/
+/*	$OpenBSD: viapm.c,v 1.19 2020/07/06 13:33:09 pirofti Exp $	*/
 
 /*
  * Copyright (c) 2005 Mark Kettenis <kettenis@openbsd.org>
@@ -177,7 +177,9 @@ static struct timecounter viapm_timecounter = {
 	0xffffff,		/* counter_mask */
 	VIAPM_FREQUENCY,	/* frequency */
 	"VIAPM",		/* name */
-	1000			/* quality */
+	1000,			/* quality */
+	NULL,			/* private bits */
+	0,			/* expose to user */
 };
 
 struct timeout viapm_timeout;
@@ -602,7 +604,8 @@ viapm_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr,
 		viapm_intr(sc);
 	} else {
 		/* Wait for interrupt */
-		if (tsleep(sc, PRIBIO, "iicexec", VIAPM_SMBUS_TIMEOUT * hz))
+		if (tsleep_nsec(sc, PRIBIO, "iicexec",
+		    SEC_TO_NSEC(VIAPM_SMBUS_TIMEOUT)))
 			goto timeout;
 	}
 

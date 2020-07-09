@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mpip.c,v 1.7 2019/04/19 07:39:37 dlg Exp $ */
+/*	$OpenBSD: if_mpip.c,v 1.9 2020/06/17 06:45:22 dlg Exp $ */
 
 /*
  * Copyright (c) 2015 Rafael Zalamena <rzalamena@openbsd.org>
@@ -496,7 +496,8 @@ mpip_input(struct mpip_softc *sc, struct mbuf *m)
 
 		label -= MPLS_LABEL_RESERVED_MAX + 1;
 		label ^= sc->sc_flow;
-		m->m_pkthdr.ph_flowid = M_FLOWID_VALID | label;
+		SET(m->m_pkthdr.csum_flags, M_FLOWID);
+		m->m_pkthdr.ph_flowid = label;
 
 		m_adj(m, sizeof(shim));
 	} else if (!MPLS_BOS_ISSET(shim))
@@ -602,9 +603,8 @@ mpip_input(struct mpip_softc *sc, struct mbuf *m)
 	m->m_pkthdr.ph_ifidx = ifp->if_index;
 	m->m_pkthdr.ph_rtableid = ifp->if_rdomain;
 
-#if NPF > 0
-	pf_pkt_addr_changed(m);
-#endif
+	/* packet has not been processed by PF yet. */
+	KASSERT(m->m_pkthdr.pf.statekey == NULL);
 
 #if NBPFILTER > 0
 	{
@@ -778,8 +778,8 @@ mpip_start(struct ifnet *ifp)
 			if (m == NULL)
 				continue;
 
-			if (ISSET(m->m_pkthdr.ph_flowid, M_FLOWID_VALID))
-				flow = m->m_pkthdr.ph_flowid & M_FLOWID_MASK;
+			if (ISSET(m->m_pkthdr.csum_flags, M_FLOWID))
+				flow = m->m_pkthdr.ph_flowid;
 			flow ^= sc->sc_flow;
 			flow += MPLS_LABEL_RESERVED_MAX + 1;
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_input.c,v 1.216 2018/11/09 14:14:32 claudio Exp $	*/
+/*	$OpenBSD: ip6_input.c,v 1.226 2020/05/06 07:08:53 mpi Exp $	*/
 /*	$KAME: ip6_input.c,v 1.188 2001/03/29 05:34:31 itojun Exp $	*/
 
 /*
@@ -115,14 +115,11 @@
 #include <netinet/ip_carp.h>
 #endif
 
-struct niqueue ip6intrq = NIQUEUE_INITIALIZER(IPQ_MAXLEN, NETISR_IPV6);
-
 struct cpumem *ip6counters;
 
 uint8_t ip6_soiikey[IP6_SOIIKEY_LEN];
 
 int ip6_ours(struct mbuf **, int *, int, int);
-int ip6_local(struct mbuf **, int *, int, int);
 int ip6_check_rh0hdr(struct mbuf *, int *);
 int ip6_hbhchcheck(struct mbuf *, int *, int *, int *);
 int ip6_hopopts_input(u_int32_t *, u_int32_t *, struct mbuf **, int *);
@@ -147,7 +144,7 @@ ip6_init(void)
 
 	pr = pffindproto(PF_INET6, IPPROTO_RAW, SOCK_RAW);
 	if (pr == NULL)
-		panic("ip6_init");
+		panic("%s", __func__);
 	for (i = 0; i < IPPROTO_MAX; i++)
 		ip6_protox[i] = pr - inet6sw;
 	for (pr = inet6domain.dom_protosw;
@@ -163,43 +160,6 @@ ip6_init(void)
 	mq_init(&ip6send_mq, 64, IPL_SOFTNET);
 
 	ip6counters = counters_alloc(ip6s_ncounters);
-}
-
-/*
- * Enqueue packet for local delivery.  Queuing is used as a boundary
- * between the network layer (input/forward path) running without
- * KERNEL_LOCK() and the transport layer still needing it.
- */
-int
-ip6_ours(struct mbuf **mp, int *offp, int nxt, int af)
-{
-	/* We are already in a IPv4/IPv6 local deliver loop. */
-	if (af != AF_UNSPEC)
-		return ip6_local(mp, offp, nxt, af);
-
-	niq_enqueue(&ip6intrq, *mp);
-	*mp = NULL;
-	return IPPROTO_DONE;
-}
-
-/*
- * Dequeue and process locally delivered packets.
- */
-void
-ip6intr(void)
-{
-	struct mbuf *m;
-	int off, nxt;
-
-	while ((m = niq_dequeue(&ip6intrq)) != NULL) {
-#ifdef DIAGNOSTIC
-		if ((m->m_flags & M_PKTHDR) == 0)
-			panic("ip6intr no HDR");
-#endif
-		off = 0;
-		nxt = ip6_local(&m, &off, IPPROTO_IPV6, AF_UNSPEC);
-		KASSERT(nxt == IPPROTO_DONE);
-	}
 }
 
 void
@@ -375,12 +335,6 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 		goto bad;
 	}
 
-	if (IN6_IS_ADDR_LOOPBACK(&ip6->ip6_src) ||
-	    IN6_IS_ADDR_LOOPBACK(&ip6->ip6_dst)) {
-		nxt = ip6_ours(mp, offp, nxt, af);
-		goto out;
-	}
-
 #if NPF > 0
 	if (pf_ouraddr(m) == 1) {
 		nxt = ip6_ours(mp, offp, nxt, af);
@@ -472,6 +426,32 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 		struct in6_ifaddr *ia6 = ifatoia6(rt->rt_ifa);
 		if (ia6->ia6_flags & IN6_IFF_ANYCAST)
 			m->m_flags |= M_ACAST;
+
+		if (ip6_forwarding == 0 && rt->rt_ifidx != ifp->if_index &&
+		    !((ifp->if_flags & IFF_LOOPBACK) ||
+		    (ifp->if_type == IFT_ENC) ||
+		    (m->m_pkthdr.pf.flags & PF_TAG_TRANSLATE_LOCALHOST))) {
+			/* received on wrong interface */
+#if NCARP > 0
+			struct ifnet *out_if;
+
+			/*
+			 * Virtual IPs on carp interfaces need to be checked
+			 * also against the parent interface and other carp
+			 * interfaces sharing the same parent.
+			 */
+			out_if = if_get(rt->rt_ifidx);
+			if (!(out_if && carp_strict_addr_chk(out_if, ifp))) {
+				ip6stat_inc(ip6s_wrongif);
+				if_put(out_if);
+				goto bad;
+			}
+			if_put(out_if);
+#else
+			ip6stat_inc(ip6s_wrongif);
+			goto bad;
+#endif
+		}
 		/*
 		 * packets to a tentative, duplicated, or somehow invalid
 		 * address must not be accepted.
@@ -548,7 +528,7 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 }
 
 int
-ip6_local(struct mbuf **mp, int *offp, int nxt, int af)
+ip6_ours(struct mbuf **mp, int *offp, int nxt, int af)
 {
 	if (ip6_hbhchcheck(*mp, offp, &nxt, NULL))
 		return IPPROTO_DONE;
@@ -947,7 +927,7 @@ ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
 	if (in6p->inp_socket->so_options & SO_TIMESTAMP) {
 		struct timeval tv;
 
-		microtime(&tv);
+		m_microtime(m, &tv);
 		*mp = sbcreatecontrol((caddr_t) &tv, sizeof(tv),
 		    SCM_TIMESTAMP, SOL_SOCKET);
 		if (*mp)
@@ -1162,11 +1142,17 @@ ip6_pullexthdr(struct mbuf *m, size_t off, int nxt)
 	}
 #endif
 
+	if (off + sizeof(ip6e) > m->m_pkthdr.len)
+		return NULL;
+
 	m_copydata(m, off, sizeof(ip6e), (caddr_t)&ip6e);
 	if (nxt == IPPROTO_AH)
 		elen = (ip6e.ip6e_len + 2) << 2;
 	else
 		elen = (ip6e.ip6e_len + 1) << 3;
+
+	if (off + elen > m->m_pkthdr.len)
+		return NULL;
 
 	MGET(n, M_DONTWAIT, MT_DATA);
 	if (n && elen >= MLEN) {
@@ -1244,7 +1230,7 @@ ip6_nexthdr(struct mbuf *m, int off, int proto, int *nxtp)
 
 	/* just in case */
 	if (m == NULL)
-		panic("ip6_nexthdr: m == NULL");
+		panic("%s: m == NULL", __func__);
 	if ((m->m_flags & M_PKTHDR) == 0 || m->m_pkthdr.len < off)
 		return -1;
 
@@ -1372,7 +1358,6 @@ ip6_sysctl_ip6stat(void *oldp, size_t *oldlenp, void *newp)
 int
 ip6_sysctl_soiikey(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 {
-	struct ifnet *ifp;
 	uint8_t oldkey[IP6_SOIIKEY_LEN];
 	int error;
 
@@ -1384,16 +1369,6 @@ ip6_sysctl_soiikey(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 
 	error = sysctl_struct(oldp, oldlenp, newp, newlen, ip6_soiikey,
 	    sizeof(ip6_soiikey));
-
-	if (!error && memcmp(ip6_soiikey, oldkey, sizeof(oldkey)) != 0) {
-		TAILQ_FOREACH(ifp, &ifnet, if_list) {
-			if (ifp->if_flags & IFF_LOOPBACK)
-				continue;
-			NET_LOCK();
-			in6_soiiupdate(ifp);
-			NET_UNLOCK();
-		}
-	}
 
 	return (error);
 }
@@ -1459,8 +1434,7 @@ ip6_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		NET_UNLOCK();
 		return (error);
 	case IPV6CTL_IFQUEUE:
-		return (sysctl_niq(name + 1, namelen - 1,
-		    oldp, oldlenp, newp, newlen, &ip6intrq));
+		return (EOPNOTSUPP);
 	case IPV6CTL_SOIIKEY:
 		return (ip6_sysctl_soiikey(oldp, oldlenp, newp, newlen));
 	default:
@@ -1487,7 +1461,7 @@ ip6_send_dispatch(void *xmq)
 	if (ml_empty(&ml))
 		return;
 
-	NET_RLOCK();
+	NET_LOCK();
 	while ((m = ml_dequeue(&ml)) != NULL) {
 		/*
 		 * To avoid a "too big" situation at an intermediate router and
@@ -1498,7 +1472,7 @@ ip6_send_dispatch(void *xmq)
 		 */
 		ip6_output(m, NULL, NULL, IPV6_MINMTU, NULL, NULL);
 	}
-	NET_RUNLOCK();
+	NET_UNLOCK();
 }
 
 void

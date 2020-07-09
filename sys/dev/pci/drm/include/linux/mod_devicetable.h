@@ -32,11 +32,22 @@ struct dmi_strmatch {
 };
 
 struct dmi_system_id {
-        int (*callback)(const struct dmi_system_id *);
-        const char *ident;
-        struct dmi_strmatch matches[4];
+	int (*callback)(const struct dmi_system_id *);
+	const char *ident;
+	struct dmi_strmatch matches[4];
+	void *driver_data;
 };
 #define	DMI_MATCH(a, b) {(a), (b)}
 #define	DMI_EXACT_MATCH(a, b) {(a), (b)}
+
+struct pci_device_id {
+	uint16_t vendor;
+	uint16_t device;
+	uint16_t subvendor;
+	uint16_t subdevice;
+	uint32_t class;
+	uint32_t class_mask;
+	unsigned long driver_data;
+};
 
 #endif

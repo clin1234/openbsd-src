@@ -1,4 +1,4 @@
-/*	$OpenBSD: oosiop.c,v 1.22 2014/07/13 23:10:23 deraadt Exp $	*/
+/*	$OpenBSD: oosiop.c,v 1.28 2020/06/27 17:28:58 krw Exp $	*/
 /*	$NetBSD: oosiop.c,v 1.4 2003/10/29 17:45:55 tsutsui Exp $	*/
 
 /*
@@ -76,7 +76,6 @@ void	oosiop_clear_fifo(struct oosiop_softc *);
 void	oosiop_phasemismatch(struct oosiop_softc *);
 void	oosiop_setup_syncxfer(struct oosiop_softc *);
 void	oosiop_set_syncparam(struct oosiop_softc *, int, int, int);
-void	oosiop_minphys(struct buf *, struct scsi_link *);
 void	oosiop_scsicmd(struct scsi_xfer *);
 void	oosiop_done(struct oosiop_softc *, struct oosiop_cb *);
 void	oosiop_timeout(void *);
@@ -129,11 +128,8 @@ struct cfdriver oosiop_cd = {
 	NULL, "oosiop", DV_DULL
 };
 
-struct scsi_adapter oosiop_adapter = {
-	oosiop_scsicmd,
-	oosiop_minphys,
-	NULL,
-	NULL
+struct scsi_adapter oosiop_switch = {
+	oosiop_scsicmd, NULL, NULL, NULL, NULL
 };
 
 void *
@@ -263,7 +259,7 @@ oosiop_attach(struct oosiop_softc *sc)
 	/*
 	 * Fill in the sc_link.
 	 */
-	sc->sc_link.adapter = &oosiop_adapter;
+	sc->sc_link.adapter = &oosiop_switch;
 	sc->sc_link.adapter_softc = sc;
 	sc->sc_link.openings = 1;	/* XXX */
 	sc->sc_link.adapter_buswidth = OOSIOP_NTGT;
@@ -271,7 +267,6 @@ oosiop_attach(struct oosiop_softc *sc)
 	sc->sc_link.pool = &sc->sc_iopool;
 	sc->sc_link.quirks = ADEV_NODOORLOCK;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	/*
@@ -555,7 +550,7 @@ oosiop_setup_dma(struct oosiop_softc *sc)
 	OOSIOP_SCRIPT_SYNC(sc, BUS_DMASYNC_POSTWRITE);
 
 	oosiop_fixup_select(sc, Ent_p_select, cb->id);
-	oosiop_fixup_jump(sc, Ent_p_datain_jump, xferbase + 
+	oosiop_fixup_jump(sc, Ent_p_datain_jump, xferbase +
 	    offsetof(struct oosiop_xfer, datain_scr[0]));
 	oosiop_fixup_jump(sc, Ent_p_dataout_jump, xferbase +
 	    offsetof(struct oosiop_xfer, dataout_scr[0]));
@@ -646,7 +641,7 @@ oosiop_phasemismatch(struct oosiop_softc *sc)
 		sstat1 = oosiop_read_1(sc, OOSIOP_SSTAT1);
 		if (sstat1 & OOSIOP_SSTAT1_OLF)
 			dbc++;
-		if ((sc->sc_tgt[cb->id].sxfer != 0) && 
+		if ((sc->sc_tgt[cb->id].sxfer != 0) &&
 		    (sstat1 & OOSIOP_SSTAT1_ORF) != 0)
 			dbc++;
 
@@ -723,15 +718,6 @@ oosiop_set_syncparam(struct oosiop_softc *sc, int id, int period, int offset)
 		printf("synchronous");
 	}
 	printf(" xfers\n");
-}
-
-void
-oosiop_minphys(struct buf *bp, struct scsi_link *sl)
-{
-
-	if (bp->b_bcount > OOSIOP_MAX_XFER)
-		bp->b_bcount = OOSIOP_MAX_XFER;
-	minphys(bp);
 }
 
 void

@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.176 2019/02/13 22:57:07 deraadt Exp $	*/
+/*	$OpenBSD: parse.y,v 1.178 2020/02/07 13:01:34 bluhm Exp $	*/
 
 /*
  * Copyright (c) 2002, 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -54,7 +54,7 @@ static struct file {
 	char			*name;
 	int			 lineno;
 	int			 errors;
-} *file;
+} *file, *topfile;
 struct file	*pushfile(const char *, int);
 int		 popfile(void);
 int		 check_file_secrecy(int, const char *);
@@ -205,7 +205,8 @@ int			 validate_sa(u_int32_t, u_int8_t,
 			     struct ipsec_transforms *, struct ipsec_key *,
 			     struct ipsec_key *, u_int8_t);
 struct ipsec_rule	*create_sa(u_int8_t, u_int8_t, struct ipsec_hosts *,
-			     u_int32_t, struct ipsec_transforms *,
+			     u_int32_t, u_int8_t, u_int16_t,
+			     struct ipsec_transforms *,
 			     struct ipsec_key *, struct ipsec_key *);
 struct ipsec_rule	*reverse_sa(struct ipsec_rule *, u_int32_t,
 			     struct ipsec_key *, struct ipsec_key *);
@@ -257,6 +258,10 @@ typedef struct {
 			u_int32_t	spiin;
 		} spis;
 		struct {
+			u_int8_t	encap;
+			u_int16_t	port;
+		} udpencap;
+		struct {
 			struct ipsec_key *keyout;
 			struct ipsec_key *keyin;
 		} authkeys;
@@ -281,7 +286,7 @@ typedef struct {
 %token	AUTHKEY ENCKEY FILENAME AUTHXF ENCXF ERROR IKE MAIN QUICK AGGRESSIVE
 %token	PASSIVE ACTIVE ANY IPIP IPCOMP COMPXF TUNNEL TRANSPORT DYNAMIC LIFETIME
 %token	TYPE DENY BYPASS LOCAL PROTO USE ACQUIRE REQUIRE DONTACQ GROUP PORT TAG
-%token	INCLUDE BUNDLE
+%token	INCLUDE BUNDLE UDPENCAP
 %token	<v.string>		STRING
 %token	<v.number>		NUMBER
 %type	<v.string>		string
@@ -300,6 +305,7 @@ typedef struct {
 %type	<v.ids>			ids
 %type	<v.id>			id
 %type	<v.spis>		spispec
+%type	<v.udpencap>		udpencap
 %type	<v.authkeys>		authkeyspec
 %type	<v.enckeys>		enckeyspec
 %type	<v.string>		bundlestring
@@ -347,7 +353,7 @@ tcpmd5rule	: TCPMD5 hosts spispec authkeyspec	{
 			struct ipsec_rule	*r;
 
 			r = create_sa(IPSEC_TCPMD5, IPSEC_TRANSPORT, &$2,
-			    $3.spiout, NULL, $4.keyout, NULL);
+			    $3.spiout, 0, 0, NULL, $4.keyout, NULL);
 			if (r == NULL)
 				YYERROR;
 
@@ -357,17 +363,17 @@ tcpmd5rule	: TCPMD5 hosts spispec authkeyspec	{
 		}
 		;
 
-sarule		: satype tmode hosts spispec transforms authkeyspec
+sarule		: satype tmode hosts spispec udpencap transforms authkeyspec
 		    enckeyspec bundlestring {
 			struct ipsec_rule	*r;
 
-			r = create_sa($1, $2, &$3, $4.spiout, $5, $6.keyout,
-			    $7.keyout);
+			r = create_sa($1, $2, &$3, $4.spiout, $5.encap, $5.port,
+			    $6, $7.keyout, $8.keyout);
 			if (r == NULL)
 				YYERROR;
 
-			if (expand_rule(r, NULL, 0, $4.spiin, $6.keyin,
-			    $7.keyin, $8))
+			if (expand_rule(r, NULL, 0, $4.spiin, $7.keyin,
+			    $8.keyin, $9))
 				errx(1, "sarule: expand_rule");
 		}
 		;
@@ -665,6 +671,19 @@ spispec		: SPI STRING			{
 
 			$$.spiin = 0;
 			$$.spiout = $2;
+		}
+		;
+
+udpencap	: /* empty */				{
+			$$.encap = 0;
+		}
+		| UDPENCAP				{
+			$$.encap = 1;
+			$$.port = 0;
+		}
+		| UDPENCAP PORT NUMBER			{
+			$$.encap = 1;
+			$$.port = $3;
 		}
 		;
 
@@ -1014,6 +1033,7 @@ lookup(char *s)
 		{ "transport",		TRANSPORT },
 		{ "tunnel",		TUNNEL },
 		{ "type",		TYPE },
+		{ "udpencap",		UDPENCAP },
 		{ "use",		USE }
 	};
 	const struct keywords	*p;
@@ -1061,7 +1081,7 @@ lgetc(int quotec)
 	if (quotec) {
 		if ((c = getc(file->stream)) == EOF) {
 			yyerror("reached end of file while parsing quoted string");
-			if (popfile() == EOF)
+			if (file == topfile || popfile() == EOF)
 				return (EOF);
 			return (quotec);
 		}
@@ -1079,7 +1099,7 @@ lgetc(int quotec)
 	}
 
 	while (c == EOF) {
-		if (popfile() == EOF)
+		if (file == topfile || popfile() == EOF)
 			return (EOF);
 		c = getc(file->stream);
 	}
@@ -1339,16 +1359,16 @@ popfile(void)
 {
 	struct file	*prev;
 
-	if ((prev = TAILQ_PREV(file, files, entry)) != NULL) {
+	if ((prev = TAILQ_PREV(file, files, entry)) != NULL)
 		prev->errors += file->errors;
-		TAILQ_REMOVE(&files, file, entry);
-		fclose(file->stream);
-		free(file->name);
-		free(file);
-		file = prev;
-		return (0);
-	}
-	return (EOF);
+
+	TAILQ_REMOVE(&files, file, entry);
+	fclose(file->stream);
+	free(file->name);
+	free(file);
+	file = prev;
+
+	return (file ? 0 : EOF);
 }
 
 int
@@ -1362,6 +1382,7 @@ parse_rules(const char *filename, struct ipsecctl *ipsecx)
 	if ((file = pushfile(filename, 1)) == NULL) {
 		return (-1);
 	}
+	topfile = file;
 
 	yyparse();
 	errors = file->errors;
@@ -2208,6 +2229,8 @@ copyrule(struct ipsec_rule *rule)
 	r->dport = rule->dport;
 	r->ikemode = rule->ikemode;
 	r->spi = rule->spi;
+	r->udpencap = rule->udpencap;
+	r->udpdport = rule->udpdport;
 	r->nr = rule->nr;
 
 	return (r);
@@ -2397,8 +2420,8 @@ add_sabundle(struct ipsec_rule *r, char *bundle)
 
 struct ipsec_rule *
 create_sa(u_int8_t satype, u_int8_t tmode, struct ipsec_hosts *hosts,
-    u_int32_t spi, struct ipsec_transforms *xfs, struct ipsec_key *authkey,
-    struct ipsec_key *enckey)
+    u_int32_t spi, u_int8_t udpencap, u_int16_t udpdport,
+    struct ipsec_transforms *xfs, struct ipsec_key *authkey, struct ipsec_key *enckey)
 {
 	struct ipsec_rule *r;
 
@@ -2415,6 +2438,8 @@ create_sa(u_int8_t satype, u_int8_t tmode, struct ipsec_hosts *hosts,
 	r->src = hosts->src;
 	r->dst = hosts->dst;
 	r->spi = spi;
+	r->udpencap = udpencap;
+	r->udpdport = udpdport;
 	r->xfs = xfs;
 	r->authkey = authkey;
 	r->enckey = enckey;
@@ -2442,6 +2467,8 @@ reverse_sa(struct ipsec_rule *rule, u_int32_t spi, struct ipsec_key *authkey,
 	reverse->src = copyhost(rule->dst);
 	reverse->dst = copyhost(rule->src);
 	reverse->spi = spi;
+	reverse->udpencap = rule->udpencap;
+	reverse->udpdport = rule->udpdport;
 	reverse->xfs = copytransforms(rule->xfs);
 	reverse->authkey = authkey;
 	reverse->enckey = enckey;

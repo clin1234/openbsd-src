@@ -1,4 +1,4 @@
-/*	$OpenBSD: vdsk.c,v 1.49 2018/01/17 15:52:34 stsp Exp $	*/
+/*	$OpenBSD: vdsk.c,v 1.56 2020/06/27 14:29:44 krw Exp $	*/
 /*
  * Copyright (c) 2009, 2011 Mark Kettenis
  *
@@ -160,7 +160,6 @@ struct vdsk_softc {
 	struct vdsk_soft_desc *sc_vsd;
 
 	struct scsi_iopool sc_iopool;
-	struct scsi_adapter sc_switch;
 	struct scsi_link sc_link;
 
 	uint32_t	sc_vdisk_block_size;
@@ -177,6 +176,12 @@ struct cfattach vdsk_ca = {
 
 struct cfdriver vdsk_cd = {
 	NULL, "vdsk", DV_DULL
+};
+
+void	vdsk_scsi_cmd(struct scsi_xfer *);
+
+struct scsi_adapter vdsk_switch = {
+	vdsk_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 int	vdsk_tx_intr(void *);
@@ -203,11 +208,8 @@ void	vdsk_send_rdx(struct vdsk_softc *);
 void	*vdsk_io_get(void *);
 void	vdsk_io_put(void *, void *);
 
-void	vdsk_scsi_cmd(struct scsi_xfer *);
 int	vdsk_submit_cmd(struct scsi_xfer *);
 void	vdsk_complete_cmd(struct scsi_xfer *, int);
-int	vdsk_dev_probe(struct scsi_link *);
-void	vdsk_dev_free(struct scsi_link *);
 
 void	vdsk_scsi_inq(struct scsi_xfer *);
 void	vdsk_scsi_inquiry(struct scsi_xfer *);
@@ -343,20 +345,15 @@ vdsk_attach(struct device *parent, struct device *self, void *aux)
 
 	scsi_iopool_init(&sc->sc_iopool, sc, vdsk_io_get, vdsk_io_put);
 
-	sc->sc_switch.scsi_cmd = vdsk_scsi_cmd;
-	sc->sc_switch.scsi_minphys = scsi_minphys;
-	sc->sc_switch.dev_probe = vdsk_dev_probe;
-	sc->sc_switch.dev_free = vdsk_dev_free;
-
-	sc->sc_link.adapter = &sc->sc_switch;
+	sc->sc_link.adapter = &vdsk_switch;
 	sc->sc_link.adapter_softc = self;
-	sc->sc_link.adapter_buswidth = 2;
-	sc->sc_link.luns = 1; /* XXX slices should be presented as luns? */
-	sc->sc_link.adapter_target = 2;
+	/* Only valid target/lun is 0/0. */
+	sc->sc_link.adapter_buswidth = 1;
+	sc->sc_link.luns = 1;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.openings = sc->sc_vd->vd_nentries - 1;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 	config_found(self, &saa, scsiprint);
 
@@ -915,7 +912,7 @@ vdsk_io_put(void *xsc, void *io)
 
 #ifdef DIAGNOSTIC
 	if (sc != io)
-		panic("vsdk_io_put: unexpected io");
+		panic("vdsk_io_put: unexpected io");
 #endif
 
 	s = splbio();
@@ -1231,19 +1228,3 @@ vdsk_scsi_done(struct scsi_xfer *xs, int error)
 	scsi_done(xs);
 }
 
-int
-vdsk_dev_probe(struct scsi_link *link)
-{
-	KASSERT(link->lun == 0);
-
-	if (link->target == 0)
-		return (0);
-
-	return (ENODEV);
-}
-
-void
-vdsk_dev_free(struct scsi_link *link)
-{
-	printf("%s\n", __func__);
-}

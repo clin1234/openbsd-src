@@ -1,4 +1,4 @@
-.\"	$OpenBSD: port-modules.5,v 1.240 2019/05/08 20:14:52 bcallah Exp $
+.\"	$OpenBSD: port-modules.5,v 1.244 2020/06/26 22:45:22 abieber Exp $
 .\"
 .\" Copyright (c) 2008 Marc Espie
 .\"
@@ -24,7 +24,7 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: May 8 2019 $
+.Dd $Mdocdate: June 26 2020 $
 .Dt PORT-MODULES 5
 .Os
 .Sh NAME
@@ -841,6 +841,29 @@ and
 .Cm do-install
 targets that can be overridden in the port Makefile.
 .It font
+Used for ports which primarily install fonts.
+Affects
+.Ev PKG_ARCH
+and
+.Ev EXTRACT_SUFX .
+Appends to
+.Ev CATEGORIES .
+When
+.Ev TYPEFACE
+is set in combination with
+.Ev V
+or
+.Ev VERSION
+it sets
+.Ev PKGNAME .
+Also sets
+.Ev FONTDIR ,
+.Ev FONTTYPES
+and
+.Ev FONT_DISTDIR .
+A
+.Cm do-install
+target is provided if the port tself does not provide it.
 .It fortran
 Sets
 .Ev MODFORTRAN_LIB_DEPENDS ,
@@ -848,8 +871,8 @@ Sets
 .Ev MODFORTRAN_BUILD_DEPENDS .
 Set
 .Ev MODFORTRAN_COMPILER
-to `g77', `gfortran', or `flang', depending on what the port requires.
-The default is `g77'.
+to `gfortran', or `flang', depending on what the port requires.
+The default is `gfortran'.
 The dependencies are chosen according to
 .Ev MODFORTRAN_COMPILER .
 .It gcc4
@@ -1084,6 +1107,36 @@ are appended to port's
 .Ev BUILD_DEPENDS .
 Defaults to
 .Ar Yes .
+.It Ev MODGO_MODNAME
+is the module name as defined in the
+.Pa go.mod
+file contained in a project.
+If this is set,
+.Ev MODGO_MODULES ,
+.Ev MODGO_MODFILES
+and
+.Ev MODGO_VERSION
+need to be defined as well.
+Setting this will also set
+.Ev ALL_TARGET .
+When
+.Ev MODGO_MODFILES
+is set, and a "cmd" directory is found in
+.Ev WRKSRC ,
+"cmd/..." is appended to
+.Ev ALL_TARGET
+in
+.Cm do-build
+automatically.
+.It Ev MODGO_VERSION
+Sets the specific version of a Go module to use.
+For example: v0.1.3.
+.It Ev MODGO_MODULES
+List of modules and their specific versions that an application depends on.
+.It Ev MODGO_MODFILES
+List of go.mod files and their versions that are required for dependency
+resolution.
+These are required by Go to determine the full dependency graph.
 .El
 .Pp
 Additionally defines
@@ -1381,7 +1434,10 @@ with
 .Ev MODPY_PYTEST_ARGS .
 All ports that generate egg-info files should set
 .Ev MODPY_EGG_VERSION
-to the version string used by the port's setup.py setup() function.
+to the version string used by the
+.Fn setup
+function in the port's
+.Pa setup.py .
 Arguments can be passed to setup.py during
 .Cm configure
 with
@@ -1927,10 +1983,11 @@ Read-only.
 .It Ev MODKDE4_FIX_GETTEXT
 If set to
 .Sq Yes ,
-adds an additional step before building port that
-searches for KDE-specific calls of GETTEXT_PROCESS_PO_FILES()
-CMake command and tweaks them to be compatible with the one from
-FindGettext.cmake module provided by CMake itself.
+adds an additional step before building the port that
+searches for KDE-specific uses of the GETTEXT_PROCESS_PO_FILES
+CMake command and tweaks them to be compatible with the one from the
+.Pa FindGettext.cmake
+module provided by CMake itself.
 Defaults to
 .Sq Yes .
 .It Ev MODKDE4_SYSCONF_FILES

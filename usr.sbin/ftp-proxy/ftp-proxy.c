@@ -1,4 +1,4 @@
-/*	$OpenBSD: ftp-proxy.c,v 1.36 2016/09/26 17:15:19 jca Exp $ */
+/*	$OpenBSD: ftp-proxy.c,v 1.38 2020/02/12 14:46:36 schwarze Exp $ */
 
 /*
  * Copyright (c) 2004, 2005 Camiel Dobbelaar, <cd@sentia.nl>
@@ -394,7 +394,7 @@ handle_connection(const int listen_fd, short event, void *arg)
 	 */
 	client_sa = sstosa(&tmp_ss);
 	len = sizeof(struct sockaddr_storage);
-	if ((client_fd = accept(listen_fd, client_sa, &len)) < 0) {
+	if ((client_fd = accept(listen_fd, client_sa, &len)) == -1) {
 		logmsg(LOG_CRIT, "accept() failed: %s", strerror(errno));
 
 		/*
@@ -444,7 +444,7 @@ handle_connection(const int listen_fd, short event, void *arg)
 	 * Find out the real server and port that the client wanted.
 	 */
 	len = sizeof(struct sockaddr_storage);
-	if (getsockname(s->client_fd, server_sa, &len) < 0) {
+	if (getsockname(s->client_fd, server_sa, &len) == -1) {
 		logmsg(LOG_CRIT, "#%d getsockname failed: %s", s->id,
 		    strerror(errno));
 		goto fail;
@@ -468,7 +468,7 @@ handle_connection(const int listen_fd, short event, void *arg)
 	 * Setup socket and connect to server.
 	 */
 	if ((s->server_fd = socket(server_sa->sa_family, SOCK_STREAM,
-	    IPPROTO_TCP)) < 0) {
+	    IPPROTO_TCP)) == -1) {
 		logmsg(LOG_CRIT, "#%d server socket failed: %s", s->id,
 		    strerror(errno));
 		goto fail;
@@ -487,7 +487,7 @@ handle_connection(const int listen_fd, short event, void *arg)
 		    s->id, strerror(errno));
 		goto fail;
 	}
-	if (connect(s->server_fd, server_sa, server_sa->sa_len) < 0 &&
+	if (connect(s->server_fd, server_sa, server_sa->sa_len) == -1 &&
 	    errno != EINPROGRESS) {
 		logmsg(LOG_CRIT, "#%d proxy cannot connect to server %s: %s",
 		    s->id, sock_ntop(server_sa), strerror(errno));
@@ -495,7 +495,7 @@ handle_connection(const int listen_fd, short event, void *arg)
 	}
 
 	len = sizeof(struct sockaddr_storage);
-	if ((getsockname(s->server_fd, proxy_to_server_sa, &len)) < 0) {
+	if ((getsockname(s->server_fd, proxy_to_server_sa, &len)) == -1) {
 		logmsg(LOG_CRIT, "#%d getsockname failed: %s", s->id,
 		    strerror(errno));
 		goto fail;
@@ -905,7 +905,7 @@ proxy_reply(int cmd, struct sockaddr *sa, u_int16_t port)
 		break;
 	}
 
-	if (r < 0 || r >= sizeof linebuf) {
+	if (r == -1 || r >= sizeof linebuf) {
 		logmsg(LOG_ERR, "proxy_reply failed: %d", r);
 		linebuf[0] = '\0';
 		linelen = 0;
@@ -1133,7 +1133,7 @@ sock_ntop(struct sockaddr *sa)
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-6Adrv] [-a address] [-b address]"
+	fprintf(stderr, "usage: %s [-6Adrv] [-a sourceaddr] [-b address]"
 	    " [-D level] [-m maxsessions]\n                 [-P port]"
 	    " [-p port] [-q queue] [-R address] [-T tag]\n"
             "                 [-t timeout]\n", __progname);

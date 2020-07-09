@@ -1,4 +1,4 @@
-/*	$OpenBSD: vnode.h,v 1.150 2019/02/17 22:17:28 tedu Exp $	*/
+/*	$OpenBSD: vnode.h,v 1.156 2020/04/08 08:07:52 mpi Exp $	*/
 /*	$NetBSD: vnode.h,v 1.38 1996/02/29 20:59:05 cgd Exp $	*/
 
 /*
@@ -88,7 +88,7 @@ RBT_HEAD(namecache_rb_cache, namecache);
 struct uvm_vnode;
 struct vnode {
 	struct uvm_vnode *v_uvm;		/* uvm data */
-	struct vops *v_op;			/* vnode operations vector */
+	const struct vops *v_op;		/* vnode operations vector */
 	enum	vtype v_type;			/* vnode type */
 	enum	vtagtype v_tag;			/* type of underlying data */
 	u_int	v_flag;				/* vnode flags (see below) */
@@ -96,6 +96,7 @@ struct vnode {
 	u_int   v_uvcount;			/* unveil references */
 	/* reference count of writers */
 	u_int   v_writecount;
+	u_int	v_lockcount;			/* # threads waiting on lock */
 	/* Flags that can be read/written in interrupts */
 	u_int   v_bioflag;
 	u_int   v_holdcnt;			/* buffer references */
@@ -103,7 +104,7 @@ struct vnode {
 	u_int	v_inflight;
 	struct	mount *v_mount;			/* ptr to vfs we are in */
 	TAILQ_ENTRY(vnode) v_freelist;		/* vnode freelist */
-	LIST_ENTRY(vnode) v_mntvnodes;		/* vnodes for mount point */
+	TAILQ_ENTRY(vnode) v_mntvnodes;		/* vnodes for mount point */
 	struct	buf_rb_bufs v_bufs_tree;	/* lookup of all bufs */
 	struct	buflists v_cleanblkhd;		/* clean blocklist head */
 	struct	buflists v_dirtyblkhd;		/* dirty blocklist head */
@@ -296,8 +297,8 @@ struct vops {
 	int	(*vop_kqfilter)(void *);
 };
 
-extern struct vops dead_vops;
-extern struct vops spec_vops;
+extern const struct vops dead_vops;
+extern const struct vops spec_vops;
 
 struct vop_generic_args {
 	void		*a_garbage;
@@ -411,9 +412,10 @@ int VOP_POLL(struct vnode *, int, int, struct proc *);
 
 struct vop_kqfilter_args {
 	struct vnode *a_vp;
+	int a_fflag;
 	struct knote *a_kn;
 };
-int VOP_KQFILTER(struct vnode *, struct knote *);
+int VOP_KQFILTER(struct vnode *, int, struct knote *);
 
 struct vop_revoke_args {
 	struct vnode *a_vp;
@@ -584,7 +586,7 @@ struct vnode;
 int	bdevvp(dev_t, struct vnode **);
 int	cdevvp(dev_t, struct vnode **);
 struct vnode *checkalias(struct vnode *, dev_t, struct mount *);
-int	getnewvnode(enum vtagtype, struct mount *, struct vops *,
+int	getnewvnode(enum vtagtype, struct mount *, const struct vops *,
 	    struct vnode **);
 int	vaccess(enum vtype, mode_t, uid_t, gid_t, mode_t, struct ucred *);
 int	vnoperm(struct vnode *);
@@ -598,9 +600,9 @@ int	vget(struct vnode *, int);
 void	vgone(struct vnode *);
 void	vgonel(struct vnode *, struct proc *);
 int	vinvalbuf(struct vnode *, int, struct ucred *, struct proc *,
-	    int, int);
+	    int, uint64_t);
 void	vntblinit(void);
-int	vwaitforio(struct vnode *, int, char *, int);
+int	vwaitforio(struct vnode *, int, char *, uint64_t);
 void	vwakeup(struct vnode *);
 void	vput(struct vnode *);
 int	vrecycle(struct vnode *, struct proc *);

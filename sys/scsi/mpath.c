@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpath.c,v 1.42 2019/02/10 16:42:35 phessler Exp $ */
+/*	$OpenBSD: mpath.c,v 1.49 2020/06/27 14:29:45 krw Exp $ */
 
 /*
  * Copyright (c) 2009 David Gwynne <dlg@openbsd.org>
@@ -98,9 +98,7 @@ void		mpath_failover_start(void *);
 void		mpath_failover_check(struct mpath_dev *);
 
 struct scsi_adapter mpath_switch = {
-	mpath_cmd,
-	scsi_minphys,
-	mpath_probe
+	mpath_cmd, NULL, mpath_probe, NULL, NULL
 };
 
 void		mpath_xs_stuffup(struct scsi_xfer *);
@@ -123,12 +121,11 @@ mpath_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_link.adapter = &mpath_switch;
 	sc->sc_link.adapter_softc = sc;
-	sc->sc_link.adapter_target = MPATH_BUSWIDTH;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.adapter_buswidth = MPATH_BUSWIDTH;
 	sc->sc_link.luns = 1;
 	sc->sc_link.openings = 1024; /* XXX magical */
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	sc->sc_scsibus = (struct scsibus_softc *)config_found(&sc->sc_dev,
@@ -165,7 +162,7 @@ mpath_next_path(struct mpath_dev *d)
 #ifdef DIAGNOSTIC
 	if (d == NULL)
 		panic("%s: d is NULL", __func__);
-#endif
+#endif /* DIAGNOSTIC */
 
 	p = d->d_next_path;
 	if (p != NULL) {
@@ -190,7 +187,7 @@ mpath_cmd(struct scsi_xfer *xs)
 #ifdef DIAGNOSTIC
 	if (d == NULL)
 		panic("mpath_cmd issued against nonexistent device");
-#endif
+#endif /* DIAGNOSTIC */
 
 	if (ISSET(xs->flags, SCSI_POLL)) {
 		mtx_enter(&d->d_mtx);
@@ -320,7 +317,7 @@ mpath_done(struct scsi_xfer *mxs)
 #ifdef DIAGNOSTIC
 		default:
 			panic("unexpected return from checksense");
-#endif
+#endif /* DIAGNOSTIC */
 		}
 		break;
 	}
@@ -405,13 +402,14 @@ mpath_minphys(struct buf *bp, struct scsi_link *link)
 #ifdef DIAGNOSTIC
 	if (d == NULL)
 		panic("mpath_minphys against nonexistent device");
-#endif
+#endif /* DIAGNOSTIC */
 
 	mtx_enter(&d->d_mtx);
 	TAILQ_FOREACH(g, &d->d_groups, g_entry) {
 		TAILQ_FOREACH(p, &g->g_paths, p_entry) {
 			/* XXX crossing layers with mutex held */
-			p->p_link->adapter->scsi_minphys(bp, p->p_link);
+			if (p->p_link->adapter->dev_minphys != NULL)
+				p->p_link->adapter->dev_minphys(bp, p->p_link);
 		}
 	}
 	mtx_leave(&d->d_mtx);
@@ -450,7 +448,7 @@ mpath_path_attach(struct mpath_path *p, u_int g_id, const struct mpath_ops *ops)
 		panic("mpath_path_attach: NULL link");
 	if (p->p_group != NULL)
 		panic("mpath_path_attach: group is not NULL");
-#endif
+#endif /* DIAGNOSTIC */
 
 	for (target = 0; target < MPATH_BUSWIDTH; target++) {
 		if ((d = sc->sc_devs[target]) == NULL)
@@ -549,7 +547,7 @@ mpath_path_detach(struct mpath_path *p)
 #ifdef DIAGNOSTIC
 	if (g == NULL)
 		panic("mpath: detaching a path from a nonexistent bus");
-#endif
+#endif /* DIAGNOSTIC */
 	d = g->g_dev;
 	p->p_group = NULL;
 

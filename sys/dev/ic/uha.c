@@ -1,4 +1,4 @@
-/*	$OpenBSD: uha.c,v 1.26 2017/09/08 05:36:52 deraadt Exp $	*/
+/*	$OpenBSD: uha.c,v 1.32 2020/06/27 17:28:58 krw Exp $	*/
 /*	$NetBSD: uha.c,v 1.3 1996/10/13 01:37:29 christos Exp $	*/
 
 #undef UHADEBUG
@@ -78,14 +78,10 @@
 void uha_reset_mscp(struct uha_softc *, struct uha_mscp *);
 void uha_mscp_free(void *, void *);
 void *uha_mscp_alloc(void *);
-void uhaminphys(struct buf *, struct scsi_link *);
 void uha_scsi_cmd(struct scsi_xfer *);
 
 struct scsi_adapter uha_switch = {
-	uha_scsi_cmd,
-	uhaminphys,
-	0,
-	0,
+	uha_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 struct cfdriver uha_cd = {
@@ -133,7 +129,6 @@ uha_attach(sc)
 	sc->sc_link.openings = 2;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	/*
@@ -173,7 +168,7 @@ uha_mscp_free(xsc, xmscp)
  */
 void *
 uha_mscp_alloc(xsc)
-	void *xsc;	
+	void *xsc;
 {
 	struct uha_softc *sc = xsc;
 	struct uha_mscp *mscp;
@@ -261,14 +256,6 @@ uha_done(sc, mscp)
 	}
 
 	scsi_done(xs);
-}
-
-void
-uhaminphys(struct buf *bp, struct scsi_link *sl)
-{
-	if (bp->b_bcount > ((UHA_NSEG - 1) << PGSHIFT))
-		bp->b_bcount = ((UHA_NSEG - 1) << PGSHIFT);
-	minphys(bp);
 }
 
 /*

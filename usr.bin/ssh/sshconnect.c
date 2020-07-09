@@ -1,4 +1,4 @@
-/* $OpenBSD: sshconnect.c,v 1.315 2019/05/03 03:27:38 dtucker Exp $ */
+/* $OpenBSD: sshconnect.c,v 1.329 2020/03/13 04:01:56 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -31,6 +31,7 @@
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
 #include <ifaddrs.h>
@@ -73,14 +74,18 @@ static void warn_changed_key(struct sshkey *);
 /* Expand a proxy command */
 static char *
 expand_proxy_command(const char *proxy_command, const char *user,
-    const char *host, int port)
+    const char *host, const char *host_arg, int port)
 {
 	char *tmp, *ret, strport[NI_MAXSERV];
 
 	snprintf(strport, sizeof strport, "%d", port);
 	xasprintf(&tmp, "exec %s", proxy_command);
-	ret = percent_expand(tmp, "h", host, "p", strport,
-	    "r", options.user, (char *)NULL);
+	ret = percent_expand(tmp,
+	    "h", host,
+	    "n", host_arg,
+	    "p", strport,
+	    "r", options.user,
+	    (char *)NULL);
 	free(tmp);
 	return ret;
 }
@@ -108,8 +113,8 @@ stderr_null(void)
  * a connected fd back to us.
  */
 static int
-ssh_proxy_fdpass_connect(struct ssh *ssh, const char *host, u_short port,
-    const char *proxy_command)
+ssh_proxy_fdpass_connect(struct ssh *ssh, const char *host,
+    const char *host_arg, u_short port, const char *proxy_command)
 {
 	char *command_string;
 	int sp[2], sock;
@@ -119,12 +124,12 @@ ssh_proxy_fdpass_connect(struct ssh *ssh, const char *host, u_short port,
 	if ((shell = getenv("SHELL")) == NULL)
 		shell = _PATH_BSHELL;
 
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0)
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) == -1)
 		fatal("Could not create socketpair to communicate with "
 		    "proxy dialer: %.100s", strerror(errno));
 
 	command_string = expand_proxy_command(proxy_command, options.user,
-	    host, port);
+	    host, host_arg, port);
 	debug("Executing proxy dialer command: %.500s", command_string);
 
 	/* Fork and execute the proxy command. */
@@ -134,11 +139,11 @@ ssh_proxy_fdpass_connect(struct ssh *ssh, const char *host, u_short port,
 		close(sp[1]);
 		/* Redirect stdin and stdout. */
 		if (sp[0] != 0) {
-			if (dup2(sp[0], 0) < 0)
+			if (dup2(sp[0], 0) == -1)
 				perror("dup2 stdin");
 		}
 		if (sp[0] != 1) {
-			if (dup2(sp[0], 1) < 0)
+			if (dup2(sp[0], 1) == -1)
 				perror("dup2 stdout");
 		}
 		if (sp[0] >= 2)
@@ -166,7 +171,7 @@ ssh_proxy_fdpass_connect(struct ssh *ssh, const char *host, u_short port,
 		exit(1);
 	}
 	/* Parent. */
-	if (pid < 0)
+	if (pid == -1)
 		fatal("fork failed: %.100s", strerror(errno));
 	close(sp[0]);
 	free(command_string);
@@ -190,8 +195,8 @@ ssh_proxy_fdpass_connect(struct ssh *ssh, const char *host, u_short port,
  * Connect to the given ssh server using a proxy command.
  */
 static int
-ssh_proxy_connect(struct ssh *ssh, const char *host, u_short port,
-    const char *proxy_command)
+ssh_proxy_connect(struct ssh *ssh, const char *host, const char *host_arg,
+    u_short port, const char *proxy_command)
 {
 	char *command_string;
 	int pin[2], pout[2];
@@ -202,12 +207,12 @@ ssh_proxy_connect(struct ssh *ssh, const char *host, u_short port,
 		shell = _PATH_BSHELL;
 
 	/* Create pipes for communicating with the proxy. */
-	if (pipe(pin) < 0 || pipe(pout) < 0)
+	if (pipe(pin) == -1 || pipe(pout) == -1)
 		fatal("Could not create pipes to communicate with the proxy: %.100s",
 		    strerror(errno));
 
 	command_string = expand_proxy_command(proxy_command, options.user,
-	    host, port);
+	    host, host_arg, port);
 	debug("Executing proxy command: %.500s", command_string);
 
 	/* Fork and execute the proxy command. */
@@ -217,12 +222,12 @@ ssh_proxy_connect(struct ssh *ssh, const char *host, u_short port,
 		/* Redirect stdin and stdout. */
 		close(pin[1]);
 		if (pin[0] != 0) {
-			if (dup2(pin[0], 0) < 0)
+			if (dup2(pin[0], 0) == -1)
 				perror("dup2 stdin");
 			close(pin[0]);
 		}
 		close(pout[0]);
-		if (dup2(pout[1], 1) < 0)
+		if (dup2(pout[1], 1) == -1)
 			perror("dup2 stdout");
 		/* Cannot be 1 because pin allocated two descriptors. */
 		close(pout[1]);
@@ -242,13 +247,13 @@ ssh_proxy_connect(struct ssh *ssh, const char *host, u_short port,
 
 		/* Execute the proxy command.  Note that we gave up any
 		   extra privileges above. */
-		signal(SIGPIPE, SIG_DFL);
+		ssh_signal(SIGPIPE, SIG_DFL);
 		execv(argv[0], argv);
 		perror(argv[0]);
 		exit(1);
 	}
 	/* Parent. */
-	if (pid < 0)
+	if (pid == -1)
 		fatal("fork failed: %.100s", strerror(errno));
 	else
 		proxy_command_pid = pid; /* save pid to clean up later */
@@ -353,7 +358,7 @@ ssh_create_socket(struct addrinfo *ai)
 	char ntop[NI_MAXHOST];
 
 	sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-	if (sock < 0) {
+	if (sock == -1) {
 		error("socket: %s", strerror(errno));
 		return -1;
 	}
@@ -508,20 +513,20 @@ ssh_connect_direct(struct ssh *ssh, const char *host, struct addrinfo *aitop,
 	/* Set SO_KEEPALIVE if requested. */
 	if (want_keepalive &&
 	    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (void *)&on,
-	    sizeof(on)) < 0)
+	    sizeof(on)) == -1)
 		error("setsockopt SO_KEEPALIVE: %.100s", strerror(errno));
 
 	/* Set the connection. */
 	if (ssh_packet_set_connection(ssh, sock, sock) == NULL)
 		return -1; /* ssh_packet_set_connection logs error */
 
-        return 0;
+	return 0;
 }
 
 int
-ssh_connect(struct ssh *ssh, const char *host, struct addrinfo *addrs,
-    struct sockaddr_storage *hostaddr, u_short port, int family,
-    int connection_attempts, int *timeout_ms, int want_keepalive)
+ssh_connect(struct ssh *ssh, const char *host, const char *host_arg,
+    struct addrinfo *addrs, struct sockaddr_storage *hostaddr, u_short port,
+    int family, int connection_attempts, int *timeout_ms, int want_keepalive)
 {
 	int in, out;
 
@@ -529,8 +534,8 @@ ssh_connect(struct ssh *ssh, const char *host, struct addrinfo *addrs,
 		return ssh_connect_direct(ssh, host, addrs, hostaddr, port,
 		    family, connection_attempts, timeout_ms, want_keepalive);
 	} else if (strcmp(options.proxy_command, "-") == 0) {
-		if ((in = dup(STDIN_FILENO)) < 0 ||
-		    (out = dup(STDOUT_FILENO)) < 0) {
+		if ((in = dup(STDIN_FILENO)) == -1 ||
+		    (out = dup(STDOUT_FILENO)) == -1) {
 			if (in >= 0)
 				close(in);
 			error("%s: dup() in/out failed", __func__);
@@ -540,10 +545,11 @@ ssh_connect(struct ssh *ssh, const char *host, struct addrinfo *addrs,
 			return -1; /* ssh_packet_set_connection logs error */
 		return 0;
 	} else if (options.proxy_use_fdpass) {
-		return ssh_proxy_fdpass_connect(ssh, host, port,
+		return ssh_proxy_fdpass_connect(ssh, host, host_arg, port,
 		    options.proxy_command);
 	}
-	return ssh_proxy_connect(ssh, host, port, options.proxy_command);
+	return ssh_proxy_connect(ssh, host, host_arg, port,
+	    options.proxy_command);
 }
 
 /* defaults to 'no' */
@@ -552,22 +558,23 @@ confirm(const char *prompt, const char *fingerprint)
 {
 	const char *msg, *again = "Please type 'yes' or 'no': ";
 	const char *again_fp = "Please type 'yes', 'no' or the fingerprint: ";
-	char *p;
+	char *p, *cp;
 	int ret = -1;
 
 	if (options.batch_mode)
 		return 0;
 	for (msg = prompt;;msg = fingerprint ? again_fp : again) {
-		p = read_passphrase(msg, RP_ECHO);
+		cp = p = read_passphrase(msg, RP_ECHO);
 		if (p == NULL)
 			return 0;
-		p[strcspn(p, "\n")] = '\0';
+		p += strspn(p, " \t"); /* skip leading whitespace */
+		p[strcspn(p, " \t\n")] = '\0'; /* remove trailing whitespace */
 		if (p[0] == '\0' || strcasecmp(p, "no") == 0)
 			ret = 0;
 		else if (strcasecmp(p, "yes") == 0 || (fingerprint != NULL &&
 		    strcasecmp(p, fingerprint) == 0))
 			ret = 1;
-		free(p);
+		free(cp);
 		if (ret != -1)
 			return ret;
 	}
@@ -749,7 +756,7 @@ check_host_key(char *hostname, struct sockaddr *hostaddr, u_short port,
 		ip_status = check_key_in_hostkeys(ip_hostkeys, host_key,
 		    &ip_found);
 		if (host_status == HOST_CHANGED &&
-		    (ip_status != HOST_CHANGED || 
+		    (ip_status != HOST_CHANGED ||
 		    (ip_found != NULL &&
 		    !sshkey_equal(ip_found->key, host_found->key))))
 			host_ip_differ = 1;
@@ -1231,6 +1238,7 @@ ssh_login(struct ssh *ssh, Sensitive *sensitive, const char *orighost,
 {
 	char *host;
 	char *server_user, *local_user;
+	int r;
 
 	local_user = xstrdup(pw->pw_name);
 	server_user = options.user ? options.user : local_user;
@@ -1240,8 +1248,8 @@ ssh_login(struct ssh *ssh, Sensitive *sensitive, const char *orighost,
 	lowercase(host);
 
 	/* Exchange protocol version identification strings with the server. */
-	if (kex_exchange_identification(ssh, timeout_ms, NULL) != 0)
-		cleanup_exit(255); /* error already logged */
+	if ((r = kex_exchange_identification(ssh, timeout_ms, NULL)) != 0)
+		sshpkt_fatal(ssh, r, "banner exchange");
 
 	/* Put the connection into non-blocking mode. */
 	ssh_packet_set_nonblocking(ssh);
@@ -1338,10 +1346,10 @@ ssh_local_cmd(const char *args)
 	if ((shell = getenv("SHELL")) == NULL || *shell == '\0')
 		shell = _PATH_BSHELL;
 
-	osighand = signal(SIGCHLD, SIG_DFL);
+	osighand = ssh_signal(SIGCHLD, SIG_DFL);
 	pid = fork();
 	if (pid == 0) {
-		signal(SIGPIPE, SIG_DFL);
+		ssh_signal(SIGPIPE, SIG_DFL);
 		debug3("Executing %s -c \"%s\"", shell, args);
 		execl(shell, shell, "-c", args, (char *)NULL);
 		error("Couldn't execute %s -c \"%s\": %s",
@@ -1352,7 +1360,7 @@ ssh_local_cmd(const char *args)
 	while (waitpid(pid, &status, 0) == -1)
 		if (errno != EINTR)
 			fatal("Couldn't wait for child: %s", strerror(errno));
-	signal(SIGCHLD, osighand);
+	ssh_signal(SIGCHLD, osighand);
 
 	if (!WIFEXITED(status))
 		return (1);
@@ -1361,10 +1369,11 @@ ssh_local_cmd(const char *args)
 }
 
 void
-maybe_add_key_to_agent(char *authfile, const struct sshkey *private,
-    char *comment, char *passphrase)
+maybe_add_key_to_agent(const char *authfile, struct sshkey *private,
+    const char *comment, const char *passphrase)
 {
 	int auth_sock = -1, r;
+	const char *skprovider = NULL;
 
 	if (options.add_keys_to_agent == 0)
 		return;
@@ -1380,9 +1389,11 @@ maybe_add_key_to_agent(char *authfile, const struct sshkey *private,
 		close(auth_sock);
 		return;
 	}
-
-	if ((r = ssh_add_identity_constrained(auth_sock, private, comment, 0,
-	    (options.add_keys_to_agent == 3), 0)) == 0)
+	if (sshkey_is_sk(private))
+		skprovider = options.sk_provider;
+	if ((r = ssh_add_identity_constrained(auth_sock, private,
+	    comment == NULL ? authfile : comment, 0,
+	    (options.add_keys_to_agent == 3), 0, skprovider)) == 0)
 		debug("identity added to agent: %s", authfile);
 	else
 		debug("could not add identity to agent: %s (%d)", authfile, r);

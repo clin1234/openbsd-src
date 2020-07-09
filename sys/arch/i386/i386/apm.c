@@ -1,4 +1,4 @@
-/*	$OpenBSD: apm.c,v 1.118 2018/07/30 14:19:12 kettenis Exp $	*/
+/*	$OpenBSD: apm.c,v 1.125 2020/06/24 22:03:40 cheloha Exp $	*/
 
 /*-
  * Copyright (c) 1998-2001 Michael Shalayeff. All rights reserved.
@@ -50,7 +50,6 @@
 #include <sys/buf.h>
 #include <sys/reboot.h>
 #include <sys/event.h>
-#include <dev/rndvar.h>
 
 #include <machine/conf.h>
 #include <machine/cpu.h>
@@ -103,8 +102,11 @@ struct cfattach apm_ca = {
 void	filt_apmrdetach(struct knote *kn);
 int	filt_apmread(struct knote *kn, long hint);
 
-struct filterops apmread_filtops = {
-	1, NULL, filt_apmrdetach, filt_apmread
+const struct filterops apmread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_apmrdetach,
+	.f_event	= filt_apmread,
 };
 
 #define	APM_RESUME_HOLDOFF	3
@@ -268,7 +270,7 @@ apm_suspend(int state)
 	i8254_startclock();
 	if (initclock_func == i8254_initclocks)
 		rtcstart();		/* in i8254 mode, rtc is profclock */
-	inittodr(time_second);
+	inittodr(gettime());
 
 	config_suspend_all(DVACT_RESUME);
 	cold = 0;
@@ -395,7 +397,6 @@ apm_handle_event(struct apm_softc *sc, struct apmregs *regs)
 		break;
 	case APM_UPDATE_TIME:
 		DPRINTF(("update time, please\n"));
-		inittodr(time_second);
 		apm_record_event(sc, regs->bx);
 		break;
 	case APM_CRIT_SUSPEND_REQ:
@@ -908,7 +909,7 @@ apm_thread(void *v)
 		rw_enter_write(&sc->sc_lock);
 		(void) apm_periodic_check(sc);
 		rw_exit_write(&sc->sc_lock);
-		tsleep(&lbolt, PWAIT, "apmev", 0);
+		tsleep_nsec(&lbolt, PWAIT, "apmev", INFSLP);
 	}
 }
 
@@ -1116,7 +1117,7 @@ filt_apmrdetach(struct knote *kn)
 	struct apm_softc *sc = (struct apm_softc *)kn->kn_hook;
 
 	rw_enter_write(&sc->sc_lock);
-	SLIST_REMOVE(&sc->sc_note, kn, knote, kn_selnext);
+	klist_remove(&sc->sc_note, kn);
 	rw_exit_write(&sc->sc_lock);
 }
 
@@ -1150,7 +1151,7 @@ apmkqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = (caddr_t)sc;
 
 	rw_enter_write(&sc->sc_lock);
-	SLIST_INSERT_HEAD(&sc->sc_note, kn, kn_selnext);
+	klist_insert(&sc->sc_note, kn);
 	rw_exit_write(&sc->sc_lock);
 	return (0);
 }

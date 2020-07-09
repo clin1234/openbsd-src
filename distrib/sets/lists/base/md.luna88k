@@ -6,10 +6,10 @@
 ./usr/lib/crtbeginS.o
 ./usr/lib/crtend.o
 ./usr/lib/crtendS.o
-./usr/lib/gcc-lib/m88k-unknown-openbsd6.5
-./usr/lib/gcc-lib/m88k-unknown-openbsd6.5/3.3.6/fPIC/libgcc.a
-./usr/lib/gcc-lib/m88k-unknown-openbsd6.5/3.3.6/fpic/libgcc.a
-./usr/lib/gcc-lib/m88k-unknown-openbsd6.5/3.3.6/libgcc.a
+./usr/lib/gcc-lib/m88k-unknown-openbsd6.7
+./usr/lib/gcc-lib/m88k-unknown-openbsd6.7/3.3.6/fPIC/libgcc.a
+./usr/lib/gcc-lib/m88k-unknown-openbsd6.7/3.3.6/fpic/libgcc.a
+./usr/lib/gcc-lib/m88k-unknown-openbsd6.7/3.3.6/libgcc.a
 ./usr/lib/libstdc++.so.57.0
 ./usr/libdata/perl5/m88k-openbsd
 ./usr/libdata/perl5/m88k-openbsd/.packlist
@@ -248,6 +248,7 @@
 ./usr/libdata/perl5/m88k-openbsd/OpenBSD
 ./usr/libdata/perl5/m88k-openbsd/OpenBSD/MkTemp.pm
 ./usr/libdata/perl5/m88k-openbsd/OpenBSD/Pledge.pm
+./usr/libdata/perl5/m88k-openbsd/OpenBSD/Unveil.pm
 ./usr/libdata/perl5/m88k-openbsd/POSIX.pm
 ./usr/libdata/perl5/m88k-openbsd/POSIX.pod
 ./usr/libdata/perl5/m88k-openbsd/PerlIO
@@ -259,9 +260,7 @@
 ./usr/libdata/perl5/m88k-openbsd/Scalar
 ./usr/libdata/perl5/m88k-openbsd/Scalar/Util.pm
 ./usr/libdata/perl5/m88k-openbsd/Socket.pm
-./usr/libdata/perl5/m88k-openbsd/Storable
 ./usr/libdata/perl5/m88k-openbsd/Storable.pm
-./usr/libdata/perl5/m88k-openbsd/Storable/Limit.pm
 ./usr/libdata/perl5/m88k-openbsd/Sub
 ./usr/libdata/perl5/m88k-openbsd/Sub/Util.pm
 ./usr/libdata/perl5/m88k-openbsd/Sys
@@ -281,7 +280,6 @@
 ./usr/libdata/perl5/m88k-openbsd/Unicode/Collate.pm
 ./usr/libdata/perl5/m88k-openbsd/Unicode/Collate/Locale.pm
 ./usr/libdata/perl5/m88k-openbsd/Unicode/Normalize.pm
-./usr/libdata/perl5/m88k-openbsd/arybase.pm
 ./usr/libdata/perl5/m88k-openbsd/attributes.pm
 ./usr/libdata/perl5/m88k-openbsd/auto
 ./usr/libdata/perl5/m88k-openbsd/auto/B
@@ -368,6 +366,8 @@
 ./usr/libdata/perl5/m88k-openbsd/auto/OpenBSD/MkTemp/MkTemp.so
 ./usr/libdata/perl5/m88k-openbsd/auto/OpenBSD/Pledge
 ./usr/libdata/perl5/m88k-openbsd/auto/OpenBSD/Pledge/Pledge.so
+./usr/libdata/perl5/m88k-openbsd/auto/OpenBSD/Unveil
+./usr/libdata/perl5/m88k-openbsd/auto/OpenBSD/Unveil/Unveil.so
 ./usr/libdata/perl5/m88k-openbsd/auto/POSIX
 ./usr/libdata/perl5/m88k-openbsd/auto/POSIX/POSIX.so
 ./usr/libdata/perl5/m88k-openbsd/auto/PerlIO
@@ -393,7 +393,6 @@
 ./usr/libdata/perl5/m88k-openbsd/auto/Term
 ./usr/libdata/perl5/m88k-openbsd/auto/Term/ReadKey
 ./usr/libdata/perl5/m88k-openbsd/auto/Term/ReadKey/ReadKey.so
-./usr/libdata/perl5/m88k-openbsd/auto/Term/ReadKey/autosplit.ix
 ./usr/libdata/perl5/m88k-openbsd/auto/Tie
 ./usr/libdata/perl5/m88k-openbsd/auto/Tie/Hash
 ./usr/libdata/perl5/m88k-openbsd/auto/Tie/Hash/NamedCapture
@@ -408,8 +407,6 @@
 ./usr/libdata/perl5/m88k-openbsd/auto/Unicode/Collate/Collate.so
 ./usr/libdata/perl5/m88k-openbsd/auto/Unicode/Normalize
 ./usr/libdata/perl5/m88k-openbsd/auto/Unicode/Normalize/Normalize.so
-./usr/libdata/perl5/m88k-openbsd/auto/arybase
-./usr/libdata/perl5/m88k-openbsd/auto/arybase/arybase.so
 ./usr/libdata/perl5/m88k-openbsd/auto/attributes
 ./usr/libdata/perl5/m88k-openbsd/auto/attributes/attributes.so
 ./usr/libdata/perl5/m88k-openbsd/auto/mro

@@ -1,5 +1,5 @@
 #!/bin/ksh
-#	$OpenBSD: ovs.sh,v 1.1 2019/03/22 20:44:31 denis Exp $
+#	$OpenBSD: ovs.sh,v 1.3 2019/08/06 07:31:53 claudio Exp $
 
 set -e
 
@@ -44,12 +44,19 @@ error_notify() {
 	fi
 }
 
+if [ "$(id -u)" -ne 0 ]; then 
+	echo need root privileges >&2
+	exit 1
+fi
+
 trap 'error_notify $?' EXIT
 
 echo check if rdomains are busy
 for n in ${RDOMAINS}; do
-	if /sbin/ifconfig | grep -v "^lo${n}:" | grep " rdomain ${n} "; then \
-	    echo routing domain ${n} is already used >&2; exit 1; fi
+	if /sbin/ifconfig | grep -v "^lo${n}:" | grep " rdomain ${n} "; then
+		echo routing domain ${n} is already used >&2
+		exit 1
+	fi
 done
 
 echo check if interfaces are busy
@@ -57,6 +64,8 @@ for n in ${PAIRS}; do
 	/sbin/ifconfig "${n}" >/dev/null 2>&1 && \
 	    ( echo interface ${n} is already used >&2; exit 1 )
 done
+
+set -x
 
 echo setup
 ifconfig ${PAIR1} rdomain ${RDOMAIN1} ${PAIR1IP}/30 up
@@ -80,6 +89,18 @@ route -T ${RDOMAIN2} exec ${BGPD} \
 sleep 2
 
 echo test 1
+route -T ${RDOMAIN1} exec bgpctl sh rib ovs valid | \
+	grep ${PAIR2VALID}
+route -T ${RDOMAIN1} exec bgpctl sh rib ovs invalid | \
+	grep ${PAIR2INVALIDAS}
+route -T ${RDOMAIN1} exec bgpctl sh rib ovs not-found | \
+	grep ${PAIR2NOTFOUND}
+
+echo reload config
+route -T ${RDOMAIN1} exec bgpctl reload
+sleep 2
+
+echo test 2
 route -T ${RDOMAIN1} exec bgpctl sh rib ovs valid | \
 	grep ${PAIR2VALID}
 route -T ${RDOMAIN1} exec bgpctl sh rib ovs invalid | \

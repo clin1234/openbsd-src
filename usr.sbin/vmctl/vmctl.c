@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmctl.c,v 1.68 2019/05/16 06:41:47 jasper Exp $	*/
+/*	$OpenBSD: vmctl.c,v 1.74 2020/03/11 12:47:49 jasper Exp $	*/
 
 /*
  * Copyright (c) 2014 Mike Larkin <mlarkin@openbsd.org>
@@ -235,11 +235,6 @@ vm_start_complete(struct imsg *imsg, int *ret, int autoconnect)
 				warnx("could not open disk image(s)");
 				*ret = ENOENT;
 				break;
-			case VMD_DISK_INVALID:
-				warnx("specified disk image(s) are "
-				    "not regular files");
-				*ret = ENOENT;
-				break;
 			case VMD_CDROM_MISSING:
 				warnx("could not find specified iso image");
 				*ret = ENOENT;
@@ -248,6 +243,10 @@ vm_start_complete(struct imsg *imsg, int *ret, int autoconnect)
 				warnx("specified iso image is not a regular "
 				    "file");
 				*ret = ENOENT;
+				break;
+			case VMD_PARENT_INVALID:
+				warnx("invalid template");
+				*ret = EINVAL;
 				break;
 			default:
 				errno = res;
@@ -460,7 +459,7 @@ terminate_vm(uint32_t terminate_id, const char *name, unsigned int flags)
  * terminate_vm_complete
  *
  * Callback function invoked when we are expecting an
- * IMSG_VMDOP_TERMINATE_VMM_RESPONSE message indicating the completion of
+ * IMSG_VMDOP_TERMINATE_VM_RESPONSE message indicating the completion of
  * a terminate vm operation.
  *
  * Parameters:
@@ -715,15 +714,17 @@ add_info(struct imsg *imsg, int *ret)
 const char *
 vm_state(unsigned int mask)
 {
-	/* Presence of absence of other flags */
-	if (!mask || (mask & VM_STATE_DISABLED))
-		return "stopped";
-	else if (mask & VM_STATE_PAUSED)
+	if (mask & VM_STATE_PAUSED)
 		return "paused";
-	else if (mask & VM_STATE_SHUTDOWN)
-		return "stopping";
+	else if (mask & VM_STATE_WAITING)
+		return "waiting";
 	else if (mask & VM_STATE_RUNNING)
 		return "running";
+	else if (mask & VM_STATE_SHUTDOWN)
+		return "stopping";
+	/* Presence of absence of other flags */
+	else if (!mask || (mask & VM_STATE_DISABLED))
+		return "stopped";
 
 	return "unknown";
 }
@@ -767,8 +768,6 @@ print_vm_info(struct vmop_info_result *list, size_t ct)
 				(void)strlcpy(user, name, sizeof(user));
 			/* get group name */
 			if (vmi->vir_gid != -1) {
-				if (vmi->vir_uid == 0)
-					*user = '\0';
 				name = group_from_gid(vmi->vir_gid, 1);
 				if (name == NULL)
 					(void)snprintf(group, sizeof(group),

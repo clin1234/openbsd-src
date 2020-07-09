@@ -1,4 +1,4 @@
-/*	$OpenBSD: lsupdate.c,v 1.45 2016/12/26 17:38:14 jca Exp $ */
+/*	$OpenBSD: lsupdate.c,v 1.48 2020/05/06 14:40:54 claudio Exp $ */
 
 /*
  * Copyright (c) 2005 Claudio Jeker <claudio@openbsd.org>
@@ -175,8 +175,8 @@ int
 add_ls_update(struct ibuf *buf, struct iface *iface, void *data, u_int16_t len,
     u_int16_t older)
 {
-	void		*lsage;
-	u_int16_t	 age;
+	size_t		ageoff;
+	u_int16_t	age;
 
 	if ((size_t)iface->mtu < sizeof(struct ip) + sizeof(struct ospf_hdr) +
 	    sizeof(u_int32_t) + ibuf_size(buf) + len + MD5_DIGEST_LENGTH) {
@@ -186,7 +186,7 @@ add_ls_update(struct ibuf *buf, struct iface *iface, void *data, u_int16_t len,
 			return (0);
 	}
 
-	lsage = ibuf_reserve(buf, 0);
+	ageoff = ibuf_size(buf);
 	if (ibuf_add(buf, data, len)) {
 		log_warn("add_ls_update");
 		return (0);
@@ -198,7 +198,7 @@ add_ls_update(struct ibuf *buf, struct iface *iface, void *data, u_int16_t len,
 	if ((age += older + iface->transmit_delay) >= MAX_AGE)
 		age = MAX_AGE;
 	age = htons(age);
-	memcpy(lsage, &age, sizeof(age));
+	memcpy(ibuf_seek(buf, ageoff, sizeof(age)), &age, sizeof(age));
 
 	return (1);
 }
@@ -210,7 +210,6 @@ send_ls_update(struct ibuf *buf, struct iface *iface, struct in_addr addr,
     u_int32_t nlsa)
 {
 	struct sockaddr_in	 dst;
-	int			 ret;
 
 	nlsa = htonl(nlsa);
 	memcpy(ibuf_seek(buf, sizeof(struct ospf_hdr), sizeof(nlsa)),
@@ -224,12 +223,13 @@ send_ls_update(struct ibuf *buf, struct iface *iface, struct in_addr addr,
 	dst.sin_len = sizeof(struct sockaddr_in);
 	dst.sin_addr.s_addr = addr.s_addr;
 
-	ret = send_packet(iface, buf, &dst);
+	if (send_packet(iface, buf, &dst) == -1)
+		goto fail;
 
 	ibuf_free(buf);
-	return (ret);
+	return (0);
 fail:
-	log_warn("send_ls_update");
+	log_warn("%s", __func__);
 	ibuf_free(buf);
 	return (-1);
 }
@@ -470,7 +470,7 @@ ls_retrans_timer(int fd, short event, void *bula)
 			/* ls_retrans_list_free retriggers the timer */
 			return;
 		} else if (nbr->iface->type == IF_TYPE_POINTOPOINT)
-			memcpy(&addr, &nbr->iface->dst, sizeof(addr));
+			memcpy(&addr, &nbr->addr, sizeof(addr));
 		else
 			inet_aton(AllDRouters, &addr);
 	} else

@@ -1,4 +1,4 @@
-/*	$OpenBSD: iobuf.c,v 1.10 2017/03/17 20:56:04 eric Exp $	*/
+/*	$OpenBSD: iobuf.c,v 1.13 2020/04/24 11:34:07 eric Exp $	*/
 /*
  * Copyright (c) 2012 Eric Faurot <eric@openbsd.org>
  *
@@ -26,7 +26,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifdef IO_SSL
+#ifdef IO_TLS
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #endif
@@ -174,10 +174,9 @@ iobuf_getline(struct iobuf *iobuf, size_t *rlen)
 			 * the next call to iobuf_normalize() or iobuf_extend().
 			 */
 			iobuf_drop(iobuf, i + 1);
-			len = (i && buf[i - 1] == '\r') ? i - 1 : i;
-			buf[len] = '\0';
+			buf[i] = '\0';
 			if (rlen)
-				*rlen = len;
+				*rlen = i;
 			return (buf);
 		}
 
@@ -386,31 +385,31 @@ iobuf_flush(struct iobuf *io, int fd)
 	return (0);
 }
 
-#ifdef IO_SSL
+#ifdef IO_TLS
 
 int
-iobuf_flush_ssl(struct iobuf *io, void *ssl)
+iobuf_flush_tls(struct iobuf *io, void *tls)
 {
 	ssize_t	s;
 
 	while (io->queued)
-		if ((s = iobuf_write_ssl(io, ssl)) < 0)
+		if ((s = iobuf_write_tls(io, tls)) < 0)
 			return (s);
 
 	return (0);
 }
 
 ssize_t
-iobuf_write_ssl(struct iobuf *io, void *ssl)
+iobuf_write_tls(struct iobuf *io, void *tls)
 {
 	struct ioqbuf	*q;
 	int		 r;
 	ssize_t		 n;
 
 	q = io->outq;
-	n = SSL_write(ssl, q->buf + q->rpos, q->wpos - q->rpos);
+	n = SSL_write(tls, q->buf + q->rpos, q->wpos - q->rpos);
 	if (n <= 0) {
-		switch ((r = SSL_get_error(ssl, n))) {
+		switch ((r = SSL_get_error(tls, n))) {
 		case SSL_ERROR_WANT_READ:
 			return (IOBUF_WANT_READ);
 		case SSL_ERROR_WANT_WRITE:
@@ -419,12 +418,10 @@ iobuf_write_ssl(struct iobuf *io, void *ssl)
 			return (IOBUF_CLOSED);
 		case SSL_ERROR_SYSCALL:
 			if (ERR_peek_last_error())
-				return (IOBUF_SSLERROR);
-			if (r == 0)
-				errno = EPIPE;
+				return (IOBUF_TLSERROR);
 			return (IOBUF_ERROR);
 		default:
-			return (IOBUF_SSLERROR);
+			return (IOBUF_TLSERROR);
 		}
 	}
 	iobuf_drain(io, n);
@@ -433,26 +430,24 @@ iobuf_write_ssl(struct iobuf *io, void *ssl)
 }
 
 ssize_t
-iobuf_read_ssl(struct iobuf *io, void *ssl)
+iobuf_read_tls(struct iobuf *io, void *tls)
 {
 	ssize_t	n;
 	int	r;
 
-	n = SSL_read(ssl, io->buf + io->wpos, iobuf_left(io));
+	n = SSL_read(tls, io->buf + io->wpos, iobuf_left(io));
 	if (n < 0) {
-		switch ((r = SSL_get_error(ssl, n))) {
+		switch ((r = SSL_get_error(tls, n))) {
 		case SSL_ERROR_WANT_READ:
 			return (IOBUF_WANT_READ);
 		case SSL_ERROR_WANT_WRITE:
 			return (IOBUF_WANT_WRITE);
 		case SSL_ERROR_SYSCALL:
 			if (ERR_peek_last_error())
-				return (IOBUF_SSLERROR);
-			if (r == 0)
-				errno = EPIPE;
+				return (IOBUF_TLSERROR);
 			return (IOBUF_ERROR);
 		default:
-			return (IOBUF_SSLERROR);
+			return (IOBUF_TLSERROR);
 		}
 	} else if (n == 0)
 		return (IOBUF_CLOSED);
@@ -462,4 +457,4 @@ iobuf_read_ssl(struct iobuf *io, void *ssl)
 	return (n);
 }
 
-#endif /* IO_SSL */
+#endif /* IO_TLS */

@@ -1,4 +1,4 @@
-/*       $OpenBSD: vfs_sync.c,v 1.60 2018/08/13 15:26:17 visa Exp $  */
+/*       $OpenBSD: vfs_sync.c,v 1.64 2020/06/24 22:03:41 cheloha Exp $  */
 
 /*
  *  Portions of this code are:
@@ -142,7 +142,7 @@ syncer_thread(void *arg)
 	int s;
 
 	for (;;) {
-		starttime = time_second;
+		starttime = gettime();
 
 		/*
 		 * Push files whose dirty time has expired.
@@ -228,8 +228,8 @@ syncer_thread(void *arg)
 		 * matter as we are just trying to generally pace the
 		 * filesystem activity.
 		 */
-		if (time_second == starttime)
-			tsleep(&lbolt, PPAUSE, "syncer", 0);
+		if (gettime() == starttime)
+			tsleep_nsec(&lbolt, PPAUSE, "syncer", INFSLP);
 	}
 }
 
@@ -241,12 +241,8 @@ syncer_thread(void *arg)
 int
 speedup_syncer(void)
 {
-	int s;
-
-	SCHED_LOCK(s);
-	if (syncerproc && syncerproc->p_wchan == &lbolt)
-		setrunnable(syncerproc);
-	SCHED_UNLOCK(s);
+	if (syncerproc)
+		wakeup_proc(syncerproc, &lbolt);
 	if (rushjob < syncdelay / 2) {
 		rushjob += 1;
 		stat_rush_requests += 1;
@@ -260,7 +256,7 @@ int   sync_fsync(void *);
 int   sync_inactive(void *);
 int   sync_print(void *);
 
-struct vops sync_vops = {
+const struct vops sync_vops = {
 	.vop_close	= nullop,
 	.vop_fsync	= sync_fsync,
 	.vop_inactive	= sync_inactive,

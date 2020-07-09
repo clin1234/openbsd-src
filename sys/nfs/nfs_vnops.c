@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_vnops.c,v 1.180 2019/01/18 13:40:34 bluhm Exp $	*/
+/*	$OpenBSD: nfs_vnops.c,v 1.183 2020/06/24 22:03:44 cheloha Exp $	*/
 /*	$NetBSD: nfs_vnops.c,v 1.62.4.1 1996/07/08 20:26:52 jtc Exp $	*/
 
 /*
@@ -137,7 +137,7 @@ int nfsspec_read(void *);
 int nfsspec_write(void *);
 
 /* Global vfs data structures for nfs. */
-struct vops nfs_vops = {
+const struct vops nfs_vops = {
 	.vop_lookup	= nfs_lookup,
 	.vop_create	= nfs_create,
 	.vop_mknod	= nfs_mknod,
@@ -176,7 +176,7 @@ struct vops nfs_vops = {
 };
 
 /* Special device vnode ops. */
-struct vops nfs_specvops = {
+const struct vops nfs_specvops = {
 	.vop_close	= nfsspec_close,
 	.vop_access	= nfsspec_access,
 	.vop_getattr	= nfs_getattr,
@@ -217,7 +217,7 @@ struct vops nfs_specvops = {
 };
 
 #ifdef FIFO
-struct vops nfs_fifovops = {
+const struct vops nfs_fifovops = {
 	.vop_close	= nfsfifo_close,
 	.vop_access	= nfsspec_access,
 	.vop_getattr	= nfs_getattr,
@@ -342,7 +342,7 @@ nfs_access(void *v)
 	 * shortly before, use the cached result.
 	 */
 	 cachevalid = (np->n_accstamp != -1 &&
-	     (time_second - np->n_accstamp) < nfs_attrtimeo(np) &&
+	     (gettime() - np->n_accstamp) < nfs_attrtimeo(np) &&
 	     np->n_accuid == ap->a_cred->cr_uid);
 
 	if (cachevalid) {
@@ -423,7 +423,7 @@ nfs_access(void *v)
 					np->n_accmode = ap->a_mode;
 			}
 		} else {
-			np->n_accstamp = time_second;
+			np->n_accstamp = gettime();
 			np->n_accuid = ap->a_cred->cr_uid;
 			np->n_accmode = ap->a_mode;
 			np->n_accerror = error;
@@ -2845,7 +2845,8 @@ nfs_flush(struct vnode *vp, struct ucred *cred, int waitfor, struct proc *p,
 	int i;
 	struct buf *nbp;
 	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
-	int s, error = 0, slptimeo = 0, slpflag = 0, retv, bvecpos;
+	uint64_t slptimeo = INFSLP;
+	int s, error = 0, slpflag = 0, retv, bvecpos;
 	int passone = 1;
 	u_quad_t off = (u_quad_t)-1, endoff = 0, toff;
 #ifndef NFS_COMMITBVECSIZ
@@ -2942,15 +2943,15 @@ loop:
 			if (waitfor != MNT_WAIT || passone)
 				continue;
 			bp->b_flags |= B_WANTED;
-			error = tsleep(bp, slpflag | (PRIBIO + 1),
-				"nfsfsync", slptimeo);
+			error = tsleep_nsec(bp, slpflag | (PRIBIO + 1),
+			    "nfsfsync", slptimeo);
 			splx(s);
 			if (error) {
 				if (nfs_sigintr(nmp, NULL, p))
 					return (EINTR);
 				if (slpflag == PCATCH) {
 					slpflag = 0;
-					slptimeo = 2 * hz;
+					slptimeo = SEC_TO_NSEC(2);
 				}
 			}
 			goto loop;
@@ -2985,7 +2986,7 @@ loop:
 				return (EINTR);
 			if (slpflag == PCATCH) {
 				slpflag = 0;
-				slptimeo = 2 * hz;
+				slptimeo = SEC_TO_NSEC(2);
 			}
 			goto loop2;
 		}

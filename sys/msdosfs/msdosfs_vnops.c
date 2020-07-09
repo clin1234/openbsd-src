@@ -1,4 +1,4 @@
-/*	$OpenBSD: msdosfs_vnops.c,v 1.122 2018/06/21 14:17:23 visa Exp $	*/
+/*	$OpenBSD: msdosfs_vnops.c,v 1.134 2020/06/11 09:18:43 mpi Exp $	*/
 /*	$NetBSD: msdosfs_vnops.c,v 1.63 1997/10/17 11:24:19 ws Exp $	*/
 
 /*-
@@ -185,15 +185,6 @@ msdosfs_mknod(void *v)
 int
 msdosfs_open(void *v)
 {
-#if 0
-	struct vop_open_args /* {
-		struct vnode *a_vp;
-		int a_mode;
-		struct ucred *a_cred;
-		struct proc *a_p;
-	} */ *ap;
-#endif
-
 	return (0);
 }
 
@@ -220,14 +211,11 @@ msdosfs_access(void *v)
 	struct msdosfsmount *pmp = dep->de_pmp;
 	mode_t dosmode;
 
-	dosmode = (S_IRUSR|S_IRGRP|S_IROTH);
+	dosmode = (S_IRUSR | S_IRGRP | S_IROTH);
 	if ((dep->de_Attributes & ATTR_READONLY) == 0)
-		dosmode |= (S_IWUSR|S_IWGRP|S_IWOTH);
-	if (dep->de_Attributes & ATTR_DIRECTORY) {
-		dosmode |= (dosmode & S_IRUSR) ? S_IXUSR : 0;
-		dosmode |= (dosmode & S_IRGRP) ? S_IXGRP : 0;
-		dosmode |= (dosmode & S_IROTH) ? S_IXOTH : 0;
-	}
+		dosmode |= (S_IWUSR | S_IWGRP | S_IWOTH);
+	if (dep->de_Attributes & ATTR_DIRECTORY)
+		dosmode |= (S_IXUSR | S_IXGRP | S_IXOTH);
 	dosmode &= pmp->pm_mask;
 
 	return (vaccess(ap->a_vp->v_type, dosmode, pmp->pm_uid, pmp->pm_gid,
@@ -680,7 +668,7 @@ msdosfs_write(void *v)
 			 * or we write the cluster from its start beyond EOF,
 			 * then no need to read data from disk.
 			 */
-			bp = getblk(thisvp, cn, pmp->pm_bpcluster, 0, 0);
+			bp = getblk(thisvp, cn, pmp->pm_bpcluster, 0, INFSLP);
 			clrbuf(bp);
 			/*
 			 * Do the bmap now, since pcbmap needs buffers
@@ -778,17 +766,6 @@ out:
 int
 msdosfs_ioctl(void *v)
 {
-#if 0
-	struct vop_ioctl_args /* {
-		struct vnode *a_vp;
-		uint32_t a_command;
-		caddr_t a_data;
-		int a_fflag;
-		struct ucred *a_cred;
-		struct proc *a_p;
-	} */ *ap;
-#endif
-
 	return (ENOTTY);
 }
 
@@ -1307,7 +1284,7 @@ msdosfs_mkdir(void *v)
 	 */
 	bn = cntobn(pmp, newcluster);
 	/* always succeeds */
-	bp = getblk(pmp->pm_devvp, bn, pmp->pm_bpcluster, 0, 0);
+	bp = getblk(pmp->pm_devvp, bn, pmp->pm_bpcluster, 0, INFSLP);
 	bzero(bp->b_data, pmp->pm_bpcluster);
 	bcopy(&dosdirtemplate, bp->b_data, sizeof dosdirtemplate);
 	denp = (struct direntry *)bp->b_data;
@@ -1921,7 +1898,7 @@ fileidhash(uint64_t fileid)
 }
 
 /* Global vfs data structures for msdosfs */
-struct vops msdosfs_vops = {
+const struct vops msdosfs_vops = {
 	.vop_lookup	= msdosfs_lookup,
 	.vop_create	= msdosfs_create,
 	.vop_mknod	= msdosfs_mknod,
@@ -1959,12 +1936,26 @@ struct vops msdosfs_vops = {
 	.vop_revoke	= vop_generic_revoke,
 };
 
-struct filterops msdosfsread_filtops =
-	{ 1, NULL, filt_msdosfsdetach, filt_msdosfsread };
-struct filterops msdosfswrite_filtops =
-	{ 1, NULL, filt_msdosfsdetach, filt_msdosfswrite };
-struct filterops msdosfsvnode_filtops =
-	{ 1, NULL, filt_msdosfsdetach, filt_msdosfsvnode };
+const struct filterops msdosfsread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_msdosfsdetach,
+	.f_event	= filt_msdosfsread,
+};
+
+const struct filterops msdosfswrite_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_msdosfsdetach,
+	.f_event	= filt_msdosfswrite,
+};
+
+const struct filterops msdosfsvnode_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_msdosfsdetach,
+	.f_event	= filt_msdosfsvnode,
+};
 
 int
 msdosfs_kqfilter(void *v)
@@ -1989,7 +1980,7 @@ msdosfs_kqfilter(void *v)
 
 	kn->kn_hook = (caddr_t)vp;
 
-	SLIST_INSERT_HEAD(&vp->v_selectinfo.si_note, kn, kn_selnext);
+	klist_insert(&vp->v_selectinfo.si_note, kn);
 
 	return (0);
 }
@@ -1999,7 +1990,7 @@ filt_msdosfsdetach(struct knote *kn)
 {
 	struct vnode *vp = (struct vnode *)kn->kn_hook;
 
-	SLIST_REMOVE(&vp->v_selectinfo.si_note, kn, knote, kn_selnext);
+	klist_remove(&vp->v_selectinfo.si_note, kn);
 }
 
 int
@@ -2017,11 +2008,15 @@ filt_msdosfsread(struct knote *kn, long hint)
 		return (1);
 	}
 
-	kn->kn_data = dep->de_FileSize - kn->kn_fp->f_offset;
+	kn->kn_data = dep->de_FileSize - foffset(kn->kn_fp);
 	if (kn->kn_data == 0 && kn->kn_sfflags & NOTE_EOF) {
 		kn->kn_fflags |= NOTE_EOF;
 		return (1);
 	}
+
+	if (kn->kn_flags & __EV_POLL)
+		return (1);
+
 	return (kn->kn_data != 0);
 }
 

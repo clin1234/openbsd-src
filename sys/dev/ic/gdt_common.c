@@ -1,4 +1,4 @@
-/*	$OpenBSD: gdt_common.c,v 1.64 2018/08/14 05:22:21 jmatthew Exp $	*/
+/*	$OpenBSD: gdt_common.c,v 1.72 2020/07/02 15:58:17 krw Exp $	*/
 
 /*
  * Copyright (c) 1999, 2000, 2003 Niklas Hallqvist.  All rights reserved.
@@ -93,7 +93,7 @@ struct cfdriver gdt_cd = {
 };
 
 struct scsi_adapter gdt_switch = {
-	gdt_scsi_cmd, gdtminphys, 0, 0,
+	gdt_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 int gdt_cnt = 0;
@@ -149,15 +149,6 @@ gdt_attach(struct gdt_softc *sc)
 		TAILQ_INSERT_TAIL(&sc->sc_free_ccb, &sc->sc_ccbs[i],
 		    gc_chain);
 	}
-
-	/* Fill in the prototype scsi_link. */
-	sc->sc_link.adapter_softc = sc;
-	sc->sc_link.adapter = &gdt_switch;
-	/* openings will be filled in later. */
-	sc->sc_link.adapter_buswidth =
-	    (sc->sc_class & GDT_FC) ? GDT_MAXID : GDT_MAX_HDRIVES;
-	sc->sc_link.adapter_target = sc->sc_link.adapter_buswidth;
-	sc->sc_link.pool = &sc->sc_iopool;
 
 	if (!gdt_internal_cmd(sc, GDT_SCREENSERVICE, GDT_INIT, 0, 0, 0)) {
 		printf("screen service initialization error %d\n",
@@ -451,12 +442,6 @@ gdt_attach(struct gdt_softc *sc)
 				sc->sc_hdr[i].hd_devtype = sc->sc_info;
 		}
 
-	if (sc->sc_ndevs == 0)
-		sc->sc_link.openings = 0;
-	else
-		sc->sc_link.openings = (GDT_MAXCMDS - GDT_CMD_RESERVE) /
-		    sc->sc_ndevs;
-
 	printf("dpmem %llx %d-bus %d cache device%s\n",
 	    (long long)sc->sc_dpmembase,
 	    sc->sc_bus_cnt, cdev_cnt, cdev_cnt == 1 ? "" : "s");
@@ -476,7 +461,19 @@ gdt_attach(struct gdt_softc *sc)
 #endif
 	gdt_cnt++;
 
-	bzero(&saa, sizeof(saa));
+	/* Fill in the prototype scsi_link. */
+	if (sc->sc_ndevs == 0)
+		sc->sc_link.openings = 0;
+	else
+		sc->sc_link.openings = (GDT_MAXCMDS - GDT_CMD_RESERVE) /
+		    sc->sc_ndevs;
+	sc->sc_link.adapter_softc = sc;
+	sc->sc_link.adapter = &gdt_switch;
+	sc->sc_link.adapter_buswidth =
+	    (sc->sc_class & GDT_FC) ? GDT_MAXID : GDT_MAX_HDRIVES;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
+	sc->sc_link.pool = &sc->sc_iopool;
+
 	saa.saa_sc_link = &sc->sc_link;
 
 	config_found(&sc->sc_dev, &saa, scsiprint);
@@ -583,7 +580,7 @@ gdt_scsi_cmd(struct scsi_xfer *xs)
 		link = xs->sc_link;
 		target = link->target;
 		polled = ISSET(xs->flags, SCSI_POLL);
- 
+
 		if (!gdt_polling && !(xs->flags & SCSI_POLL) &&
 		    sc->sc_test_busy(sc)) {
 			/*
@@ -1091,19 +1088,6 @@ gdt_intr(void *arg)
 		gdt_chain(sc);
 
 	return (1);
-}
-
-void
-gdtminphys(struct buf *bp, struct scsi_link *sl)
-{
-	GDT_DPRINTF(GDT_D_MISC, ("gdtminphys(0x%x) ", bp));
-
-	/* As this is way more than MAXPHYS it's really not necessary. */
-	if ((GDT_MAXOFFSETS - 1) * PAGE_SIZE < MAXPHYS &&
-	    bp->b_bcount > ((GDT_MAXOFFSETS - 1) * PAGE_SIZE))
-		bp->b_bcount = ((GDT_MAXOFFSETS - 1) * PAGE_SIZE);
-
-	minphys(bp);
 }
 
 int

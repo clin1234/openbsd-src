@@ -1,4 +1,4 @@
-/*	$OpenBSD: editor.c,v 1.360 2019/04/29 18:54:12 krw Exp $	*/
+/*	$OpenBSD: editor.c,v 1.363 2019/11/19 06:20:37 otto Exp $	*/
 
 /*
  * Copyright (c) 1997-2000 Todd C. Miller <millert@openbsd.org>
@@ -92,12 +92,12 @@ struct space_allocation alloc_big[] = {
 	{   MEG(80),       MEG(256),  10, "swap"	},
 	{  MEG(120),         GIG(4),   8, "/tmp"	},
 	{   MEG(80),         GIG(4),  13, "/var"	},
-	{ MEG(1300),         GIG(2),   5, "/usr"	},
+	{ MEG(1500),         GIG(6),  10, "/usr"	},
 	{  MEG(384),         GIG(1),   3, "/usr/X11R6"	},
 	{    GIG(1),        GIG(20),  15, "/usr/local"	},
 	{ MEG(1300),         GIG(2),   2, "/usr/src"	},
 	{    GIG(5),         GIG(6),   4, "/usr/obj"	},
-	{    GIG(1),       GIG(300),  35, "/home"	}
+	{    GIG(1),       GIG(300),  30, "/home"	}
 	/* Anything beyond this leave for the user to decide */
 };
 
@@ -1141,7 +1141,7 @@ getnumber(char *prompt, char *helpstring, u_int32_t oval, u_int32_t maxval)
 	const char *errstr;
 
 	rslt = snprintf(buf, sizeof(buf), "%u", oval);
-	if (rslt == -1 || (unsigned int)rslt >= sizeof(buf))
+	if (rslt < 0 || (unsigned int)rslt >= sizeof(buf))
 		return (CMD_BADVALUE);
 
 	p = getstring(prompt, helpstring, buf);
@@ -1176,7 +1176,7 @@ getuint64(struct disklabel *lp, char *prompt, char *helpstring,
 	int rslt;
 
 	rslt = snprintf(buf, sizeof(buf), "%llu", oval);
-	if (rslt == -1 || (unsigned int)rslt >= sizeof(buf))
+	if (rslt < 0 || (unsigned int)rslt >= sizeof(buf))
 		goto invalid;
 
 	p = getstring(prompt, helpstring, buf);

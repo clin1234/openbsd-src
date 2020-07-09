@@ -3,8 +3,8 @@
 # THIS FILE AUTOMATICALLY GENERATED.  DO NOT EDIT.
 # generated from:
 #
-#	OpenBSD: etc.luna88k/MAKEDEV.md,v 1.32 2016/12/31 00:50:01 aoyama Exp 
-#	OpenBSD: MAKEDEV.common,v 1.98 2017/11/14 20:21:29 naddy Exp 
+#	OpenBSD: etc.luna88k/MAKEDEV.md,v 1.35 2020/07/06 06:11:27 dlg Exp 
+#	OpenBSD: MAKEDEV.common,v 1.111 2020/07/06 06:11:26 dlg Exp 
 #	OpenBSD: MAKEDEV.mi,v 1.83 2016/09/11 03:06:31 deraadt Exp 
 #	OpenBSD: MAKEDEV.sub,v 1.14 2005/02/07 06:14:18 david Exp 
 #
@@ -56,6 +56,7 @@
 #	audio*	Audio devices
 #	bio	ioctl tunnel pseudo-device
 #	bpf	Berkeley Packet Filter
+#	dt	Dynamic Tracer
 #	diskmap	Disk mapper
 #	fd	fd/* nodes
 #	fuse	Userland Filesystem
@@ -63,6 +64,7 @@
 #	pcex*	PC-9801 extension board slot
 #	pf*	Packet Filter
 #	pppx*	PPP Multiplexer
+#	pppac*	PPP Access Concentrator
 #	*random	In-kernel random data source
 #	tun*	Network tunnel driver
 #	tap*	Ethernet tunnel driver
@@ -70,6 +72,7 @@
 #	vscsi*	Virtual SCSI controller
 #	switch*	Switch driver
 #	xp	HD647180 I/O processor
+#	kstat	Kernel Statistics
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 T=$0
 
@@ -211,6 +214,10 @@ std)
 	;;
 
 
+kstat)
+	M kstat c 51 0 640
+	;;
+
 xp)
 		M xp c 11 0 600 
 	;;
@@ -239,6 +246,10 @@ tun*)
 	M urandom c 40 0 644
 	RMlist[${#RMlist[*]}]=random
 	MKlist[${#MKlist[*]}]=";ln -s urandom random"
+	;;
+
+pppac*)
+	M pppac$U c 58 $U 600
 	;;
 
 pppx*)
@@ -272,6 +283,10 @@ diskmap)
 	M diskmap c 54 0 640 operator
 	;;
 
+dt)
+	M dt c 30 0 600
+	;;
+
 bpf)
 	M bpf c 22 0 600
 	M bpf0 c 22 0 600
@@ -282,10 +297,8 @@ bio)
 	;;
 
 audio*)
-	M audio$U	c 26 $U
-	M mixer$U	c 26 $(($U+16))
-	M audioctl$U	c 26 $(($U+192))
-	MKlist[${#MKlist[*]}]=";[ -e mixer ] || ln -s mixer$U mixer"
+	M audio$U	c 26 $U 660 _sndiop
+	M audioctl$U	c 26 $(($U+192)) 660 _sndiop
 	;;
 
 wsmouse[0-9]*)
@@ -302,7 +315,8 @@ wskbd[0-9]*)
 	;;
 
 wscons)
-	R wsmouse0 wsmouse1 wsmouse2 wsmouse3 wskbd0 wskbd1 wskbd2
+	R wsmouse0 wsmouse1 wsmouse2 wsmouse3 wsmouse4 wsmouse5
+	R wsmouse6 wsmouse7 wsmouse8 wsmouse9 wskbd0 wskbd1 wskbd2
 	R wskbd3 wsmux ttyCcfg ttyC0 ttyC1 ttyC2 ttyC3 ttyC4 ttyC5
 	R ttyC6 ttyC7 ttyC8 ttyC9 ttyCa ttyCb
 	;;
@@ -402,9 +416,9 @@ all)
 	R xp pcex audio0 lcd ttya switch0 switch1 switch2 switch3
 	R vnd0 vnd1 vnd2 vnd3 sd0 sd1 sd2 sd3 sd4 cd0 cd1 rd0 tap0
 	R tap1 tap2 tap3 tun0 tun1 tun2 tun3 bio pty0 diskmap vscsi0
-	R ch0 bpf fuse pppx ptm local wscons uk0 random tty00 tty01
-	R tty02 tty03 tty04 tty05 tty06 tty07 tty08 tty09 tty0a tty0b
-	R pf wd0 wd1 wd2 wd3 std st0 st1 fd
+	R ch0 kstat dt bpf fuse pppac pppx ptm local wscons uk0 random
+	R tty00 tty01 tty02 tty03 tty04 tty05 tty06 tty07 tty08 tty09
+	R tty0a tty0b pf wd0 wd1 wd2 wd3 std st0 st1 fd
 	;;
 
 wd*|sd*)

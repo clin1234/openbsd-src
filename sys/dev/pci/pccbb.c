@@ -1,4 +1,4 @@
-/*	$OpenBSD: pccbb.c,v 1.98 2018/07/17 03:32:10 dlg Exp $	*/
+/*	$OpenBSD: pccbb.c,v 1.100 2020/03/20 19:32:41 cheloha Exp $	*/
 /*	$NetBSD: pccbb.c,v 1.96 2004/03/28 09:49:31 nakayama Exp $	*/
 
 /*
@@ -47,6 +47,8 @@
 #include <sys/device.h>
 #include <sys/malloc.h>
 #include <sys/task.h>
+#include <sys/time.h>
+#include <sys/timeout.h>
 
 #include <machine/intr.h>
 #include <machine/bus.h>
@@ -217,7 +219,7 @@ delay_ms(int millis, void *param)
 	if (cold)
 		delay(millis * 1000);
 	else
-		tsleep(param, PWAIT, "pccbb", MAX(2, hz * millis / 1000));
+		tsleep_nsec(param, PWAIT, "pccbb", MSEC_TO_NSEC(millis));
 }
 
 int
@@ -292,13 +294,13 @@ struct yenta_chipinfo {
 	    PCCBB_PCMCIA_MEM_32},
 
 	/* Toshiba products */
-	{ MAKEID(PCI_VENDOR_TOSHIBA2, PCI_PRODUCT_TOSHIBA2_ToPIC95),
+	{ MAKEID(PCI_VENDOR_TOSHIBA2, PCI_PRODUCT_TOSHIBA2_TOPIC95),
 	    CB_TOPIC95, PCCBB_PCMCIA_MEM_32},
-	{ MAKEID(PCI_VENDOR_TOSHIBA2, PCI_PRODUCT_TOSHIBA2_ToPIC95B),
+	{ MAKEID(PCI_VENDOR_TOSHIBA2, PCI_PRODUCT_TOSHIBA2_TOPIC95B),
 	    CB_TOPIC95B, PCCBB_PCMCIA_MEM_32},
-	{ MAKEID(PCI_VENDOR_TOSHIBA2, PCI_PRODUCT_TOSHIBA2_ToPIC97),
+	{ MAKEID(PCI_VENDOR_TOSHIBA2, PCI_PRODUCT_TOSHIBA2_TOPIC97),
 	    CB_TOPIC97, PCCBB_PCMCIA_MEM_32},
-	{ MAKEID(PCI_VENDOR_TOSHIBA2, PCI_PRODUCT_TOSHIBA2_ToPIC100),
+	{ MAKEID(PCI_VENDOR_TOSHIBA2, PCI_PRODUCT_TOSHIBA2_TOPIC100),
 	    CB_TOPIC97, PCCBB_PCMCIA_MEM_32},
 
 	/* Cirrus Logic products */
@@ -1234,7 +1236,7 @@ cb_pcmcia_poll(void *arg)
 	u_int32_t spsr;		       /* socket present-state reg */
 
 	timeout_set(&cb_poll_timeout, cb_pcmcia_poll, arg);
-	timeout_add(&cb_poll_timeout, hz / 10);
+	timeout_add_msec(&cb_poll_timeout, 1000 / 10);
 	switch (poll->level) {
 	case IPL_NET:
 		s = splnet();

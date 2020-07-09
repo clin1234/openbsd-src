@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpd.h,v 1.83 2019/05/16 05:00:00 martijn Exp $	*/
+/*	$OpenBSD: snmpd.h,v 1.87 2020/06/30 17:11:49 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -59,7 +59,7 @@
 #define SNMPD_MAXUSERNAMELEN	32
 #define SNMPD_MAXCONTEXNAMELEN	32
 
-#define SNMP_USM_DIGESTLEN	12
+#define SNMP_USM_MAXDIGESTLEN	48
 #define SNMP_USM_SALTLEN	8
 #define SNMP_USM_KEYLEN		64
 #define SNMP_CIPHER_KEYLEN	16
@@ -107,20 +107,6 @@ struct imsgev {
 } while (0)
 #define IMSG_DATA_SIZE(imsg)	((imsg)->hdr.len - IMSG_HEADER_SIZE)
 
-/* initially control.h */
-struct control_sock {
-	const char	*cs_name;
-	struct event	 cs_ev;
-	struct event	 cs_evt;
-	int		 cs_fd;
-	int		 cs_restricted;
-	int		 cs_agentx;
-	void		*cs_env;
-
-	TAILQ_ENTRY(control_sock) cs_entry;
-};
-TAILQ_HEAD(control_socks, control_sock);
-
 enum privsep_procid {
 	PROC_PARENT,	/* Parent process and application interface */
 	PROC_SNMPE,	/* SNMP engine */
@@ -149,9 +135,6 @@ struct privsep {
 	u_int			 ps_instances[PROC_MAX];
 	u_int			 ps_instance;
 	int			 ps_noaction;
-
-	struct control_sock	 ps_csock;
-	struct control_socks	 ps_rcsocks;
 
 	/* Event and signal handlers */
 	struct event		 ps_evsigint;
@@ -359,12 +342,8 @@ struct ctl_conn {
 #define CTL_CONN_NOTIFY		 0x01
 #define CTL_CONN_LOCKED		 0x02	/* restricted mode */
 	struct imsgev		 iev;
-	struct control_sock	*cs;
-	struct agentx_handle	*handle;
 	struct oidlist		 oids;
 };
-TAILQ_HEAD(ctl_connlist, ctl_conn);
-extern  struct ctl_connlist ctl_conns;
 
 /*
  * pf
@@ -534,7 +513,11 @@ TAILQ_HEAD(socklist, listen_sock);
 enum usmauth {
 	AUTH_NONE = 0,
 	AUTH_MD5,	/* HMAC-MD5-96, RFC3414 */
-	AUTH_SHA1	/* HMAC-SHA-96, RFC3414 */
+	AUTH_SHA1,	/* HMAC-SHA-96, RFC3414 */
+	AUTH_SHA224,	/* usmHMAC128SHA224AuthProtocol. RFC7860 */
+	AUTH_SHA256,	/* usmHMAC192SHA256AuthProtocol. RFC7860 */
+	AUTH_SHA384,	/* usmHMAC256SHA384AuthProtocol. RFC7860 */
+	AUTH_SHA512	/* usmHMAC384SHA512AuthProtocol. RFC7860 */
 };
 
 #define AUTH_DEFAULT	AUTH_SHA1	/* Default digest */
@@ -589,6 +572,7 @@ struct snmpd {
 	int			 sc_ncpu;
 	int64_t			*sc_cpustates;
 	int			 sc_rtfilter;
+	int			 sc_pfaddrfilter;
 
 	int			 sc_min_seclevel;
 	int			 sc_readonly;
@@ -611,10 +595,6 @@ RB_HEAD(trapcmd_tree, trapcmd);
 extern	struct trapcmd_tree trapcmd_tree;
 
 extern struct snmpd *snmpd_env;
-
-/* control.c */
-int		 control_init(struct privsep *, struct control_sock *);
-int		 control_listen(struct control_sock *);
 
 /* parse.y */
 struct snmpd	*parse_config(const char *, u_int);
@@ -670,8 +650,6 @@ void		 snmpe_dispatchmsg(struct snmp_message *);
 /* trap.c */
 void		 trap_init(void);
 int		 trap_imsg(struct imsgev *, pid_t);
-int		 trap_agentx(struct agentx_handle *, struct agentx_pdu *,
-		    int *, char **, int *);
 int		 trap_send(struct ber_oid *, struct ber_element *);
 
 /* mps.c */
@@ -803,8 +781,6 @@ struct trapcmd *
 	 trapcmd_lookup(struct ber_oid *);
 
 /* util.c */
-int	 varbind_convert(struct agentx_pdu *, struct agentx_varbind_hdr *,
-	    struct ber_element **, struct ber_element **);
 ssize_t	 sendtofrom(int, void *, size_t, int, struct sockaddr *,
 	    socklen_t, struct sockaddr *, socklen_t);
 ssize_t	 recvfromto(int, void *, size_t, int, struct sockaddr *,

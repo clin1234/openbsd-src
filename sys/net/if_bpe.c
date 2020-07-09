@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bpe.c,v 1.5 2019/04/23 10:53:45 dlg Exp $ */
+/*	$OpenBSD: if_bpe.c,v 1.11 2020/06/24 22:03:43 cheloha Exp $ */
 /*
  * Copyright (c) 2018 David Gwynne <dlg@openbsd.org>
  *
@@ -102,8 +102,8 @@ struct bpe_softc {
 	int			sc_rxhprio;
 	uint8_t			sc_group[ETHER_ADDR_LEN];
 
-	void *			sc_lh_cookie;
-	void *			sc_dh_cookie;
+	struct task		sc_ltask;
+	struct task		sc_dtask;
 
 	struct bpe_map		sc_bridge_map;
 	struct rwlock		sc_bridge_lock;
@@ -144,10 +144,6 @@ static struct bpe_tree bpe_interfaces = RBT_INITIALIZER();
 static struct rwlock bpe_lock = RWLOCK_INITIALIZER("bpeifs");
 static struct pool bpe_entry_pool;
 
-#define ether_cmp(_a, _b)	memcmp((_a), (_b), ETHER_ADDR_LEN)
-#define ether_is_eq(_a, _b)	(ether_cmp((_a), (_b)) == 0)
-#define ether_is_bcast(_a)	ether_is_eq((_a), etherbroadcastaddr)
-
 void
 bpeattach(int count)
 {
@@ -176,7 +172,10 @@ bpe_clone_create(struct if_clone *ifc, int unit)
 	bpe_set_group(sc, 0);
 
 	sc->sc_txhprio = IF_HDRPRIO_PACKET;
-	sc->sc_txhprio = IF_HDRPRIO_OUTER;
+	sc->sc_rxhprio = IF_HDRPRIO_OUTER;
+
+	task_set(&sc->sc_ltask, bpe_link_hook, sc);
+	task_set(&sc->sc_dtask, bpe_detach_hook, sc);
 
 	rw_init(&sc->sc_bridge_lock, "bpebr");
 	RBT_INIT(bpe_map, &sc->sc_bridge_map);
@@ -231,7 +230,7 @@ bpe_entry_valid(struct bpe_softc *sc, const struct bpe_entry *be)
 	if (be->be_type == BPE_ENTRY_STATIC)
 		return (1);
 
-	diff = time_uptime - be->be_age;
+	diff = getuptime() - be->be_age;
 	if (diff < sc->sc_bridge_tmo)
 		return (1);
 
@@ -290,7 +289,7 @@ bpe_start(struct ifnet *ifp)
 
 		beh = mtod(m, struct ether_header *);
 
-		if (ether_is_bcast(ceh->ether_dhost)) {
+		if (ETHER_IS_BROADCAST(ceh->ether_dhost)) {
 			memcpy(beh->ether_dhost, sc->sc_group,
 			    sizeof(beh->ether_dhost));
 		} else {
@@ -344,7 +343,7 @@ bpe_bridge_age(void *arg)
 		if (be->be_type != BPE_ENTRY_DYNAMIC)
 			continue;
 
-		diff = time_uptime - be->be_age;
+		diff = getuptime() - be->be_age;
 		if (diff < sc->sc_bridge_tmo)
 			continue;
 
@@ -403,7 +402,7 @@ bpe_rtfind(struct bpe_softc *sc, struct ifbaconf *baconf)
 
 		switch (be->be_type) {
 		case BPE_ENTRY_DYNAMIC:
-			age = time_uptime - be->be_age;
+			age = getuptime() - be->be_age;
 			bareq.ifba_age = MIN(age, 0xff);
 			bareq.ifba_flags = IFBAF_DYNAMIC;
 			break;
@@ -468,6 +467,7 @@ bpe_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 
 	case SIOCSVNETID:
 		error = bpe_set_vnetid(sc, ifr);
+		break;
 	case SIOCGVNETID:
 		ifr->ifr_vnetid = sc->sc_key.k_isid;
 		break;
@@ -635,12 +635,10 @@ bpe_up(struct bpe_softc *sc)
 	}
 
 	/* Register callback for physical link state changes */
-	sc->sc_lh_cookie = hook_establish(ifp0->if_linkstatehooks, 1,
-	    bpe_link_hook, sc);
+	if_linkstatehook_add(ifp0, &sc->sc_ltask);
 
 	/* Register callback if parent wants to unregister */
-	sc->sc_dh_cookie = hook_establish(ifp0->if_detachhooks, 0,
-	    bpe_detach_hook, sc);
+	if_detachhook_add(ifp0, &sc->sc_dtask);
 
 	/* we're running now */
 	SET(ifp->if_flags, IFF_RUNNING);
@@ -677,8 +675,8 @@ bpe_down(struct bpe_softc *sc)
 
 	ifp0 = if_get(sc->sc_key.k_if);
 	if (ifp0 != NULL) {
-		hook_disestablish(ifp0->if_detachhooks, sc->sc_dh_cookie);
-		hook_disestablish(ifp0->if_linkstatehooks, sc->sc_lh_cookie);
+		if_detachhook_del(ifp0, &sc->sc_dtask);
+		if_linkstatehook_del(ifp0, &sc->sc_ltask);
 		bpe_multi(sc, ifp0, SIOCDELMULTI);
 	}
 	if_put(ifp0);
@@ -835,10 +833,10 @@ bpe_input_map(struct bpe_softc *sc, const uint8_t *ba, const uint8_t *ca)
 	if (be == NULL)
 		new = 1;
 	else {
-		be->be_age = time_uptime; /* only a little bit racy */
+		be->be_age = getuptime(); /* only a little bit racy */
 
 		if (be->be_type != BPE_ENTRY_DYNAMIC ||
-		    ether_is_eq(ba, &be->be_b_da))
+		    ETHER_IS_EQ(ba, &be->be_b_da))
 			be = NULL;
 		else
 			refcnt_take(&be->be_refs);
@@ -859,7 +857,7 @@ bpe_input_map(struct bpe_softc *sc, const uint8_t *ba, const uint8_t *ca)
 		memcpy(&be->be_b_da, ba, sizeof(be->be_b_da));
 		be->be_type = BPE_ENTRY_DYNAMIC;
 		refcnt_init(&be->be_refs);
-		be->be_age = time_uptime;
+		be->be_age = getuptime();
 
 		rw_enter_write(&sc->sc_bridge_lock);
 		num = sc->sc_bridge_num;

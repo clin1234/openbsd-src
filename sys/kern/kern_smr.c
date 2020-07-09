@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_smr.c,v 1.4 2019/05/17 03:53:08 visa Exp $	*/
+/*	$OpenBSD: kern_smr.c,v 1.8 2020/04/03 03:36:56 visa Exp $	*/
 
 /*
  * Copyright (c) 2019 Visa Hankala
@@ -31,7 +31,6 @@
 
 #define SMR_PAUSE	100		/* pause between rounds in msec */
 
-void	smr_create_thread(void *);
 void	smr_dispatch(struct schedstate_percpu *);
 void	smr_grace_wait(void);
 void	smr_thread(void *);
@@ -66,13 +65,12 @@ smr_startup(void)
 {
 	SIMPLEQ_INIT(&smr_deferred);
 	WITNESS_INIT(&smr_lock_obj, &smr_lock_type);
-	kthread_create_deferred(smr_create_thread, NULL);
+	timeout_set(&smr_wakeup_tmo, smr_wakeup, NULL);
 }
 
 void
-smr_create_thread(void *arg)
+smr_startup_thread(void)
 {
-	timeout_set(&smr_wakeup_tmo, smr_wakeup, NULL);
 	if (kthread_create(smr_thread, NULL, NULL, "smr") != 0)
 		panic("could not create smr thread");
 }
@@ -96,12 +94,12 @@ smr_thread(void *arg)
 		mtx_enter(&smr_lock);
 		if (smr_ndeferred == 0) {
 			while (smr_ndeferred == 0)
-				msleep(&smr_ndeferred, &smr_lock, PVM,
-				    "bored", 0);
+				msleep_nsec(&smr_ndeferred, &smr_lock, PVM,
+				    "bored", INFSLP);
 		} else {
 			if (smr_expedite == 0)
-				msleep(&smr_ndeferred, &smr_lock, PVM,
-				    "pause", SMR_PAUSE * hz / 1000);
+				msleep_nsec(&smr_ndeferred, &smr_lock, PVM,
+				    "pause", MSEC_TO_NSEC(SMR_PAUSE));
 		}
 
 		SIMPLEQ_CONCAT(&deferred, &smr_deferred);
@@ -217,28 +215,6 @@ smr_idle(void)
 	if (spc->spc_ndeferred > 0)
 		smr_dispatch(spc);
 }
-
-#ifdef DIAGNOSTIC
-
-void
-smr_assert_critical(void)
-{
-	struct schedstate_percpu *spc = &curcpu()->ci_schedstate;
-
-	if (panicstr == NULL && !db_active)
-		KASSERT(spc->spc_smrdepth > 0);
-}
-
-void
-smr_assert_noncritical(void)
-{
-	struct schedstate_percpu *spc = &curcpu()->ci_schedstate;
-
-	if (panicstr == NULL && !db_active)
-		KASSERT(spc->spc_smrdepth == 0);
-}
-
-#endif /* DIAGNOSTIC */
 
 void
 smr_call_impl(struct smr_entry *smr, void (*func)(void *), void *arg,

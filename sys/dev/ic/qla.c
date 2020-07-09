@@ -1,4 +1,4 @@
-/*	$OpenBSD: qla.c,v 1.56 2017/06/05 04:57:37 dlg Exp $ */
+/*	$OpenBSD: qla.c,v 1.63 2020/06/27 14:29:45 krw Exp $ */
 
 /*
  * Copyright (c) 2011 David Gwynne <dlg@openbsd.org>
@@ -170,11 +170,7 @@ static const struct qla_regs qla_regs_23XX = {
     ((*(_sc)->sc_regs->read_isr)((_sc), (_isr), (_info)))
 
 struct scsi_adapter qla_switch = {
-	qla_scsi_cmd,
-	scsi_minphys,
-	qla_scsi_probe,
-	NULL,	/* scsi_free */
-	NULL	/* ioctl */
+	qla_scsi_cmd, NULL, qla_scsi_probe, NULL, NULL
 };
 
 int
@@ -331,7 +327,7 @@ int
 qla_add_fabric_port(struct qla_softc *sc, struct qla_fc_port *port)
 {
 	struct qla_get_port_db *pdb;
-	
+
 	if (qla_get_port_db(sc, port->loopid, sc->sc_scratch)) {
 		return (1);
 	}
@@ -371,7 +367,7 @@ qla_add_logged_in_port(struct qla_softc *sc, int loopid, u_int32_t portid)
 	struct qla_get_port_db *pdb;
 	u_int64_t node_name, port_name;
 	int flags, ret;
-	
+
 	ret = qla_get_port_db(sc, loopid, sc->sc_scratch);
 	mtx_enter(&sc->sc_port_mtx);
 	if (ret != 0) {
@@ -684,7 +680,7 @@ qla_attach(struct qla_softc *sc)
 	} else {
 		sc->sc_link.adapter_buswidth = QLA_BUSWIDTH;
 	}
-	sc->sc_link.adapter_target = sc->sc_link.adapter_buswidth;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.openings = sc->sc_maxcmds;
 	sc->sc_link.pool = &sc->sc_iopool;
 	sc->sc_link.port_wwn = sc->sc_port_name;
@@ -698,7 +694,6 @@ qla_attach(struct qla_softc *sc)
 		sc->sc_link.node_wwn &= ~(0xfULL << 56);
 	}
 
-	memset(&saa, 0, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	/* config_found() returns the scsibus attached to us */
@@ -1148,8 +1143,8 @@ qla_mbox(struct qla_softc *sc, int maskin)
 		mtx_enter(&sc->sc_mbox_mtx);
 		sc->sc_mbox_pending = 1;
 		while (sc->sc_mbox_pending == 1) {
-			msleep(sc->sc_mbox, &sc->sc_mbox_mtx, PRIBIO,
-			    "qlambox", 0);
+			msleep_nsec(sc->sc_mbox, &sc->sc_mbox_mtx, PRIBIO,
+			    "qlambox", INFSLP);
 		}
 		result = sc->sc_mbox[0];
 		sc->sc_mbox_pending = 0;
@@ -1764,11 +1759,7 @@ qla_do_update(void *xsc)
 			mtx_enter(&sc->sc_port_mtx);
 			qla_clear_port_lists(sc);
 			TAILQ_INIT(&detach);
-			while (!TAILQ_EMPTY(&sc->sc_ports)) {
-				port = TAILQ_FIRST(&sc->sc_ports);
-				TAILQ_REMOVE(&sc->sc_ports, port, ports);
-				TAILQ_INSERT_TAIL(&detach, port, ports);
-			}
+			TAILQ_CONCAT(&detach, &sc->sc_ports, ports);
 			mtx_leave(&sc->sc_port_mtx);
 
 			while (!TAILQ_EMPTY(&detach)) {
@@ -1776,7 +1767,8 @@ qla_do_update(void *xsc)
 				TAILQ_REMOVE(&detach, port, ports);
 				if (port->flags & QLA_PORT_FLAG_IS_TARGET) {
 					scsi_detach_target(sc->sc_scsibus,
-					    port->loopid, -1);
+					    port->loopid, DETACH_FORCE |
+					    DETACH_QUIET);
 				}
 				sc->sc_targets[port->loopid] = NULL;
 				if (port->location & QLA_LOCATION_FABRIC)
@@ -1992,7 +1984,8 @@ qla_do_update(void *xsc)
 				    DEVNAME(sc), port->loopid);
 				if (sc->sc_scsibus != NULL)
 					scsi_detach_target(sc->sc_scsibus,
-					    port->loopid, -1);
+					    port->loopid, DETACH_FORCE |
+					    DETACH_QUIET);
 
 				if (port->location & QLA_LOCATION_FABRIC)
 					qla_fabric_plogo(sc, port);

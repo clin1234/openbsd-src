@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_lookup.c,v 1.77 2019/05/13 22:55:27 beck Exp $	*/
+/*	$OpenBSD: vfs_lookup.c,v 1.83 2019/09/11 15:01:40 beck Exp $	*/
 /*	$NetBSD: vfs_lookup.c,v 1.17 1996/02/09 19:00:59 christos Exp $	*/
 
 /*
@@ -56,10 +56,6 @@
 #ifdef KTRACE
 #include <sys/ktrace.h>
 #endif
-
-void unveil_start_relative(struct proc *p, struct nameidata *ni);
-void unveil_check_component(struct proc *p, struct nameidata *ni, struct vnode *dp );
-int unveil_check_final(struct proc *p, struct nameidata *ni);
 
 int
 component_push(struct componentname *cnp, char *component, size_t len)
@@ -221,7 +217,7 @@ fail:
 	} else if (ndp->ni_dirfd == AT_FDCWD) {
 		dp = fdp->fd_cdir;
 		vref(dp);
-		unveil_start_relative(p, ndp);
+		unveil_start_relative(p, ndp, NULL);
 		unveil_check_component(p, ndp, dp);
 	} else {
 		struct file *fp = fd_getfile(fdp, ndp->ni_dirfd);
@@ -236,6 +232,7 @@ fail:
 			return (ENOTDIR);
 		}
 		vref(dp);
+		unveil_start_relative(p, ndp, dp);
 		unveil_check_component(p, ndp, dp);
 		FRELE(fp, p);
 	}
@@ -262,7 +259,7 @@ fail:
 				if ((cnp->cn_flags & LOCKPARENT) &&
 				    (cnp->cn_flags & ISLASTCN) &&
 				    (ndp->ni_vp != ndp->ni_dvp))
-					VOP_UNLOCK(ndp->ni_dvp);
+					vput(ndp->ni_dvp);
 				if (ndp->ni_vp) {
 					if ((cnp->cn_flags & LOCKLEAF))
 						vput(ndp->ni_vp);
@@ -577,12 +574,11 @@ dirloop:
 		printf("not found\n");
 #endif
 		/*
-		 * Allow for unveiling or realpath'ing a file in a
-		 * directory where we don't have access to create it
-		 * ourselves
+		 * Allow for unveiling a file in a directory which we cannot
+		 * create ourselves.
 		 */
-		if ((ndp->ni_pledge == PLEDGE_UNVEIL ||
-		    (cnp->cn_flags & REALPATH)) && error == EACCES)
+		if (ndp->ni_pledge == PLEDGE_UNVEIL &&
+		    (error == EPERM || error == EACCES || error == EROFS))
 			error = EJUSTRETURN;
 
 		if (error != EJUSTRETURN)

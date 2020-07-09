@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.169 2019/01/02 23:08:35 kettenis Exp $ */
+/*	$OpenBSD: pmap.c,v 1.172 2020/04/15 08:09:00 mpi Exp $ */
 
 /*
  * Copyright (c) 2015 Martin Pieuchot
@@ -185,19 +185,19 @@ int physmem;
 int physmaxaddr;
 
 #ifdef MULTIPROCESSOR
-struct __mp_lock pmap_hash_lock;
+struct __ppc_lock pmap_hash_lock;
 
-#define	PMAP_HASH_LOCK_INIT()		__mp_lock_init(&pmap_hash_lock)
+#define	PMAP_HASH_LOCK_INIT()		__ppc_lock_init(&pmap_hash_lock)
 
 #define	PMAP_HASH_LOCK(s)						\
 do {									\
 	s = ppc_intr_disable();						\
-	__mp_lock(&pmap_hash_lock);					\
+	__ppc_lock(&pmap_hash_lock);					\
 } while (0)
 
 #define	PMAP_HASH_UNLOCK(s)						\
 do {									\
-	__mp_unlock(&pmap_hash_lock);					\
+	__ppc_unlock(&pmap_hash_lock);					\
 	ppc_intr_enable(s);						\
 } while (0)
 
@@ -437,12 +437,6 @@ static inline u_int32_t
 PTED_MANAGED(struct pte_desc *pted)
 {
 	return (pted->pted_va & PTED_VA_MANAGED_M); 
-}
-
-static inline u_int32_t
-PTED_WIRED(struct pte_desc *pted)
-{
-	return (pted->pted_va & PTED_VA_WIRED_M); 
 }
 
 static inline u_int32_t
@@ -971,7 +965,7 @@ pmap_test_attrs(struct vm_page *pg, u_int flagbit)
 	/* PTE_REF_32 == PTE_REF_64 */
 
 	bits = pg->pg_flags & flagbit;
-	if ((bits == flagbit))
+	if (bits == flagbit)
 		return bits;
 
 	mtx_enter(&pg->mdpage.pv_mtx);
@@ -1639,13 +1633,18 @@ pmap_enable_mmu(void)
 	int i;
 
 	if (!ppc_nobat) {
+		extern caddr_t etext;
+
 		/* DBAT0 used for initial segment */
 		ppc_mtdbat0l(battable[0].batl);
 		ppc_mtdbat0u(battable[0].batu);
 
 		/* IBAT0 only covering the kernel .text */
 		ppc_mtibat0l(battable[0].batl);
-		ppc_mtibat0u(BATU(0x00000000, BAT_BL_8M));
+		if (round_page((vaddr_t)&etext) < 8*1024*1024)
+			ppc_mtibat0u(BATU(0x00000000, BAT_BL_8M));
+		else
+			ppc_mtibat0u(BATU(0x00000000, BAT_BL_16M));
 	}
 
 	for (i = 0; i < 16; i++)

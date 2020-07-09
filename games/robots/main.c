@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.27 2018/08/23 06:26:35 mestre Exp $	*/
+/*	$OpenBSD: main.c,v 1.29 2020/02/14 19:17:33 schwarze Exp $	*/
 /*	$NetBSD: main.c,v 1.5 1995/04/22 10:08:54 cgd Exp $	*/
 
 /*
@@ -56,7 +56,6 @@ main(int ac, char *av[])
 	int		score_err = 0; /* hold errno from score file open */
 	int		ch;
 	int		ret;
-	extern int	optind;
 	char		*home;
 #ifdef FANCY
 	char		*sp;
@@ -74,7 +73,7 @@ main(int ac, char *av[])
 	if (ret < 0 || ret >= PATH_MAX)
 		errc(1, ENAMETOOLONG, "%s/%s", home, ".robots.scores");
 
-	if ((score_wfd = open(Scorefile, O_RDWR | O_CREAT, 0666)) < 0)
+	if ((score_wfd = open(Scorefile, O_RDWR | O_CREAT, 0666)) == -1)
 		score_err = errno;
 
 	show_only = FALSE;
@@ -113,7 +112,7 @@ main(int ac, char *av[])
 		if (score_wfd >= 0)
 			close(score_wfd);
 		/* This file requires no special privileges. */
-		if ((score_wfd = open(Scorefile, O_RDWR | O_CREAT, 0666)) < 0)
+		if ((score_wfd = open(Scorefile, O_RDWR | O_CREAT, 0666)) == -1)
 			score_err = errno;
 #ifdef	FANCY
 		sp = strrchr(Scorefile, '/');

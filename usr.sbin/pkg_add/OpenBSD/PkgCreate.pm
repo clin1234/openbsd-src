@@ -1,6 +1,6 @@
 #! /usr/bin/perl
 # ex:ts=8 sw=4:
-# $OpenBSD: PkgCreate.pm,v 1.153 2018/08/03 06:49:26 espie Exp $
+# $OpenBSD: PkgCreate.pm,v 1.167 2020/01/26 12:50:17 espie Exp $
 #
 # Copyright (c) 2003-2014 Marc Espie <espie@openbsd.org>
 #
@@ -131,6 +131,7 @@ sub handle_options
 	if (defined $state->opt('u')) {
 		$state->{userlist} = $state->parse_userdb($state->opt('u'));
 	}
+	$state->{wrkobjdir} = $state->defines('WRKOBJDIR');
 }
 
 sub parse_userdb
@@ -290,6 +291,12 @@ sub compute_checksum
 			$state->error("bogus symlink: #1 (too deep)", $fname);
 		} elsif (!-e $chk) {
 			push(@{$state->{bad_symlinks}{$chk}}, $fname);
+		}
+		if (defined $state->{wrkobjdir} && 
+		    $value =~ m/^\Q$state->{wrkobjdir}\E\//) {
+		    	$state->error(
+			    "bad symlink: #1 (points into WRKOBJDIR)",
+			    $fname);
 		}
 		$result->make_symlink($value);
 	} elsif (-f _) {
@@ -635,7 +642,9 @@ sub format_source_page
 	my $fullname = $self->cwd."/".$dest;
 	my $d = dirname($fullname);
 	$state->{mandir} //= OpenBSD::Temp::permanent_dir(
-	    $ENV{TMPDIR} // '/tmp', "manpage");
+	    $ENV{TMPDIR} // '/tmp', "manpage") or
+	    	$state->error(OpenBSD::Temp->last_error) and
+		return 0;
 	my $tempname = $state->{mandir}.$fullname;
 	require File::Path;
 	File::Path::make_path($state->{mandir}.$d);
@@ -979,27 +988,50 @@ sub ask_tree
 	my ($self, $state, $pkgpath, $portsdir, $data, @action) = @_;
 
 	my $make = OpenBSD::Paths->make;
+	my $errors = OpenBSD::Temp->file;
+	if (!defined $errors) {
+		$state->fatal(OpenBSD::Temp->last_error);
+	}
 	my $pid = open(my $fh, "-|");
 	if (!defined $pid) {
-		$state->fatal("cannot fork: $!");
+		$state->fatal("cannot fork: #1", $!);
 	}
 	if ($pid == 0) {
-		# make things debuggable because this child doesn't matter
-		$DB::inhibit_exit = 0;
-		chdir $portsdir or exit 2;
-		open STDERR, '>', '/dev/null';
 		$ENV{FULLPATH} = 'Yes';
 		delete $ENV{FLAVOR};
 		delete $ENV{SUBPACKAGE};
 		$ENV{SUBDIR} = $pkgpath;
 		$ENV{ECHO_MSG} = ':';
+
+		if (!chdir $portsdir) {
+			$state->errsay("Can't chdir #1: #2", $portsdir, $!);
+			exit(2);
+		}
+		open STDERR, ">>", $errors;
+		# make sure the child starts with a single identity
+		$( = $); $< = $>;
 		# XXX we're already running as ${BUILD_USER}
 		# so we can't do this again
 		push(@action, 'PORTS_PRIVSEP=No');
+		$DB::inhibit_exit = 0;
 		exec $make ('make', @action);
 	}
 	my $plist = OpenBSD::PackingList->read($fh, $data);
+	while(<$fh>) {	# XXX avoid spurious errors from child
+	}
 	close($fh);
+	if ($? != 0) {
+		$state->errsay("child running '#2' failed: #1", 
+		    $state->child_error,
+		    join(' ', 'make', @action));
+		if (open my $fh, '<', $errors) {
+			while(<$fh>) {
+				$state->errprint("#1", $_);
+			}
+			close($fh);
+		}
+	}
+	unlink($errors);
 	return $plist;
 }
 
@@ -1297,10 +1329,9 @@ sub add_extra_info
 	    $subst->value('FTP');
 	if (defined $fullpkgpath || defined $cdrom || defined $ftp) {
 		$fullpkgpath //= '';
-		$cdrom //= 'no';
 		$ftp //= 'no';
-		$cdrom = 'yes' if $cdrom =~ m/^yes$/io;
 		$ftp = 'yes' if $ftp =~ m/^yes$/io;
+		$cdrom = 'yes' if defined $cdrom && $cdrom =~ m/^yes$/io;
 
 		OpenBSD::PackingElement::ExtraInfo->add($plist,
 		    $fullpkgpath, $cdrom, $ftp);
@@ -1397,7 +1428,11 @@ sub create_plist
 		    if defined $state->opt('v');
 		$state->set_status("reading plist");
 	}
-	$plist->set_infodir(OpenBSD::Temp->dir);
+	my $dir = OpenBSD::Temp->dir;
+	if (!$dir) {
+		$state->fatal(OpenBSD::Temp->last_error);
+	}
+	$plist->set_infodir($dir);
 	if (!defined $state->opt('S')) {
 		$self->read_all_fragments($state, $plist);
 	}
@@ -1582,26 +1617,9 @@ sub save_history
 	return $l;
 }
 
-sub parse_and_run
+sub run_command
 {
-	my ($self, $cmd) = @_;
-
-	my $regen_package = 0;
-	my $sign_only = 0;
-
-	my $state = OpenBSD::PkgCreate::State->new($cmd);
-	$state->handle_options;
-
-	if (@ARGV == 0) {
-		$regen_package = 1;
-	} elsif (@ARGV != 1) {
-		if (defined $state->{contents} || 
-		    !defined $state->{signature_params}) {
-			$state->usage("Exactly one single package name is required: #1", join(' ', @ARGV));
-		}
-	}
-
-	try {
+	my ($self, $state) = @_;
 	if (defined $state->opt('Q')) {
 		$state->{opt}{q} = 1;
 	}
@@ -1611,7 +1629,7 @@ sub parse_and_run
 	}
 
 	my $plist;
-	if ($regen_package) {
+	if ($state->{regen_package}) {
 		if (!defined $state->{contents} || @{$state->{contents}} > 1) {
 			$state->usage("Exactly one single packing-list is required");
 		}
@@ -1635,7 +1653,7 @@ sub parse_and_run
 			$plist->stub_digest($ordered);
 		} else {
 			$state->set_status("checksumming");
-			if ($regen_package) {
+			if ($state->{regen_package}) {
 				$state->progress->visit_with_count($plist, 
 				    'verify_checksum');
 			} else {
@@ -1678,7 +1696,7 @@ sub parse_and_run
 	$state->{bad} = 0;
 
 	my $wname;
-	if ($regen_package) {
+	if ($state->{regen_package}) {
 		$wname = $plist->pkgname.".tgz";
 	} else {
 		$plist->save or $state->fatal("can't write packing-list");
@@ -1695,11 +1713,29 @@ sub parse_and_run
 	if (!$state->defines("stub")) {
 		$self->finish_manpages($state, $plist);
 	}
-	}catch {
-		print STDERR "$0: $_\n";
-		return 1;
-	};
-	return 0;
+}
+
+sub parse_and_run
+{
+	my ($self, $cmd) = @_;
+
+	my $sign_only = 0;
+	my $rc = 0;
+
+	my $state = OpenBSD::PkgCreate::State->new($cmd);
+	$state->handle_options;
+
+	if (@ARGV == 0) {
+		$state->{regen_package} = 1;
+	} elsif (@ARGV != 1) {
+		if (defined $state->{contents} || 
+		    !defined $state->{signature_params}) {
+			$state->usage("Exactly one single package name is required: #1", join(' ', @ARGV));
+		}
+	}
+
+	$self->try_and_run_command($state);
+	return $state->{bad} != 0;
 }
 
 1;

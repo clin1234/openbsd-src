@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sysctl.c,v 1.355 2019/05/09 14:59:30 claudio Exp $	*/
+/*	$OpenBSD: kern_sysctl.c,v 1.373 2020/06/22 02:45:18 dlg Exp $	*/
 /*	$NetBSD: kern_sysctl.c,v 1.17 1996/05/20 17:49:05 mrg Exp $	*/
 
 /*-
@@ -79,12 +79,12 @@
 #include <sys/sched.h>
 #include <sys/mount.h>
 #include <sys/syscallargs.h>
+#include <sys/wait.h>
 #include <sys/witness.h>
 
 #include <uvm/uvm_extern.h>
 
 #include <dev/cons.h>
-#include <dev/rndvar.h>
 
 #include <net/route.h>
 #include <netinet/in.h>
@@ -122,14 +122,12 @@ extern int nselcoll, fscale;
 extern struct disklist_head disklist;
 extern fixpt_t ccpu;
 extern  long numvnodes;
-extern u_int net_livelocks;
 #if NAUDIO > 0
 extern int audio_record_enable;
 #endif
 
 int allowkmem;
-
-extern void nmbclust_update(void);
+int allowdt;
 
 int sysctl_diskinit(int, struct proc *);
 int sysctl_proc_args(int *, u_int, void *, size_t *, struct proc *);
@@ -144,6 +142,7 @@ int sysctl_cptime2(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_audio(int *, u_int, void *, size_t *, void *, size_t);
 #endif
 int sysctl_cpustats(int *, u_int, void *, size_t *, void *, size_t);
+int sysctl_utc_offset(void *, size_t *, void *, size_t);
 
 void fill_file(struct kinfo_file *, struct file *, struct filedesc *, int,
     struct vnode *, struct process *, struct proc *, struct socket *, int);
@@ -358,12 +357,14 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 			return (EPERM);
 		securelevel = level;
 		return (0);
+	case KERN_ALLOWDT:
+		if (securelevel > 0)
+			return (sysctl_rdint(oldp, oldlenp, newp, allowdt));
+		return (sysctl_int(oldp, oldlenp, newp, newlen,  &allowdt));
 	case KERN_ALLOWKMEM:
 		if (securelevel > 0)
-			return (sysctl_rdint(oldp, oldlenp, newp,
-			    allowkmem));
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
-		    &allowkmem));
+			return (sysctl_rdint(oldp, oldlenp, newp, allowkmem));
+		return (sysctl_int(oldp, oldlenp, newp, newlen, &allowkmem));
 	case KERN_HOSTNAME:
 		error = sysctl_tstring(oldp, oldlenp, newp, newlen,
 		    hostname, sizeof(hostname));
@@ -521,17 +522,20 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		CPU_INFO_ITERATOR cii;
 		struct cpu_info *ci;
 		long cp_time[CPUSTATES];
-		int i;
+		int i, n = 0;
 
 		memset(cp_time, 0, sizeof(cp_time));
 
 		CPU_INFO_FOREACH(cii, ci) {
+			if (!cpu_is_online(ci))
+				continue;
+			n++;
 			for (i = 0; i < CPUSTATES; i++)
 				cp_time[i] += ci->ci_schedstate.spc_cp_time[i];
 		}
 
 		for (i = 0; i < CPUSTATES; i++)
-			cp_time[i] /= ncpus;
+			cp_time[i] /= n;
 
 		return (sysctl_rdstruct(oldp, oldlenp, newp, &cp_time,
 		    sizeof(cp_time)));
@@ -590,11 +594,13 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (sysctl_wdog(name + 1, namelen - 1, oldp, oldlenp,
 		    newp, newlen));
 #endif
-	case KERN_MAXCLUSTERS:
-		error = sysctl_int(oldp, oldlenp, newp, newlen, &nmbclust);
-		if (!error)
-			nmbclust_update();
+	case KERN_MAXCLUSTERS: {
+		int val = nmbclust;
+		error = sysctl_int(oldp, oldlenp, newp, newlen, &val);
+		if (error == 0 && val != nmbclust)
+			error = nmbclust_update(val);
 		return (error);
+	}
 #ifndef SMALL_KERNEL
 	case KERN_EVCOUNT:
 		return (evcount_sysctl(name + 1, namelen - 1, oldp, oldlenp,
@@ -637,7 +643,7 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 			dev = NODEV;
 		return sysctl_rdstruct(oldp, oldlenp, newp, &dev, sizeof(dev));
 	case KERN_NETLIVELOCKS:
-		return (sysctl_rdint(oldp, oldlenp, newp, net_livelocks));
+		return (sysctl_rdint(oldp, oldlenp, newp, 0));
 	case KERN_POOL_DEBUG: {
 		int old_pool_debug = pool_debug;
 
@@ -673,6 +679,10 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	case KERN_PFSTATUS:
 		return (pf_sysctl(oldp, oldlenp, newp, newlen));
 #endif
+	case KERN_TIMEOUT_STATS:
+		return (timeout_sysctl(oldp, oldlenp, newp, newlen));
+	case KERN_UTC_OFFSET:
+		return (sysctl_utc_offset(oldp, oldlenp, newp, newlen));
 	default:
 		return (EOPNOTSUPP);
 	}
@@ -868,16 +878,20 @@ int
 sysctl_int(void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *valp)
 {
 	int error = 0;
+	int val;
 
 	if (oldp && *oldlenp < sizeof(int))
 		return (ENOMEM);
 	if (newp && newlen != sizeof(int))
 		return (EINVAL);
 	*oldlenp = sizeof(int);
+	val = *valp;
 	if (oldp)
-		error = copyout(valp, oldp, sizeof(int));
+		error = copyout(&val, oldp, sizeof(int));
 	if (error == 0 && newp)
-		error = copyin(newp, valp, sizeof(int));
+		error = copyin(newp, &val, sizeof(int));
+	if (error == 0)
+		*valp = val;
 	return (error);
 }
 
@@ -1096,8 +1110,8 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 		kf->f_usecount = 0;
 
 		if (suser(p) == 0 || p->p_ucred->cr_uid == fp->f_cred->cr_uid) {
-			kf->f_offset = fp->f_offset;
 			mtx_enter(&fp->f_mtx);
+			kf->f_offset = fp->f_offset;
 			kf->f_rxfer = fp->f_rxfer;
 			kf->f_rwfer = fp->f_wxfer;
 			kf->f_seek = fp->f_seek;
@@ -1148,8 +1162,19 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 		break;
 
 	case DTYPE_SOCKET: {
-		if (so == NULL)
+		int locked = 0;
+
+		if (so == NULL) {
 			so = (struct socket *)fp->f_data;
+			/* if so is passed as parameter it is already locked */
+			switch (so->so_proto->pr_domain->dom_family) {
+			case AF_INET:
+			case AF_INET6:
+				NET_LOCK();
+				locked = 1;
+				break;
+			}
+		}
 
 		kf->so_type = so->so_type;
 		kf->so_state = so->so_state;
@@ -1168,12 +1193,16 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 			kf->so_splicelen = so->so_sp->ssp_len;
 		} else if (issplicedback(so))
 			kf->so_splicelen = -1;
-		if (!so->so_pcb)
+		if (so->so_pcb == NULL) {
+			if (locked)
+				NET_UNLOCK();
 			break;
+		}
 		switch (kf->so_family) {
 		case AF_INET: {
 			struct inpcb *inpcb = so->so_pcb;
 
+			NET_ASSERT_LOCKED();
 			if (show_pointers)
 				kf->inp_ppcb = PTRTOINT64(inpcb->inp_ppcb);
 			kf->inp_lport = inpcb->inp_lport;
@@ -1195,6 +1224,7 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 		case AF_INET6: {
 			struct inpcb *inpcb = so->so_pcb;
 
+			NET_ASSERT_LOCKED();
 			if (show_pointers)
 				kf->inp_ppcb = PTRTOINT64(inpcb->inp_ppcb);
 			kf->inp_lport = inpcb->inp_lport;
@@ -1240,6 +1270,8 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 			break;
 		    }
 		}
+		if (locked)
+			NET_UNLOCK();
 		break;
 	    }
 
@@ -1467,7 +1499,7 @@ sysctl_doproc(int *name, u_int namelen, char *where, size_t *sizep)
 	buflen = where != NULL ? *sizep : 0;
 	needed = error = 0;
 
-	if (namelen != 4 || name[2] < 0 || name[3] < 0 ||
+	if (namelen != 4 || name[2] <= 0 || name[3] < 0 ||
 	    name[2] > sizeof(*kproc))
 		return (EINVAL);
 	op = name[0];
@@ -1610,7 +1642,7 @@ fill_kproc(struct process *pr, struct kinfo_proc *ki, struct proc *p,
 	struct session *s = pr->ps_session;
 	struct tty *tp;
 	struct vmspace *vm = pr->ps_vmspace;
-	struct timespec ut, st;
+	struct timespec booted, st, ut, utc;
 	int isthread;
 
 	isthread = p != NULL;
@@ -1646,6 +1678,12 @@ fill_kproc(struct process *pr, struct kinfo_proc *ki, struct proc *p,
 		ki->p_uutime_usec = ut.tv_nsec/1000;
 		ki->p_ustime_sec = st.tv_sec;
 		ki->p_ustime_usec = st.tv_nsec/1000;
+
+		/* Convert starting uptime to a starting UTC time. */
+		nanoboottime(&booted);
+		timespecadd(&booted, &pr->ps_start, &utc);
+		ki->p_ustart_sec = utc.tv_sec;
+		ki->p_ustart_usec = utc.tv_nsec / 1000;
 
 #ifdef MULTIPROCESSOR
 		if (p->p_cpu != NULL)
@@ -2434,4 +2472,35 @@ sysctl_cpustats(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		cs.cs_flags |= CPUSTATS_ONLINE;
 
 	return (sysctl_rdstruct(oldp, oldlenp, newp, &cs, sizeof(cs)));
+}
+
+int
+sysctl_utc_offset(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+{
+	struct timespec adjusted, now;
+	int adjustment_seconds, error, new_offset_minutes, old_offset_minutes;
+
+	old_offset_minutes = utc_offset / 60;	/* seconds -> minutes */
+	if (securelevel > 0)
+		return sysctl_rdint(oldp, oldlenp, newp, old_offset_minutes);
+
+	new_offset_minutes = old_offset_minutes;
+	error = sysctl_int(oldp, oldlenp, newp, newlen, &new_offset_minutes);
+	if (error)
+		return error;
+	if (new_offset_minutes < -24 * 60 || new_offset_minutes > 24 * 60)
+		return EINVAL;
+	if (new_offset_minutes == old_offset_minutes)
+		return 0;
+
+	utc_offset = new_offset_minutes * 60;	/* minutes -> seconds */
+	adjustment_seconds = (new_offset_minutes - old_offset_minutes) * 60;
+
+	nanotime(&now);
+	adjusted = now;
+	adjusted.tv_sec -= adjustment_seconds;
+	tc_setrealtimeclock(&adjusted);
+	resettodr();
+
+	return 0;
 }

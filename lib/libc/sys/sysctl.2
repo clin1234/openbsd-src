@@ -1,4 +1,4 @@
-.\"	$OpenBSD: sysctl.2,v 1.27 2019/05/09 15:05:47 claudio Exp $
+.\"	$OpenBSD: sysctl.2,v 1.40 2020/05/17 05:48:39 ratchov Exp $
 .\"
 .\" Copyright (c) 1993
 .\"	The Regents of the University of California.  All rights reserved.
@@ -27,7 +27,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: May 9 2019 $
+.Dd $Mdocdate: May 17 2020 $
 .Dt SYSCTL 2
 .Os
 .Sh NAME
@@ -419,6 +419,7 @@ virtual memory statistics, load average history, and clock rate
 information.
 .Bl -column "KERN_PROC_NOBROADCASTKILL" "u_int64_t[CPUSTATES]" "no" -offset indent
 .It Sy "Second level name" Ta Sy "Type" Ta Sy "Changeable"
+.It Dv KERN_ALLOWDT Ta "integer" Ta "yes"
 .It Dv KERN_ALLOWKMEM Ta "integer" Ta "yes"
 .It Dv KERN_ARGMAX Ta "integer" Ta "no"
 .It Dv KERN_AUDIO Ta "node" Ta "yes"
@@ -488,12 +489,20 @@ information.
 .It Dv KERN_TIMECOUNTER Ta "node" Ta "not applicable"
 .It Dv KERN_TTY Ta "node" Ta "not applicable"
 .It Dv KERN_TTYCOUNT Ta "integer" Ta "no"
+.It Dv KERN_UTC_OFFSET Ta "integer" Ta "yes"
 .It Dv KERN_VERSION Ta "string" Ta "no"
 .It Dv KERN_WATCHDOG Ta "node" Ta "not applicable"
 .It Dv KERN_WITNESS Ta "node" Ta "not applicable"
 .It Dv KERN_WXABORT Ta "integer" Ta "yes"
 .El
 .Bl -tag -width "123456"
+.It Dv KERN_ALLOWDT Pq Va kern.allowdt
+Allow userland processes access to
+.Pa /dev/dt .
+When running with a
+.Xr securelevel 7
+greater than 0,
+this variable may not be changed.
 .It Dv KERN_ALLOWKMEM Pq Va kern.allowkmem
 Allow userland processes access to
 .Pa /dev/mem
@@ -505,12 +514,10 @@ greater than 0,
 this variable may not be changed.
 .It Dv KERN_ARGMAX Pq Va kern.argmax
 The maximum number of bytes allowed among the arguments to
-.Xr exec 3 .
+.Xr execve 2 .
 .It Dv KERN_AUDIO Pq Va kern.audio
 Control device-independent aspects of the
 .Xr audio 4
-and
-.Xr mixer 4
 subsystem.
 Currently, there is one subnode:
 .Bl -column "KERN_AUDIO_RECORD" "integer" "Changeable" -offset indent
@@ -525,7 +532,7 @@ If set to the default value of 0, recording is muted by default
 for all audio devices.
 Otherwise, audio recording is enabled by default.
 For individual devices, this setting can be overridden with the
-.Xr mixerctl 1
+.Xr mixerctl 8
 .Va record.enable
 variable.
 .El
@@ -1079,6 +1086,22 @@ Returns the number of input characters in raw mode.
 Number of available
 .Xr tty 4
 devices.
+.It Dv KERN_UTC_OFFSET Pq Va kern.utc_offset
+The real-time clock's
+.Pq RTC
+offset from
+Coordinated Universal Time
+.Pq UTC
+expressed as minutes East of UTC+0.
+When set,
+time read from the RTC is adjusted to remove the offset
+and time written to the RTC is adjusted to reapply it.
+This may simplify multibooting with an operating system that
+does not run the RTC in UTC mode.
+When running with a
+.Xr securelevel 7
+greater than 0,
+this variable may not be changed.
 .It Dv KERN_VERSION Pq Va kern.version
 The system version string.
 .It Dv KERN_WATCHDOG Pq Va kern.watchdog
@@ -1240,12 +1263,13 @@ The currently defined protocols and names are:
 .It icmp Ta redirtimeout Ta integer Ta yes
 .It icmp Ta stats Ta structure Ta no
 .It icmp Ta tstamprepl Ta integer Ta yes
+.It ip Ta arpqueued Ta integer Ta no
 .It ip Ta arpdown Ta integer Ta yes
 .It ip Ta arptimeout Ta integer Ta yes
+.It ip Ta arpq Ta node Ta "N/A"
 .It ip Ta directed-broadcast Ta integer Ta yes
 .It ip Ta encdebug Ta integer Ta yes
 .It ip Ta forwarding Ta integer Ta yes
-.It ip Ta ifq Ta node Ta "N/A"
 .It ip Ta ipsec-allocs Ta integer Ta yes
 .It ip Ta ipsec-auth-alg Ta string Ta yes
 .It ip Ta ipsec-bytes Ta integer Ta yes
@@ -1275,7 +1299,6 @@ The currently defined protocols and names are:
 .It ip Ta ttl Ta integer Ta yes
 .It ipcomp Ta enable Ta integer Ta yes
 .It ipip Ta allow Ta integer Ta yes
-.It mobileip Ta allow Ta integer Ta yes
 .It tcp Ta ackonpush Ta integer Ta yes
 .It tcp Ta always_keepalive Ta integer Ta yes
 .It tcp Ta baddynamic Ta array Ta yes
@@ -1402,28 +1425,17 @@ Returns the ICMP statistics in a struct icmpstat.
 .It Li icmp.tstamprepl Pq Va net.inet.icmp.tstamprepl
 If set to 1, reply to ICMP timestamp requests.
 If set to 0, ignore timestamp requests.
+.It Li ip.arpqueued Pq Va net.inet.ip.arpqueued
+Number of packets ARP resolution is holding onto until it gets a MAC
+address for an IP.
 .It Li ip.arpdown Pq Va net.inet.ip.arpdown
 Lifetime of unresolved ARP entries, in seconds.
 .It Li ip.arptimeout Pq Va net.inet.ip.arptimeout
 Lifetime of resolved ARP entries, in seconds.
-.It Li ip.directed-broadcast Pq Va net.inet.ip.directed-broadcast
-Returns 1 if directed broadcast behavior is enabled for the host.
-.It Li ip.encdebug Pq Va net.inet.ip.encdebug
-Returns 1 when error message reporting is enabled for the host.
-If the kernel has been compiled with the
-.Dv ENCDEBUG
-option,
-then debugging information will also be reported when this variable is set.
-.It Li ip.forwarding Pq Va net.inet.ip.forwarding
-If set to 1, then IP forwarding is enabled for the host,
-indicating the host is acting as a router.
-If set to 2, then IP forwarding is restricted to traffic that has been
-IPsec encapsulated or decapsulated by the host.
-The default value is 0.
-.It Li ip.ifq
+.It Li ip.arpq
 Fifth level comprises an array of
 .Vt struct ifqueue
-structures containing information about IP packet input queue.
+structures containing information about ARP queue.
 The fifth level names for the elements of
 .Vt struct ifqueue
 are detailed below.
@@ -1437,13 +1449,33 @@ are detailed below.
 The variables are as follows:
 .Pp
 .Bl -tag -width Ds -compact
-.It Dv IFQCTL_DROPS Pq Va net.inet.ip.ifq.drops
+.It Dv IFQCTL_DROPS Pq Va net.inet.ip.arpq.drops
 Returns number of packet dropped.
-.It Dv IFQCTL_LEN Pq Va net.inet.ip.ifq.len
+.It Dv IFQCTL_LEN Pq Va net.inet.ip.arpq.len
 Returns the current queue length.
-.It Dv IFQCTL_MAXLEN Pq Va net.inet.ip.ifq.maxlen
+.It Dv IFQCTL_MAXLEN Pq Va net.inet.ip.arpq.maxlen
 Get or set the maximum number of queue length.
 .El
+.It Li ip.directed-broadcast Pq Va net.inet.ip.directed-broadcast
+Returns 1 if directed broadcast behavior is enabled for the host.
+.It Li ip.encdebug Pq Va net.inet.ip.encdebug
+Returns 1 when error message reporting is enabled for the host.
+If the kernel has been compiled with the
+.Dv ENCDEBUG
+option,
+then debugging information will also be reported when this variable is set.
+.It Li ip.forwarding Pq Va net.inet.ip.forwarding
+If set to 0, IP forwarding is disabled.
+The IP stack also requires the destination IP address of incoming packets
+to match the IP address of the network interface the packet is bound to.
+If set to 1, IP forwarding is enabled for the host,
+indicating the host is acting as a router.
+If set to 2, IP forwarding is restricted to traffic that has been
+IPsec encapsulated or decapsulated by the host.
+Enabling packet forwarding (values either 1 or 2) relaxes the requirements
+on incoming packets, so that its destination address must match just any IP address
+bound to the host.
+The default value is 0.
 .It Li ip.ipsec-allocs Pq Va net.inet.ip.ipsec-allocs
 The number of IPsec flows that can use a security association before
 it expires.
@@ -1622,10 +1654,6 @@ If set to any other value, processing will occur; furthermore, if set
 to 2, no checks for spoofing of loopback addresses will be done.
 This is useful only for debugging purposes, and should never be used
 in production systems.
-.It Li mobileip.allow Pq Va net.inet.mobileip.allow
-If set to 0, incoming Mobile IP encapsulated packets (RFC 2004) will not be
-processed.
-If set to any other value, processing will occur.
 .It Li tcp.ackonpush Pq Va net.inet.tcp.ackonpush
 Returns 1 if TCP segments with the
 .Dv TH_PUSH
@@ -1753,7 +1781,6 @@ The currently defined protocols and names are:
 .It ip6 Ta forwarding Ta integer Ta yes
 .It ip6 Ta hdrnestlimit Ta integer Ta yes
 .It ip6 Ta hlim Ta integer Ta yes
-.It ip6 Ta ifq Ta node Ta "N/A"
 .It ip6 Ta log_interval Ta integer Ta yes
 .It ip6 Ta maxdynroutes Ta integer Ta yes
 .It ip6 Ta maxfragpackets Ta integer Ta yes
@@ -1764,7 +1791,7 @@ The currently defined protocols and names are:
 .It ip6 Ta multipath Ta integer Ta yes
 .It ip6 Ta neighborgcthresh Ta integer Ta yes
 .It ip6 Ta redirect Ta integer Ta yes
-.It ip6 Ta soiikey Ta uint8_t[] Ta yes
+.It ip6 Ta soiikey Ta uint8_t[IP6_SOIIKEY_LEN] Ta yes
 .It ip6 Ta use_deprecated Ta integer Ta yes
 .El
 .Pp
@@ -1870,6 +1897,10 @@ and
 cases quite differently, and changing this variable during operation
 may cause serious trouble.
 Hence, this variable should only be set at bootstrap time.
+As with IPv4, if forwarding is disabled then the destination address of
+incoming packets must match the IP address bound to the interface.
+If forwarding is enabled, the check is relaxed so that the destination IP address of
+incoming packets must match just any address bound to the host.
 .Pp
 .It Li ip6.hdrnestlimit Pq Va net.inet6.ip6.hdrnestlimit
 The number of IPv6 extension headers permitted on incoming IPv6 packets.
@@ -1880,15 +1911,6 @@ The default hop limit value for an IPv6 unicast packet sourced by the node.
 This value applies to all the transport protocols on top of IPv6.
 Methods for overriding this value are documented in
 .Xr ip6 4 .
-.Pp
-.It Li ip6.ifq Pq Va net.inet6.ip6.ifq
-Fifth level comprises an array of
-.Vt struct ifqueue
-structures containing information about IPv6 packet input queue.
-The fifth level names for the elements of
-.Vt struct ifqueue
-are detailed above in
-.Li ip.ifq .
 .Pp
 .It Li ip6.log_interval Pq Va net.inet6.ip6.log_interval
 This variable permits adjusting the amount of logs generated by the
@@ -1948,7 +1970,10 @@ and should normally be enabled on all systems.
 .It Li ip6.soii Pq Va net.inet6.ip6.soiikey
 This variable configures the secret key for the RFC 7217 algorithm to
 calculate a persistent Semantically Opaque Interface Identifier (SOII)
-for IPv6 link local and Stateless Address Autoconfiguration (SLAAC) addresses.
+for IPv6 Stateless Address Autoconfiguration (SLAAC) addresses.
+It must be
+.Dv IP6_SOIIKEY_LEN
+bytes long.
 .Pp
 .It Li ip6.use_deprecated Pq Va net.inet6.ip6.use_deprecated
 This variable controls the use of deprecated addresses, specified in
@@ -1976,29 +2001,16 @@ IPsec flow database (SPD).
 .El
 .It Dv PF_MPLS
 Get or set global information about MPLS (Multiprotocol Label Switching).
-.Bl -column "MPLSCTL_MAXINKLOOP " "integer" "not applicable" -offset indent
+.Bl -column "MPLSCTL_MAPTTL_IP6 " "integer" "not applicable" -offset indent
 .It Sy "Third level name" Ta Sy "Type" Ta Sy "Changeable"
 .It Dv MPLSCTL_DEFTTL Ta integer Ta yes
-.It Dv MPLSCTL_IFQUEUE Ta node Ta "not applicable"
 .It Dv MPLSCTL_MAPTTL_IP Ta integer Ta yes
 .It Dv MPLSCTL_MAPTTL_IP6 Ta integer Ta yes
-.It Dv MPLSCTL_MAXINKLOOP Ta integer Ta yes
 .El
 .Bl -tag -width "123456"
 .It Dv MPLSCTL_DEFTTL Pq Va net.mpls.ttl
 Set or get the default TTL value which is used for MPLS (Shim) Header.
 The default is 255.
-.It Dv MPLSCTL_IFQUEUE Pq Va net.mpls.ifq
-Fourth level comprises an array of
-.Vt struct ifqueue
-structures containing information about MPLS packet input queue.
-The forth level names for the elements of
-.Vt struct ifqueue
-are the same as described in
-.Li ip.ifq
-in the
-.Dv PF_INET
-section.
 .It Dv MPLSCTL_MAPTTL_IP Pq Va net.mpls.mapttl_ip
 If set to 1 the TTL field is synchronized between the IP header and the
 MPLS label stack.
@@ -2013,10 +2025,6 @@ If set to 0 the IPv6 header TTL is not modified while passing through MPLS
 and the MPLS label stack is initialized with the
 .Dv MPLSCTL_DEFTTL .
 The default is 0.
-.It Dv MPLSCTL_MAXINKLOOP Pq Va net.mpls.maxloop_inkernel
-Set or get the maxinum number of label stack operations (push, swap, pop)
-that can be made on a packet.
-The default is 16.
 .El
 .It Dv PF_PIPEX Pq Va net.pipex
 Get or set global information about PIPEX.
@@ -2039,7 +2047,7 @@ structures containing information about the PIPEX packet input queue.
 The forth level names for the elements of
 .Vt struct ifqueue
 are the same as described in
-.Li ip.ifq
+.Li ip.arpq
 in the
 .Dv PF_INET
 section.
@@ -2050,7 +2058,7 @@ structures containing information about PIPEX packet output queue.
 The forth level names for the elements of
 .Vt struct ifqueue
 are the same as described in
-.Li ip.ifq
+.Li ip.arpq
 in the
 .Dv PF_INET
 section.
@@ -2116,7 +2124,7 @@ hashes.
 .It Dv FFS_DIRHASH_MEM Pq Va vfs.ffs.dirhash_mem
 The amount of memory currently used by all directory hashes.
 .It Dv FFS_MAX_SOFTDEPS Pq Va vfs.ffs.max_softdeps
-Maximum strcuctures before slowdowns.
+Maximum structures before slowdowns.
 .It Dv FFS_SD_BLK_LIMIT_HIT Pq Va vfs.ffs.sd_blk_limit_hit
 Number of times block slowdown imposed.
 .It Dv FFS_SD_BLK_LIMIT_PUSH Pq Va vfs.ffs.sd_blk_limit_push

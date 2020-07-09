@@ -215,8 +215,8 @@ pipeline_find(struct xfrd_tcp_set* set, xfrd_zone_type* zone)
 	/* smaller buf than a full pipeline with 64kb ID array, only need
 	 * the front part with the key info, this front part contains the
 	 * members that the compare function uses. */
-	const size_t keysize = sizeof(struct xfrd_tcp_pipeline) -
-		ID_PIPE_NUM*(sizeof(struct xfrd_zone*) + sizeof(uint16_t));
+	enum { keysize = sizeof(struct xfrd_tcp_pipeline) -
+		ID_PIPE_NUM*(sizeof(struct xfrd_zone*) + sizeof(uint16_t)) };
 	/* void* type for alignment of the struct,
 	 * divide the keysize by ptr-size and then add one to round up */
 	void* buf[ (keysize / sizeof(void*)) + 1 ];
@@ -330,6 +330,7 @@ tcp_pipe_reset_timeout(struct xfrd_tcp_pipeline* tp)
 	tv.tv_usec = 0;
 	if(tp->handler_added)
 		event_del(&tp->handler);
+	memset(&tp->handler, 0, sizeof(tp->handler));
 	event_set(&tp->handler, fd, EV_PERSIST|EV_TIMEOUT|EV_READ|
 		(tp->tcp_send_first?EV_WRITE:0), xfrd_handle_tcp_pipe, tp);
 	if(event_base_set(xfrd->event_base, &tp->handler) != 0)
@@ -575,6 +576,7 @@ xfrd_tcp_open(struct xfrd_tcp_set* set, struct xfrd_tcp_pipeline* tp,
 	/* set the tcp pipe event */
 	if(tp->handler_added)
 		event_del(&tp->handler);
+	memset(&tp->handler, 0, sizeof(tp->handler));
 	event_set(&tp->handler, fd, EV_PERSIST|EV_TIMEOUT|EV_READ|EV_WRITE,
 		xfrd_handle_tcp_pipe, tp);
 	if(event_base_set(xfrd->event_base, &tp->handler) != 0)

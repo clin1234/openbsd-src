@@ -1,13 +1,13 @@
-#	$OpenBSD: Makefile,v 1.7 2019/05/03 20:03:58 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.10 2020/05/18 06:20:43 otto Exp $
 
-FS=		floppy${OSrev}.fs
+FS=		floppy${OSrev}.img
 FSSIZE=		2880
 FSDISKTYPE=	floppy3
 MOUNT_POINT=	/mnt
 MTREE=		${UTILS}/mtree.conf
 RAMDISK=	RAMDISK
 
-LISTS=		${.CURDIR}/../common/list ${.CURDIR}/list.local
+LISTS=		${.CURDIR}/list
 UTILS=		${.CURDIR}/../../miniroot
 
 EFIBOOT=	${DESTDIR}/usr/mdec/BOOTX64.EFI ${DESTDIR}/usr/mdec/BOOTIA32.EFI
@@ -18,7 +18,7 @@ ${FS}: bsd.gz
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
 	vnconfig -v ${FS} > vnd
 	disklabel -w `cat vnd` ${FSDISKTYPE}
-	newfs -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
+	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
 	cp ${DESTDIR}/usr/mdec/fdboot ${.OBJDIR}/boot
 	strip ${.OBJDIR}/boot
@@ -81,7 +81,7 @@ install:
 
 clean cleandir:
 	rm -f *.core mr.fs instbin instbin.mk instbin*.cache \
-	    *.o *.lo *.c bsd bsd.rd bsd.gz bsd.strip floppy*.fs \
+	    *.o *.lo *.c bsd bsd.rd bsd.gz bsd.strip floppy*.img \
 	    lib*.a lib*.olist instbin.map boot instbin.conf ${FS}
 	rm -rf mr.fs.d
 

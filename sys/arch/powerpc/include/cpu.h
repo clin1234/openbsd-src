@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.65 2019/03/23 05:27:53 visa Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.68 2020/06/05 14:25:05 naddy Exp $	*/
 /*	$NetBSD: cpu.h,v 1.1 1996/09/30 16:34:21 ws Exp $	*/
 
 /*
@@ -160,6 +160,16 @@ extern int ppc_proc_is_64b;
 extern int ppc_nobat;
 
 void	cpu_bootstrap(void);
+
+static inline unsigned int
+cpu_rnd_messybits(void)
+{
+	unsigned int hi, lo;
+
+	__asm volatile("mftbu %0; mftb %1" : "=r" (hi), "=r" (lo));
+
+	return (hi ^ lo);
+}
 
 /*
  * This is used during profiling to integrate system time.
@@ -336,7 +346,7 @@ ppc_mftb(void)
 	u_long scratch;
 	u_int64_t tb;
 
-	__asm volatile ("1: mftbu %0; mftb %0+1; mftbu %1;"
+	__asm volatile ("1: mftbu %0; mftb %L0; mftbu %1;"
 	    " cmpw 0,%0,%1; bne 1b" : "=r"(tb), "=r"(scratch));
 	return tb;
 }

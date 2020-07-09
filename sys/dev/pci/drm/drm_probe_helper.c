@@ -32,16 +32,16 @@
 #include <linux/export.h>
 #include <linux/moduleparam.h>
 
-#include <drm/drmP.h>
-#ifdef notyet
+#include <drm/drm_bridge.h>
 #include <drm/drm_client.h>
-#endif
 #include <drm/drm_crtc.h>
-#include <drm/drm_fourcc.h>
-#include <drm/drm_crtc_helper.h>
-#include <drm/drm_fb_helper.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_fb_helper.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_print.h>
+#include <drm/drm_probe_helper.h>
+#include <drm/drm_sysfs.h>
 
 #include "drm_crtc_helper_internal.h"
 
@@ -93,7 +93,6 @@ drm_mode_validate_pipeline(struct drm_display_mode *mode,
 	struct drm_device *dev = connector->dev;
 	enum drm_mode_status ret = MODE_OK;
 	struct drm_encoder *encoder;
-	int i;
 
 	/* Step 1: Validate against connector */
 	ret = drm_connector_mode_valid(connector, mode);
@@ -101,7 +100,8 @@ drm_mode_validate_pipeline(struct drm_display_mode *mode,
 		return ret;
 
 	/* Step 2: Validate against encoders and crtcs */
-	drm_connector_for_each_possible_encoder(connector, encoder, i) {
+	drm_connector_for_each_possible_encoder(connector, encoder) {
+		struct drm_bridge *bridge;
 		struct drm_crtc *crtc;
 
 		ret = drm_encoder_mode_valid(encoder, mode);
@@ -113,7 +113,8 @@ drm_mode_validate_pipeline(struct drm_display_mode *mode,
 			continue;
 		}
 
-		ret = drm_bridge_mode_valid(encoder->bridge, mode);
+		bridge = drm_bridge_chain_get_first_bridge(encoder);
+		ret = drm_bridge_chain_mode_valid(bridge, mode);
 		if (ret != MODE_OK) {
 			/* There is also no point in continuing for crtc check
 			 * here. */
@@ -481,6 +482,13 @@ retry:
 
 	count = (*connector_funcs->get_modes)(connector);
 
+	/*
+	 * Fallback for when DDC probe failed in drm_get_edid() and thus skipped
+	 * override/firmware EDID.
+	 */
+	if (count == 0 && connector->status == connector_status_connected)
+		count = drm_add_override_edid_modes(connector);
+
 	if (count == 0 && connector->status == connector_status_connected)
 		count = drm_add_modes_noedid(connector, 1024, 768);
 	count += drm_helper_probe_add_cmdline_mode(connector);
@@ -563,9 +571,7 @@ void drm_kms_helper_hotplug_event(struct drm_device *dev)
 	if (dev->mode_config.funcs->output_poll_changed)
 		dev->mode_config.funcs->output_poll_changed(dev);
 
-#ifdef notyet
 	drm_client_dev_hotplug(dev);
-#endif
 }
 EXPORT_SYMBOL(drm_kms_helper_hotplug_event);
 
@@ -577,6 +583,9 @@ static void output_poll_execute(struct work_struct *work)
 	struct drm_connector_list_iter conn_iter;
 	enum drm_connector_status old_status;
 	bool repoll = false, changed;
+
+	if (!dev->mode_config.poll_enabled)
+		return;
 
 	/* Pick up any changes detected by the probe functions. */
 	changed = dev->mode_config.delayed_event;
@@ -656,7 +665,6 @@ out:
 		schedule_delayed_work(delayed_work, DRM_OUTPUT_POLL_PERIOD);
 }
 
-#ifdef __linux__
 /**
  * drm_kms_helper_is_poll_worker - is %current task an output poll worker?
  *
@@ -671,12 +679,14 @@ out:
  */
 bool drm_kms_helper_is_poll_worker(void)
 {
+	return false;
+#ifdef __linux__
 	struct work_struct *work = current_work();
 
 	return work && work->func == output_poll_execute;
+#endif
 }
 EXPORT_SYMBOL(drm_kms_helper_is_poll_worker);
-#endif
 
 /**
  * drm_kms_helper_poll_disable - disable output polling
@@ -734,7 +744,11 @@ EXPORT_SYMBOL(drm_kms_helper_poll_init);
  */
 void drm_kms_helper_poll_fini(struct drm_device *dev)
 {
-	drm_kms_helper_poll_disable(dev);
+	if (!dev->mode_config.poll_enabled)
+		return;
+
+	dev->mode_config.poll_enabled = false;
+	cancel_delayed_work_sync(&dev->mode_config.output_poll_work);
 }
 EXPORT_SYMBOL(drm_kms_helper_poll_fini);
 

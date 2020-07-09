@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_loop.c,v 1.88 2018/09/09 10:11:41 henning Exp $	*/
+/*	$OpenBSD: if_loop.c,v 1.90 2020/01/08 09:09:10 claudio Exp $	*/
 /*	$NetBSD: if_loop.c,v 1.15 1996/05/07 02:40:33 thorpej Exp $	*/
 
 /*
@@ -196,6 +196,7 @@ int
 loop_clone_destroy(struct ifnet *ifp)
 {
 	struct ifnet	*p;
+	unsigned int	 rdomain = 0;
 
 	if (ifp->if_index == rtable_loindex(ifp->if_rdomain)) {
 		/* rdomain 0 always needs a loopback */
@@ -214,13 +215,16 @@ loop_clone_destroy(struct ifnet *ifp)
 		}
 		NET_UNLOCK();
 
-		rtable_l2set(ifp->if_rdomain, 0, 0);
+		rdomain = ifp->if_rdomain;
 	}
 
 	if_ih_remove(ifp, loinput, NULL);
 	if_detach(ifp);
 
 	free(ifp, M_DEVBUF, sizeof(*ifp));
+
+	if (rdomain)
+		rtable_l2set(rdomain, 0, 0);
 	return (0);
 }
 
@@ -252,10 +256,10 @@ looutput(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 			rt->rt_flags & RTF_HOST ? EHOSTUNREACH : ENETUNREACH);
 	}
 
-	/* Use the quick path only once to avoid stack overflow. */
-	if ((m->m_flags & M_LOOP) == 0)
-		return (if_input_local(ifp, m, dst->sa_family));
-
+	/*
+	 * Do not call if_input_local() directly.  Queue the packet to avoid
+	 * stack overflow and make TCP handshake over loopback work.
+	 */
 	return (if_output_local(ifp, m, dst->sa_family));
 }
 

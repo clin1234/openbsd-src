@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.265 2019/05/13 19:21:31 bluhm Exp $	*/
+/*	$OpenBSD: proc.h,v 1.297 2020/07/06 13:33:09 pirofti Exp $	*/
 /*	$NetBSD: proc.h,v 1.44 1996/04/22 01:23:21 christos Exp $	*/
 
 /*-
@@ -50,7 +50,6 @@
 #include <sys/resource.h>		/* For struct rusage */
 #include <sys/rwlock.h>			/* For struct rwlock */
 #include <sys/sigio.h>			/* For struct sigio */
-#include <sys/tree.h>
 
 #ifdef _KERNEL
 #include <sys/atomic.h>
@@ -129,15 +128,6 @@ struct tusage {
 	uint64_t	tu_iticks;	/* Statclock hits processing intr. */
 };
 
-struct unvname {
-	char 			*un_name;
-	size_t 			un_namesize;
-	u_char			un_flags;
-	RBT_ENTRY(unvnmae)	un_rbt;
-};
-
-RBT_HEAD(unvname_rbt, unvname);
-
 /*
  * Description of a process.
  *
@@ -153,11 +143,21 @@ RBT_HEAD(unvname_rbt, unvname);
 #ifdef __need_process
 struct futex;
 LIST_HEAD(futex_list, futex);
+struct tslpentry;
+TAILQ_HEAD(tslpqueue, tslpentry);
 struct unveil;
+
+/*
+ * Locks used to protect struct members in this file:
+ *	a	atomic operations
+ *	m	this process' `ps_mtx'
+ *	p	this process' `ps_lock'
+ *	R	rlimit_lock
+ */
 struct process {
 	/*
 	 * ps_mainproc is the original thread in the process.
-	 * It's only still special for the handling of p_xstat and
+	 * It's only still special for the handling of
 	 * some signal and ptrace behaviors that need to be fixed.
 	 */
 	struct	proc *ps_mainproc;
@@ -172,6 +172,15 @@ struct process {
 	LIST_HEAD(, process) ps_children;/* Pointer to list of children. */
 	LIST_ENTRY(process) ps_hash;    /* Hash chain. */
 
+	/*
+	 * An orphan is the child that has been re-parented to the
+	 * debugger as a result of attaching to it.  Need to keep
+	 * track of them for parent to be able to collect the exit
+	 * status of what used to be children.
+	 */
+	LIST_ENTRY(process) ps_orphan;	/* List of orphan processes. */
+	LIST_HEAD(, process) ps_orphans;/* Pointer to list of orphans. */
+
 	struct	sigiolst ps_sigiolst;	/* List of sigio structures. */
 	struct	sigacts *ps_sigacts;	/* Signal actions, state */
 	struct	vnode *ps_textvp;	/* Vnode of executable. */
@@ -180,20 +189,25 @@ struct process {
 	pid_t	ps_pid;			/* Process identifier. */
 
 	struct	futex_list ps_ftlist;	/* futexes attached to this process */
-	LIST_HEAD(, kqueue) ps_kqlist;	/* kqueues attached to this process */
+	struct	tslpqueue ps_tslpqueue;	/* [p] queue of threads in thrsleep */
+	struct	rwlock	ps_lock;	/* per-process rwlock */
+	struct  mutex	ps_mtx;		/* per-process mutex */
 
 /* The following fields are all zeroed upon creation in process_new. */
 #define	ps_startzero	ps_klist
 	struct	klist ps_klist;		/* knotes attached to this process */
-	int	ps_flags;		/* PS_* flags. */
+	u_int	ps_flags;		/* [a] PS_* flags. */
 	int	ps_siglist;		/* Signals pending for the process. */
 
 	struct	proc *ps_single;	/* Single threading to this thread. */
-	int	ps_singlecount;		/* Not yet suspended threads. */
+	u_int	ps_singlecount;		/* [a] Not yet suspended threads. */
 
 	int	ps_traceflag;		/* Kernel trace points. */
 	struct	vnode *ps_tracevp;	/* Trace to vnode. */
 	struct	ucred *ps_tracecred;	/* Creds for writing trace */
+
+	u_int	ps_xexit;		/* Exit status for wait */
+	int	ps_xsig;		/* Stopping or killing signal */
 
 	pid_t	ps_oppid;	 	/* Save parent pid during ptrace. */
 	int	ps_ptmask;		/* Ptrace event mask */
@@ -202,8 +216,10 @@ struct process {
 	struct	rusage *ps_ru;		/* sum of stats for dead threads. */
 	struct	tusage ps_tu;		/* accumulated times. */
 	struct	rusage ps_cru;		/* sum of stats for reaped children */
-	struct	itimerval ps_timer[3];	/* timers, indexed by ITIMER_* */
-	struct	timeout ps_rucheck_to;	/* resource limit check timer */
+	struct	itimerspec ps_timer[3];	/* timers, indexed by ITIMER_* */
+	struct	timeout ps_rucheck_to;	/* [] resource limit check timer */
+	time_t	ps_nextxcpu;		/* when to send next SIGXCPU, */
+					/* in seconds of process runtime */
 
 	u_int64_t ps_wxcounter;
 
@@ -219,13 +235,14 @@ struct process {
 
 /* The following fields are all copied upon creation in process_new. */
 #define	ps_startcopy	ps_limit
-	struct	plimit *ps_limit;	/* Process limits. */
+	struct	plimit *ps_limit;	/* [m,R] Process limits. */
 	struct	pgrp *ps_pgrp;		/* Pointer to process group. */
 	struct	emul *ps_emul;		/* Emulation information */
 
 	char	ps_comm[MAXCOMLEN+1];
 
 	vaddr_t	ps_strings;		/* User pointers to argv/env */
+	vaddr_t ps_timekeep; 		/* User pointer to timekeep */
 	vaddr_t	ps_sigcode;		/* User pointer to the signal code */
 	vaddr_t ps_sigcoderet;		/* User pointer to sigreturn retPC */
 	u_long	ps_sigcookie;
@@ -251,7 +268,7 @@ struct process {
 #define ps_endcopy	ps_refcnt
 	int	ps_refcnt;		/* Number of references. */
 
-	struct	timespec ps_start;	/* starting time. */
+	struct	timespec ps_start;	/* starting uptime. */
 	struct	timeout ps_realit_to;	/* real-time itimer trampoline. */
 };
 
@@ -286,27 +303,38 @@ struct process {
 #define	PS_PLEDGE	0x00100000	/* Has called pledge(2) */
 #define	PS_WXNEEDED	0x00200000	/* Process may violate W^X */
 #define	PS_EXECPLEDGE	0x00400000	/* Has exec pledges */
+#define	PS_ORPHAN	0x00800000	/* Process is on an orphan list */
 
 #define	PS_BITS \
     ("\20" "\01CONTROLT" "\02EXEC" "\03INEXEC" "\04EXITING" "\05SUGID" \
      "\06SUGIDEXEC" "\07PPWAIT" "\010ISPWAIT" "\011PROFIL" "\012TRACED" \
      "\013WAITED" "\014COREDUMP" "\015SINGLEEXIT" "\016SINGLEUNWIND" \
      "\017NOZOMBIE" "\020STOPPED" "\021SYSTEM" "\022EMBRYO" "\023ZOMBIE" \
-     "\024NOBROADCASTKILL" "\025PLEDGE" "\026WXNEEDED" "\027EXECPLEDGE" )
+     "\024NOBROADCASTKILL" "\025PLEDGE" "\026WXNEEDED" "\027EXECPLEDGE" \
+     "\028ORPHAN")
 
 
 struct kcov_dev;
 struct lock_list_entry;
 
+struct p_inentry {
+	u_long	 ie_serial;
+	vaddr_t	 ie_start;
+	vaddr_t	 ie_end;
+};
+
 /*
  *  Locks used to protect struct members in this file:
- *	s	scheduler lock
+ *	I	immutable after creation
+ *	S	scheduler lock
+ *	l	read only reference, see lim_read_enter()
+ *	o	owned (read/modified only) by this thread
  */
 struct proc {
-	TAILQ_ENTRY(proc) p_runq;	/* [s] current run/sleep queue */
+	TAILQ_ENTRY(proc) p_runq;	/* [S] current run/sleep queue */
 	LIST_ENTRY(proc) p_list;	/* List of all threads. */
 
-	struct	process *p_p;		/* The process of this thread. */
+	struct	process *p_p;		/* [I] The process of this thread. */
 	TAILQ_ENTRY(proc) p_thr_link;	/* Threads in a process linkage. */
 
 	TAILQ_ENTRY(proc) p_fut_link;	/* Threads in a futex linkage. */
@@ -314,13 +342,14 @@ struct proc {
 
 	/* substructures: */
 	struct	filedesc *p_fd;		/* copy of p_p->ps_fd */
-	struct	vmspace *p_vmspace;	/* copy of p_p->ps_vmspace */
-#define	p_rlimit	p_p->ps_limit->pl_rlimit
+	struct	vmspace *p_vmspace;	/* [I] copy of p_p->ps_vmspace */
+	struct	p_inentry p_spinentry;	/* [o] cache for SP check */
+	struct	p_inentry p_pcinentry;	/* [o] cache for PC check */
 
 	int	p_flag;			/* P_* flags. */
 	u_char	p_spare;		/* unused */
-	char	p_stat;			/* [s] S* process status. */
-	char	p_pad1[1];
+	char	p_stat;			/* [S] S* process status. */
+	u_char	p_runpri;		/* [S] Runqueue priority */
 	u_char	p_descfd;		/* if not 255, fdesc permits this fd */
 
 	pid_t	p_tid;			/* Thread identifier. */
@@ -330,24 +359,25 @@ struct proc {
 #define	p_startzero	p_dupfd
 	int	p_dupfd;	 /* Sideways return value from filedescopen. XXX */
 
-	long 	p_thrslpid;	/* for thrsleep syscall */
-
 	/* scheduling */
-	u_int	p_estcpu;		/* [s] Time averaged val of p_cpticks */
 	int	p_cpticks;	 /* Ticks of cpu time. */
-	const volatile void *p_wchan;	/* [s] Sleep address. */
+	const volatile void *p_wchan;	/* [S] Sleep address. */
 	struct	timeout p_sleep_to;/* timeout for tsleep() */
-	const char *p_wmesg;		/* [s] Reason for sleep. */
-	fixpt_t	p_pctcpu;		/* [s] %cpu for this thread */
-	u_int	p_slptime;		/* [s] Time since last blocked. */
+	const char *p_wmesg;		/* [S] Reason for sleep. */
+	fixpt_t	p_pctcpu;		/* [S] %cpu for this thread */
+	u_int	p_slptime;		/* [S] Time since last blocked. */
 	u_int	p_uticks;		/* Statclock hits in user mode. */
 	u_int	p_sticks;		/* Statclock hits in system mode. */
 	u_int	p_iticks;		/* Statclock hits processing intr. */
-	struct	cpu_info * volatile p_cpu; /* [s] CPU we're running on. */
+	struct	cpu_info * volatile p_cpu; /* [S] CPU we're running on. */
 
 	struct	rusage p_ru;		/* Statistics */
 	struct	tusage p_tu;		/* accumulated times. */
 	struct	timespec p_rtime;	/* Real time. */
+
+	struct	plimit	*p_limit;	/* [l] read ref. of p_p->ps_limit */
+	struct	kcov_dev *p_kd;		/* kcov device handle */
+	struct	lock_list_entry *p_sleeplocks;	/* WITNESS lock tracking */ 
 
 	int	 p_siglist;		/* Signals arrived but not delivered. */
 
@@ -358,15 +388,12 @@ struct proc {
 #define	p_startcopy	p_sigmask
 	sigset_t p_sigmask;	/* Current signal mask. */
 
-	u_int	 p_spserial;
-	vaddr_t	 p_spstart;
-	vaddr_t	 p_spend;
-
-	u_char	p_priority;	/* [s] Process priority. */
-	u_char	p_usrpri;	/* [s] User-prio based on p_estcpu & ps_nice. */
+	u_char	p_slppri;		/* [S] Sleeping priority */
+	u_char	p_usrpri;	/* [S] Priority based on p_estcpu & ps_nice */
+	u_int	p_estcpu;		/* [S] Time averaged val of p_cpticks */
 	int	p_pledge_syscall;	/* Cache of current syscall */
 
-	struct	ucred *p_ucred;		/* cached credentials */
+	struct	ucred *p_ucred;		/* [o] cached credentials */
 	struct	sigaltstack p_sigstk;	/* sp & on stack state variable */
 
 	u_long	p_prof_addr;	/* tmp storage for profiling addr until AST */
@@ -382,12 +409,6 @@ struct proc {
 	union sigval p_sigval;	/* For core dump/debugger XXX */
 	long	p_sitrapno;	/* For core dump/debugger XXX */
 	int	p_sicode;	/* For core dump/debugger XXX */
-
-	u_short	p_xstat;	/* Exit status for wait; also stop signal. */
-
-	struct	lock_list_entry *p_sleeplocks;
-
-	struct	kcov_dev *p_kd;
 };
 
 /* Status values. */
@@ -434,14 +455,6 @@ struct proc {
 
 #ifdef _KERNEL
 
-struct unveil {
-	struct vnode		*uv_vp;
-	ssize_t			uv_cover;
-	struct unvname_rbt	uv_names;
-	struct rwlock		uv_lock;
-	u_char			uv_flags;
-};
-
 struct uidinfo {
 	LIST_ENTRY(uidinfo) ui_hash;
 	uid_t   ui_uid;
@@ -487,7 +500,6 @@ void uid_release(struct uidinfo *);
 #define FORK_SYSTEM	0x00000020
 #define FORK_NOZOMBIE	0x00000040
 #define FORK_SHAREVM	0x00000080
-#define FORK_SIGHAND	0x00000200
 #define FORK_PTRACE	0x00000400
 
 #define EXIT_NORMAL		0x00000001
@@ -546,12 +558,13 @@ void	leavepgrp(struct process *);
 void	killjobc(struct process *);
 void	preempt(void);
 void	procinit(void);
-void	resetpriority(struct proc *);
+void	setpriority(struct proc *, uint32_t, uint8_t);
 void	setrunnable(struct proc *);
 void	endtsleep(void *);
+int	wakeup_proc(struct proc *, const volatile void *);
 void	unsleep(struct proc *);
 void	reaper(void *);
-void	exit1(struct proc *, int, int);
+void	exit1(struct proc *, int, int, int);
 void	exit2(struct proc *);
 int	dowait4(struct proc *, pid_t, int *, int, struct rusage *,
 	    register_t *);
@@ -584,7 +597,7 @@ enum single_thread_mode {
 	SINGLE_EXIT		/* other threads to unwind and then exit */
 };
 int	single_thread_set(struct proc *, enum single_thread_mode, int);
-void	single_thread_wait(struct process *);
+int	single_thread_wait(struct process *, int);
 void	single_thread_clear(struct proc *, int);
 int	single_thread_check(struct proc *, int);
 
@@ -596,7 +609,10 @@ struct sleep_state {
 	int sls_s;
 	int sls_catch;
 	int sls_do_sleep;
+	int sls_locked;
 	int sls_sig;
+	int sls_unwind;
+	int sls_timeout;
 };
 
 struct cond {

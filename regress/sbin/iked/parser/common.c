@@ -1,4 +1,4 @@
-/*	$OpenBSD: common.c,v 1.2 2019/05/11 16:30:23 patrick Exp $ */
+/*	$OpenBSD: common.c,v 1.5 2020/04/01 21:09:27 tobhe Exp $ */
 /*
  * A bunch of stub functions so we can compile and link ikev2_pld.c
  * in a standalone program for testing purposes.
@@ -40,7 +40,7 @@ void	 timer_del(struct iked *, struct iked_timer *);
 ssize_t	 ikev2_nat_detection(struct iked *, struct iked_message *,
 	     void *, size_t, u_int);
 int	 ca_setreq(struct iked *, struct iked_sa *, struct iked_static_id *,
-	     u_int8_t, u_int8_t *, size_t, enum privsep_procid);
+	     u_int8_t, u_int8_t, u_int8_t *, size_t, enum privsep_procid);
 int	 ikev2_print_id(struct iked_id *, char *, size_t);
 struct iked_transform *
 	 config_add_transform(struct iked_proposal *, u_int, u_int, u_int,
@@ -74,6 +74,12 @@ ikev2_send_ike_e(struct iked *env, struct iked_sa *sa, struct ibuf *buf,
 void
 ikev2_ikesa_recv_delete(struct iked *env, struct iked_sa *sa)
 {
+}
+
+const char *
+ikev2_ikesa_info(uint64_t spi, const char *msg)
+{
+	return "";
 }
 
 struct iked_childsa *
@@ -140,9 +146,9 @@ ikev2_nat_detection(struct iked *env, struct iked_message *msg,
 }
 
 int
-ca_setreq(struct iked *env, struct iked_sa *sh,
-    struct iked_static_id *localid, u_int8_t type, u_int8_t *data,
-    size_t len, enum privsep_procid procid)
+ca_setreq(struct iked *env, struct iked_sa *sh, struct iked_static_id *localid,
+    u_int8_t type, u_int8_t more, u_int8_t *data, size_t len,
+    enum privsep_procid procid)
 {
 	return (0);
 }
@@ -189,4 +195,9 @@ ikev2_msg_decrypt(struct iked *env, struct iked_sa *sa,
 	 */
 	ibuf_free(src);	
 	return (NULL);
+}
+
+void
+ikev2_ike_sa_setreason(struct iked_sa *sa, char *r)
+{
 }

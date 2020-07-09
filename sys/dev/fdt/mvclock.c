@@ -1,4 +1,4 @@
-/*	$OpenBSD: mvclock.c,v 1.3 2019/04/30 20:00:25 patrick Exp $	*/
+/*	$OpenBSD: mvclock.c,v 1.7 2020/05/22 10:06:59 patrick Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -65,7 +65,6 @@ uint32_t a3700_periph_nb_get_frequency(void *, uint32_t *);
 void	 a3700_periph_sb_enable(void *, uint32_t *, int);
 uint32_t a3700_periph_sb_get_frequency(void *, uint32_t *);
 uint32_t a3700_tbg_get_frequency(void *, uint32_t *);
-uint32_t a3700_xtal_get_frequency(void *, uint32_t *);
 
 int
 mvclock_match(struct device *parent, void *match, void *aux)
@@ -114,8 +113,6 @@ mvclock_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_cd.cd_get_frequency = a3700_periph_sb_get_frequency;
 	} else if (OF_is_compatible(node, "marvell,armada-3700-tbg-clock")) {
 		sc->sc_cd.cd_get_frequency = a3700_tbg_get_frequency;
-	} else if (OF_is_compatible(node, "marvell,armada-3700-xtal-clock")) {
-		sc->sc_cd.cd_get_frequency = a3700_xtal_get_frequency;
 	}
 	clock_register(&sc->sc_cd);
 }
@@ -247,6 +244,10 @@ cp110_enable(void *cookie, uint32_t *cells, int on)
 /* Armada 3700 Periph block */
 
 #define PERIPH_NB_MMC			0x0
+#define PERIPH_NB_SQF			0x7
+#define PERIPH_NB_I2C2			0x9
+#define PERIPH_NB_I2C1			0xa
+#define PERIPH_NB_CPU			0x10
 #define PERIPH_SB_GBE1_CORE		0x7
 #define PERIPH_SB_GBE0_CORE		0x8
 #define PERIPH_SB_USB32_USB2_SYS	0xb
@@ -263,6 +264,7 @@ cp110_enable(void *cookie, uint32_t *cells, int on)
 
 void	 a3700_periph_enable(struct mvclock_softc *, uint32_t, int);
 uint32_t a3700_periph_tbg_get_frequency(struct mvclock_softc *, uint32_t);
+uint32_t a3700_periph_get_div(struct mvclock_softc *, uint32_t, uint32_t);
 uint32_t a3700_periph_get_double_div(struct mvclock_softc *, uint32_t,
 	   uint32_t, uint32_t);
 
@@ -275,6 +277,12 @@ a3700_periph_nb_enable(void *cookie, uint32_t *cells, int on)
 	switch (idx) {
 	case PERIPH_NB_MMC:
 		return a3700_periph_enable(sc, 2, on);
+	case PERIPH_NB_SQF:
+		return a3700_periph_enable(sc, 12, on);
+	case PERIPH_NB_I2C2:
+		return a3700_periph_enable(sc, 16, on);
+	case PERIPH_NB_I2C1:
+		return a3700_periph_enable(sc, 17, on);
 	default:
 		break;
 	}
@@ -294,6 +302,15 @@ a3700_periph_nb_get_frequency(void *cookie, uint32_t *cells)
 		freq = a3700_periph_tbg_get_frequency(sc, 0);
 		freq /= a3700_periph_get_double_div(sc,
 		    PERIPH_DIV_SEL2, 16, 13);
+		return freq;
+	case PERIPH_NB_SQF:
+		freq = a3700_periph_tbg_get_frequency(sc, 12);
+		freq /= a3700_periph_get_double_div(sc,
+		    PERIPH_DIV_SEL1, 27, 24);
+		return freq;
+	case PERIPH_NB_CPU:
+		freq = a3700_periph_tbg_get_frequency(sc, 22);
+		freq /= a3700_periph_get_div(sc, PERIPH_DIV_SEL0, 28);
 		return freq;
 	default:
 		break;
@@ -356,6 +373,13 @@ a3700_periph_tbg_get_frequency(struct mvclock_softc *sc, uint32_t idx)
 	reg &= PERIPH_TBG_SEL_MASK;
 
 	return clock_get_frequency_idx(sc->sc_cd.cd_node, reg);
+}
+
+uint32_t
+a3700_periph_get_div(struct mvclock_softc *sc, uint32_t off, uint32_t idx)
+{
+	uint32_t reg = HREAD4(sc, off);
+	return ((reg >> idx) & PERIPH_DIV_SEL_MASK);
 }
 
 uint32_t
@@ -444,24 +468,4 @@ a3700_tbg_get_frequency(void *cookie, uint32_t *cells)
 
 	freq = clock_get_frequency(sc->sc_cd.cd_node, NULL);
 	return (freq * mult) / div;
-}
-
-/* Armada 3700 XTAL block */
-
-#define XTAL			0xc
-#define  XTAL_MODE			(1 << 31)
-
-uint32_t
-a3700_xtal_get_frequency(void *cookie, uint32_t *cells)
-{
-	struct mvclock_softc *sc = cookie;
-	struct regmap *rm;
-
-	rm = regmap_bynode(OF_parent(sc->sc_cd.cd_node));
-	KASSERT(rm != NULL);
-
-	if (regmap_read_4(rm, XTAL) & XTAL_MODE)
-		return 40000000;
-	else
-		return 25000000;
 }

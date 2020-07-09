@@ -1,4 +1,4 @@
-/* $OpenBSD: softraid_raid5.c,v 1.28 2019/05/11 20:31:53 krw Exp $ */
+/* $OpenBSD: softraid_raid5.c,v 1.30 2020/03/26 11:28:23 tobhe Exp $ */
 /*
  * Copyright (c) 2014 Joel Sing <jsing@openbsd.org>
  * Copyright (c) 2009 Marco Peereboom <marco@peereboom.us>
@@ -819,6 +819,8 @@ sr_raid5_rebuild(struct sr_discipline *sd)
 		wu_r = sr_scsi_wu_get(sd, 0);
 
 		xorbuf = sr_block_get(sd, strip_size);
+		if (xorbuf == NULL)
+			goto bad;
 		if (sr_raid5_regenerate(wu_r, rebuild_chunk, chunk_lba,
 		    strip_size, xorbuf))
 			goto bad;
@@ -852,7 +854,7 @@ sr_raid5_rebuild(struct sr_discipline *sd)
 
 		slept = 0;
 		while ((wu_w->swu_flags & SR_WUF_REBUILDIOCOMP) == 0) {
-			tsleep(wu_w, PRIBIO, "sr_rebuild", 0);
+			tsleep_nsec(wu_w, PRIBIO, "sr_rebuild", INFSLP);
 			slept = 1;
 		}
 		if (!slept)
@@ -945,7 +947,7 @@ sr_raid5_scrub(struct sr_discipline *sd)
 
 		slept = 0;
 		while ((wu_w->swu_flags & SR_WUF_REBUILDIOCOMP) == 0) {
-			tsleep(wu_w, PRIBIO, "sr_scrub", 0);
+			tsleep_nsec(wu_w, PRIBIO, "sr_scrub", INFSLP);
 			slept = 1;
 		}
 		if (!slept)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ldpe.c,v 1.75 2019/01/23 02:02:04 dlg Exp $ */
+/*	$OpenBSD: ldpe.c,v 1.77 2020/06/22 15:09:34 mestre Exp $ */
 
 /*
  * Copyright (c) 2013, 2016 Renato Westphal <renato@openbsd.org>
@@ -107,7 +107,7 @@ ldpe(int debug, int verbose, char *sockname)
 	    setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid))
 		fatal("can't drop privileges");
 
-	if (pledge("stdio cpath inet mcast recvfd", NULL) == -1)
+	if (pledge("stdio inet mcast recvfd", NULL) == -1)
 		fatal("pledge");
 
 	event_init();
@@ -171,7 +171,7 @@ ldpe_shutdown(void)
 	msgbuf_clear(&iev_main->ibuf.w);
 	close(iev_main->ibuf.fd);
 
-	control_cleanup(global.csock);
+	control_cleanup();
 	config_clear(leconf);
 
 	if (sysdep.no_pfkey == 0) {

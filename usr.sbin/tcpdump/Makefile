@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.63 2018/02/03 13:39:48 mpi Exp $
+#	$OpenBSD: Makefile,v 1.66 2020/06/21 05:00:17 dlg Exp $
 #
 #  Copyright (c) 1988, 1989, 1990, 1991, 1992, 1993, 1994
 # 	The Regents of the University of California.  All rights reserved.
@@ -42,13 +42,13 @@ SRCS=	tcpdump.c addrtoname.c privsep.c privsep_fdpass.c privsep_pcap.c \
 	print-vrrp.c print-wb.c print-decnet.c print-isoclns.c print-ipx.c \
 	print-atm.c print-dvmrp.c print-krb.c print-pim.c print-netbios.c \
 	util.c bpf_dump.c parsenfsfh.c version.c print-igrp.c \
-	print-gre.c print-radius.c print-enc.c print-cnfp.c \
+	print-gre.c print-nsh.c print-radius.c print-enc.c print-cnfp.c \
 	print-ipsec.c print-ike.c print-raw.c print-l2tp.c print-mobile.c \
 	print-ip6.c print-ip6opts.c print-icmp6.c print-dhcp6.c print-frag6.c \
 	print-bgp.c print-ospf6.c print-ripng.c print-rt6.c print-stp.c \
 	print-etherip.c print-lwres.c print-lldp.c print-cdp.c print-pflog.c \
 	print-pfsync.c pf_print_state.c print-ofp.c ofp_map.c \
-	print-udpencap.c print-carp.c \
+	print-udpencap.c print-carp.c print-nhrp.c print-wg.c \
 	print-802_11.c print-iapp.c print-mpls.c print-slow.c print-usbpcap.c \
 	gmt2local.c savestr.c setsignal.c in_cksum.c
 

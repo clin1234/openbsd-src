@@ -1,4 +1,4 @@
-/*	$OpenBSD: ufs_vnops.c,v 1.143 2018/12/23 10:46:51 natano Exp $	*/
+/*	$OpenBSD: ufs_vnops.c,v 1.152 2020/06/11 09:18:43 mpi Exp $	*/
 /*	$NetBSD: ufs_vnops.c,v 1.18 1996/05/11 18:28:04 mycroft Exp $	*/
 
 /*
@@ -72,8 +72,8 @@
 
 #include <uvm/uvm_extern.h>
 
-int ufs_chmod(struct vnode *, int, struct ucred *, struct proc *);
-int ufs_chown(struct vnode *, uid_t, gid_t, struct ucred *, struct proc *);
+int ufs_chmod(struct vnode *, int, struct ucred *);
+int ufs_chown(struct vnode *, uid_t, gid_t, struct ucred *);
 int filt_ufsread(struct knote *, long);
 int filt_ufswrite(struct knote *, long);
 int filt_ufsvnode(struct knote *, long);
@@ -339,7 +339,6 @@ ufs_setattr(void *v)
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
 	struct ucred *cred = ap->a_cred;
-	struct proc *p = ap->a_p;
 	int error;
 	long hint = NOTE_ATTRIB;
 	u_quad_t oldsize;
@@ -384,7 +383,7 @@ ufs_setattr(void *v)
 	if (vap->va_uid != (uid_t)VNOVAL || vap->va_gid != (gid_t)VNOVAL) {
 		if (vp->v_mount->mnt_flag & MNT_RDONLY)
 			return (EROFS);
-		error = ufs_chown(vp, vap->va_uid, vap->va_gid, cred, p);
+		error = ufs_chown(vp, vap->va_uid, vap->va_gid, cred);
 		if (error)
 			return (error);
 	}
@@ -420,7 +419,7 @@ ufs_setattr(void *v)
 		    !vnoperm(vp) &&
 		    (error = suser_ucred(cred)) &&
 		    ((vap->va_vaflags & VA_UTIMES_NULL) == 0 || 
-		    (error = VOP_ACCESS(vp, VWRITE, cred, p))))
+		    (error = VOP_ACCESS(vp, VWRITE, cred, ap->a_p))))
 			return (error);
 		if (vap->va_mtime.tv_nsec != VNOVAL)
 			ip->i_flag |= IN_CHANGE | IN_UPDATE;
@@ -448,7 +447,7 @@ ufs_setattr(void *v)
 	if (vap->va_mode != (mode_t)VNOVAL) {
 		if (vp->v_mount->mnt_flag & MNT_RDONLY)
 			return (EROFS);
-		error = ufs_chmod(vp, (int)vap->va_mode, cred, p);
+		error = ufs_chmod(vp, (int)vap->va_mode, cred);
 	}
 	VN_KNOTE(vp, hint);
 	return (error);
@@ -459,7 +458,7 @@ ufs_setattr(void *v)
  * Inode must be locked before calling.
  */
 int
-ufs_chmod(struct vnode *vp, int mode, struct ucred *cred, struct proc *p)
+ufs_chmod(struct vnode *vp, int mode, struct ucred *cred)
 {
 	struct inode *ip = VTOI(vp);
 	int error;
@@ -487,8 +486,7 @@ ufs_chmod(struct vnode *vp, int mode, struct ucred *cred, struct proc *p)
  * inode must be locked prior to call.
  */
 int
-ufs_chown(struct vnode *vp, uid_t uid, gid_t gid, struct ucred *cred,
-    struct proc *p)
+ufs_chown(struct vnode *vp, uid_t uid, gid_t gid, struct ucred *cred)
 {
 	struct inode *ip = VTOI(vp);
 	uid_t ouid;
@@ -1892,12 +1890,26 @@ bad:
 	return (error);
 }
 
-struct filterops ufsread_filtops = 
-	{ 1, NULL, filt_ufsdetach, filt_ufsread };
-struct filterops ufswrite_filtops = 
-	{ 1, NULL, filt_ufsdetach, filt_ufswrite };
-struct filterops ufsvnode_filtops = 
-	{ 1, NULL, filt_ufsdetach, filt_ufsvnode };
+const struct filterops ufsread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_ufsdetach,
+	.f_event	= filt_ufsread,
+};
+
+const struct filterops ufswrite_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_ufsdetach,
+	.f_event	= filt_ufswrite,
+};
+
+const struct filterops ufsvnode_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_ufsdetach,
+	.f_event	= filt_ufsvnode,
+};
 
 int
 ufs_kqfilter(void *v)
@@ -1922,7 +1934,7 @@ ufs_kqfilter(void *v)
 
 	kn->kn_hook = (caddr_t)vp;
 
-	SLIST_INSERT_HEAD(&vp->v_selectinfo.si_note, kn, kn_selnext);
+	klist_insert(&vp->v_selectinfo.si_note, kn);
 
 	return (0);
 }
@@ -1932,7 +1944,7 @@ filt_ufsdetach(struct knote *kn)
 {
 	struct vnode *vp = (struct vnode *)kn->kn_hook;
 
-	SLIST_REMOVE(&vp->v_selectinfo.si_note, kn, knote, kn_selnext);
+	klist_remove(&vp->v_selectinfo.si_note, kn);
 }
 
 int
@@ -1952,14 +1964,17 @@ filt_ufsread(struct knote *kn, long hint)
 
 #ifdef EXT2FS
 	if (IS_EXT2_VNODE(ip->i_vnode))
-		kn->kn_data = ext2fs_size(ip) - kn->kn_fp->f_offset;
+		kn->kn_data = ext2fs_size(ip) - foffset(kn->kn_fp);
 	else
 #endif
-		kn->kn_data = DIP(ip, size) - kn->kn_fp->f_offset;
+		kn->kn_data = DIP(ip, size) - foffset(kn->kn_fp);
 	if (kn->kn_data == 0 && kn->kn_sfflags & NOTE_EOF) {
 		kn->kn_fflags |= NOTE_EOF;
 		return (1);
 	}
+
+	if (kn->kn_flags & __EV_POLL)
+		return (1);
 
 	return (kn->kn_data != 0);
 }

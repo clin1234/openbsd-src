@@ -1,4 +1,4 @@
-/*	$OpenBSD: uaccess.h,v 1.1 2019/04/14 10:14:53 jsg Exp $	*/
+/*	$OpenBSD: uaccess.h,v 1.3 2020/06/08 04:48:15 jsg Exp $	*/
 /*
  * Copyright (c) 2015 Mark Kettenis
  *
@@ -21,9 +21,6 @@
 #include <sys/types.h>
 #include <sys/systm.h>
 #include <linux/sched.h>
-
-#define user_access_begin()
-#define user_access_end()
 
 static inline unsigned long
 __copy_to_user(void *to, const void *from, unsigned len)
@@ -70,25 +67,28 @@ copy_from_user(void *to, const void *from, unsigned len)
 #define VERIFY_READ     0x1
 #define VERIFY_WRITE    0x2
 static inline int
-access_ok(int type, const void *addr, unsigned long size)
+access_ok(const void *addr, unsigned long size)
 {
-	return true;
+	return 1;
 }
+
+#define user_access_begin(addr, size)	access_ok(addr, size)
+#define user_access_end()
 
 #if defined(__i386__) || defined(__amd64__)
 
 static inline void
 pagefault_disable(void)
 {
-	KASSERT(curcpu()->ci_inatomic == 0);
-	curcpu()->ci_inatomic = 1;
+	curcpu()->ci_inatomic++;
+	KASSERT(curcpu()->ci_inatomic > 0);
 }
 
 static inline void
 pagefault_enable(void)
 {
-	KASSERT(curcpu()->ci_inatomic == 1);
-	curcpu()->ci_inatomic = 0;
+	KASSERT(curcpu()->ci_inatomic > 0);
+	curcpu()->ci_inatomic--;
 }
 
 static inline int

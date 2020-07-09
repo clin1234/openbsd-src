@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_urtwn.c,v 1.83 2019/03/11 06:19:33 kevlo Exp $	*/
+/*	$OpenBSD: if_urtwn.c,v 1.92 2020/07/06 10:38:54 jsg Exp $	*/
 
 /*-
  * Copyright (c) 2010 Damien Bergamini <damien.bergamini@free.fr>
@@ -255,7 +255,6 @@ static const struct urtwn_type {
 	URTWN_DEV_8192CU(BELKIN,	RTL8188CUS),
 	URTWN_DEV_8192CU(BELKIN,	RTL8192CU),
 	URTWN_DEV_8192CU(BELKIN,	RTL8192CU_1),
-	URTWN_DEV_8192CU(BELKIN,	RTL8192CU_2),
 	URTWN_DEV_8192CU(CHICONY,	RTL8188CUS_1),
 	URTWN_DEV_8192CU(CHICONY,	RTL8188CUS_2),
 	URTWN_DEV_8192CU(CHICONY,	RTL8188CUS_3),
@@ -283,7 +282,7 @@ static const struct urtwn_type {
 	URTWN_DEV_8192CU(IODATA,	RTL8192CU),
 	URTWN_DEV_8192CU(NETGEAR,	N300MA),
 	URTWN_DEV_8192CU(NETGEAR,	WNA1000M),
-	URTWN_DEV_8192CU(NETGEAR,	WNA1000Mv2),
+	URTWN_DEV_8192CU(NETGEAR,	WNA1000MV2),
 	URTWN_DEV_8192CU(NETGEAR,	RTL8192CU),
 	URTWN_DEV_8192CU(NETGEAR4,	RTL8188CU),
 	URTWN_DEV_8192CU(NETWEEN,	RTL8192CU),
@@ -323,6 +322,7 @@ static const struct urtwn_type {
 	URTWN_DEV_8192CU(ZYXEL,		RTL8192CU),
 	/* URTWN_RTL8188E */
 	URTWN_DEV_8188EU(ABOCOM,	RTL8188EU),
+	URTWN_DEV_8188EU(DLINK,		DWA121B1),
 	URTWN_DEV_8188EU(DLINK,		DWA123D1),
 	URTWN_DEV_8188EU(DLINK,		DWA125D1),
 	URTWN_DEV_8188EU(ELECOM,	WDC150SU2M),
@@ -332,7 +332,9 @@ static const struct urtwn_type {
 	/* URTWN_RTL8192EU */
 	URTWN_DEV_8192EU(DLINK,		DWA131E1),
 	URTWN_DEV_8192EU(REALTEK,	RTL8192EU),
-	URTWN_DEV_8192EU(TPLINK,	RTL8192EU)
+	URTWN_DEV_8192EU(TPLINK,	RTL8192EU),
+	URTWN_DEV_8192EU(TPLINK,	RTL8192EU_2),
+	URTWN_DEV_8192EU(TPLINK,	RTL8192EU_3)
 };
 
 #define urtwn_lookup(v, p)	\
@@ -380,7 +382,8 @@ void		urtwn_set_key_cb(struct urtwn_softc *, void *);
 void		urtwn_delete_key(struct ieee80211com *,
 		    struct ieee80211_node *, struct ieee80211_key *);
 void		urtwn_delete_key_cb(struct urtwn_softc *, void *);
-void		urtwn_rx_frame(struct urtwn_softc *, uint8_t *, int);
+void		urtwn_rx_frame(struct urtwn_softc *, uint8_t *, int,
+		    struct mbuf_list *);
 void		urtwn_rxeof(struct usbd_xfer *, void *,
 		    usbd_status);
 void		urtwn_txeof(struct usbd_xfer *, void *,
@@ -488,10 +491,8 @@ urtwn_attach(struct device *parent, struct device *self, void *aux)
 
 	ic->ic_updateslot = urtwn_updateslot;
 	ic->ic_updateedca = urtwn_updateedca;
-#ifdef notyet
 	ic->ic_set_key = urtwn_set_key;
 	ic->ic_delete_key = urtwn_delete_key;
-#endif
 	/* Override state transition machine. */
 	ic->ic_newstate = urtwn_newstate;
 
@@ -1033,6 +1034,10 @@ urtwn_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
 	struct urtwn_softc *sc = (struct urtwn_softc *)self;
 	struct urtwn_cmd_key cmd;
 
+	/* Only handle keys for CCMP */
+	if (k->k_cipher != IEEE80211_CIPHER_CCMP)
+		return ieee80211_set_key(ic, ni, k);
+
 	/* Defer setting of WEP keys until interface is brought up. */
 	if ((ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) !=
 	    (IFF_UP | IFF_RUNNING))
@@ -1063,6 +1068,12 @@ urtwn_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
 	struct urtwn_softc *sc = (struct urtwn_softc *)self;
 	struct urtwn_cmd_key cmd;
 
+	/* Only handle keys for CCMP */
+	if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
+		ieee80211_delete_key(ic, ni, k);
+		return;
+	}
+
 	if (!(ic->ic_if.if_flags & IFF_RUNNING) ||
 	    ic->ic_state != IEEE80211_S_RUN)
 		return;	/* Nothing to do. */
@@ -1082,8 +1093,55 @@ urtwn_delete_key_cb(struct urtwn_softc *sc, void *arg)
 	rtwn_delete_key(ic, cmd->ni, &cmd->key);
 }
 
+int
+urtwn_ccmp_decap(struct urtwn_softc *sc, struct mbuf *m,
+    struct ieee80211_node *ni)
+{
+	struct ieee80211com *ic = &sc->sc_sc.sc_ic;
+	struct ieee80211_key *k;
+	struct ieee80211_frame *wh;
+	uint64_t pn, *prsc;
+	uint8_t *ivp;
+	uint8_t tid;
+	int hdrlen, hasqos;
+
+	k = ieee80211_get_rxkey(ic, m, ni);
+	if (k == NULL)
+		return 1;
+
+	wh = mtod(m, struct ieee80211_frame *);
+	hdrlen = ieee80211_get_hdrlen(wh);
+	ivp = (uint8_t *)wh + hdrlen;
+
+	/* Check that ExtIV bit is set. */
+	if (!(ivp[3] & IEEE80211_WEP_EXTIV))
+		return 1;
+
+	hasqos = ieee80211_has_qos(wh);
+	tid = hasqos ? ieee80211_get_qos(wh) & IEEE80211_QOS_TID : 0;
+	prsc = &k->k_rsc[tid];
+
+	/* Extract the 48-bit PN from the CCMP header. */
+	pn = (uint64_t)ivp[0]       |
+	     (uint64_t)ivp[1] <<  8 |
+	     (uint64_t)ivp[4] << 16 |
+	     (uint64_t)ivp[5] << 24 |
+	     (uint64_t)ivp[6] << 32 |
+	     (uint64_t)ivp[7] << 40;
+	if (pn <= *prsc) {
+		ic->ic_stats.is_ccmp_replays++;
+		return 1;
+	}
+	/* Last seen packet number is updated in ieee80211_inputm(). */
+
+	/* Strip MIC. IV will be stripped by ieee80211_inputm(). */
+	m_adj(m, -IEEE80211_CCMP_MICLEN);
+	return 0;
+}
+
 void
-urtwn_rx_frame(struct urtwn_softc *sc, uint8_t *buf, int pktlen)
+urtwn_rx_frame(struct urtwn_softc *sc, uint8_t *buf, int pktlen,
+    struct mbuf_list *ml)
 {
 	struct ieee80211com *ic = &sc->sc_sc.sc_ic;
 	struct ifnet *ifp = &ic->ic_if;
@@ -1194,7 +1252,22 @@ urtwn_rx_frame(struct urtwn_softc *sc, uint8_t *buf, int pktlen)
 	rxi.rxi_flags = 0;
 	rxi.rxi_rssi = rssi;
 	rxi.rxi_tstamp = 0;	/* Unused. */
-	ieee80211_input(ifp, m, ni, &rxi);
+
+	/* Handle hardware decryption. */
+	if (((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_CTL)
+	    && (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) &&
+	    (ni->ni_flags & IEEE80211_NODE_RXPROT) &&
+	    ni->ni_pairwise_key.k_cipher == IEEE80211_CIPHER_CCMP) {
+		if (urtwn_ccmp_decap(sc, m, ni) != 0) {
+			ifp->if_ierrors++;
+			m_freem(m);
+			ieee80211_release_node(ic, ni);
+			return;
+		}
+		rxi.rxi_flags |= IEEE80211_RXI_HWDEC;
+	}
+
+	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 	/* Node is no longer needed. */
 	ieee80211_release_node(ic, ni);
 	splx(s);
@@ -1204,8 +1277,10 @@ void
 urtwn_rxeof(struct usbd_xfer *xfer, void *priv,
     usbd_status status)
 {
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
 	struct urtwn_rx_data *data = priv;
 	struct urtwn_softc *sc = data->sc;
+	struct ieee80211com *ic = &sc->sc_sc.sc_ic;
 	struct r92c_rx_desc_usb *rxd;
 	uint32_t rxdw0;
 	uint8_t *buf;
@@ -1298,13 +1373,14 @@ urtwn_rxeof(struct usbd_xfer *xfer, void *priv,
 			break;
 
 		/* Process 802.11 frame. */
-		urtwn_rx_frame(sc, buf, pktlen);
+		urtwn_rx_frame(sc, buf, pktlen, &ml);
 
 		/* Handle chunk alignment. */
 		totlen = (totlen + align) & ~align;
 		buf += totlen;
 		len -= totlen;
 	}
+	if_input(&ic->ic_if, &ml);
 
  resubmit:
 	/* Setup a new transfer. */
@@ -1354,37 +1430,28 @@ urtwn_tx_fill_desc(struct urtwn_softc *sc, uint8_t **txdp, struct mbuf *m,
 	struct r92c_tx_desc_usb *txd;
 	struct ieee80211com *ic = &sc->sc_sc.sc_ic;
 	uint8_t raid, type;
+	uint32_t pktlen;
 
 	txd = (struct r92c_tx_desc_usb *)*txdp;
 	(*txdp) += sizeof(*txd);
 	memset(txd, 0, sizeof(*txd));
 
+	pktlen = m->m_pkthdr.len;
+	if (k != NULL && k->k_cipher == IEEE80211_CIPHER_CCMP) {
+		txd->txdw1 |= htole32(SM(R92C_TXDW1_CIPHER,
+		    R92C_TXDW1_CIPHER_AES));
+		pktlen += IEEE80211_CCMP_HDRLEN;
+	}
+
 	type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
 
 	txd->txdw0 |= htole32(
-	    SM(R92C_TXDW0_PKTLEN, m->m_pkthdr.len) |
+	    SM(R92C_TXDW0_PKTLEN, pktlen) |
 	    SM(R92C_TXDW0_OFFSET, sizeof(*txd)) |
 	    R92C_TXDW0_OWN | R92C_TXDW0_FSG | R92C_TXDW0_LSG);
 	if (IEEE80211_IS_MULTICAST(wh->i_addr1))
 		txd->txdw0 |= htole32(R92C_TXDW0_BMCAST);
 
-#ifdef notyet
-	if (k != NULL) {
-		switch (k->k_cipher) {
-		case IEEE80211_CIPHER_WEP40:
-		case IEEE80211_CIPHER_WEP104:
-		case IEEE80211_CIPHER_TKIP:
-			cipher = R92C_TXDW1_CIPHER_RC4;
-			break;
-		case IEEE80211_CIPHER_CCMP:
-			cipher = R92C_TXDW1_CIPHER_AES;
-			break;
-		default:
-			cipher = R92C_TXDW1_CIPHER_NONE;
-		}
-		txd->txdw1 |= htole32(SM(R92C_TXDW1_CIPHER, cipher));
-	}
-#endif
 	if (!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
 	    type == IEEE80211_FC0_TYPE_DATA) {
 		if (ic->ic_curmode == IEEE80211_MODE_11B ||
@@ -1407,7 +1474,7 @@ urtwn_tx_fill_desc(struct urtwn_softc *sc, uint8_t **txdp, struct mbuf *m,
 			    SM(R92C_TXDW1_RAID, raid) | R92C_TXDW1_AGGBK);
 		}
 
-		if (m->m_pkthdr.len + IEEE80211_CRC_LEN > ic->ic_rtsthreshold) {
+		if (pktlen + IEEE80211_CRC_LEN > ic->ic_rtsthreshold) {
 			txd->txdw4 |= htole32(R92C_TXDW4_RTSEN |
 			    R92C_TXDW4_HWRTSEN);
 		} else if (ic->ic_flags & IEEE80211_F_USEPROT) {
@@ -1462,6 +1529,7 @@ urtwn_tx_fill_desc_gen2(struct urtwn_softc *sc, uint8_t **txdp, struct mbuf *m,
 	struct r92e_tx_desc_usb *txd;
 	struct ieee80211com *ic = &sc->sc_sc.sc_ic;
 	uint8_t raid, type;
+	uint32_t pktlen;
 
 	txd = (struct r92e_tx_desc_usb *)*txdp;
 	(*txdp) += sizeof(*txd);
@@ -1469,16 +1537,19 @@ urtwn_tx_fill_desc_gen2(struct urtwn_softc *sc, uint8_t **txdp, struct mbuf *m,
 
 	type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
 
+	pktlen = m->m_pkthdr.len;
+	if (k != NULL && k->k_cipher == IEEE80211_CIPHER_CCMP) {
+		txd->txdw1 |= htole32(SM(R92C_TXDW1_CIPHER,
+		    R92C_TXDW1_CIPHER_AES));
+		pktlen += IEEE80211_CCMP_HDRLEN;
+	}
+
 	txd->txdw0 |= htole32(
-	    SM(R92C_TXDW0_PKTLEN, m->m_pkthdr.len) |
+	    SM(R92C_TXDW0_PKTLEN, pktlen) |
 	    SM(R92C_TXDW0_OFFSET, sizeof(*txd)) |
 	    R92C_TXDW0_OWN | R92C_TXDW0_FSG | R92C_TXDW0_LSG);
 	if (IEEE80211_IS_MULTICAST(wh->i_addr1))
 		txd->txdw0 |= htole32(R92C_TXDW0_BMCAST);
-
-#ifdef notyet
-	/* cipher */
-#endif
 
 	if (!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
 	    type == IEEE80211_FC0_TYPE_DATA) {
@@ -1494,7 +1565,7 @@ urtwn_tx_fill_desc_gen2(struct urtwn_softc *sc, uint8_t **txdp, struct mbuf *m,
 		/* Request TX status report for AMRR */
 		txd->txdw2 |= htole32(R92C_TXDW2_CCX_RPT | R88E_TXDW2_AGGBK);
 
-		if (m->m_pkthdr.len + IEEE80211_CRC_LEN > ic->ic_rtsthreshold) {
+		if (pktlen + IEEE80211_CRC_LEN > ic->ic_rtsthreshold) {
 			txd->txdw4 |= htole32(R92C_TXDW4_RTSEN |
 			    R92C_TXDW4_HWRTSEN);
 		} else if (ic->ic_flags & IEEE80211_F_USEPROT) {
@@ -1543,16 +1614,18 @@ urtwn_tx(void *cookie, struct mbuf *m, struct ieee80211_node *ni)
 	struct usbd_pipe *pipe;
 	uint16_t qos, sum;
 	uint8_t tid, qid;
-	int i, xferlen, error;
+	int i, xferlen, error, headerlen;
 	uint8_t *txdp;
 
 	wh = mtod(m, struct ieee80211_frame *);
 
 	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
 		k = ieee80211_get_txkey(ic, wh, ni);
-		if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
-			return (ENOBUFS);
-		wh = mtod(m, struct ieee80211_frame *);
+		if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
+			if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
+				return (ENOBUFS);
+			wh = mtod(m, struct ieee80211_frame *);
+		}
 	}
 
 	if (ieee80211_has_qos(wh)) {
@@ -1605,9 +1678,32 @@ urtwn_tx(void *cookie, struct mbuf *m, struct ieee80211_node *ni)
 	}
 #endif
 
-	xferlen = (txdp - data->buf) + m->m_pkthdr.len;
-	m_copydata(m, 0, m->m_pkthdr.len, txdp);
-	m_freem(m);
+	if (k != NULL && k->k_cipher == IEEE80211_CIPHER_CCMP) {
+		xferlen = (txdp - data->buf) + m->m_pkthdr.len + 
+		    IEEE80211_CCMP_HDRLEN;
+		headerlen = ieee80211_get_hdrlen(wh);
+
+		m_copydata(m, 0, headerlen, txdp);
+		txdp += headerlen;
+
+		k->k_tsc++;
+		txdp[0] = k->k_tsc;
+		txdp[1] = k->k_tsc >> 8;
+		txdp[2] = 0;
+		txdp[3] = k->k_id | IEEE80211_WEP_EXTIV;
+		txdp[4] = k->k_tsc >> 16;
+		txdp[5] = k->k_tsc >> 24;
+		txdp[6] = k->k_tsc >> 32;
+		txdp[7] = k->k_tsc >> 40;
+		txdp += IEEE80211_CCMP_HDRLEN;
+
+		m_copydata(m, headerlen, m->m_pkthdr.len - headerlen, txdp);
+		m_freem(m);
+	} else {
+		xferlen = (txdp - data->buf) + m->m_pkthdr.len;
+		m_copydata(m, 0, m->m_pkthdr.len, txdp);
+		m_freem(m);
+	}
 
 	data->pipe = pipe;
 	usbd_setup_xfer(data->xfer, pipe, data, data->buf, xferlen,
@@ -1698,21 +1794,6 @@ urtwn_r92c_power_on(struct urtwn_softc *sc)
 	/* Release RF digital isolation. */
 	urtwn_write_2(sc, R92C_SYS_ISO_CTRL,
 	    urtwn_read_2(sc, R92C_SYS_ISO_CTRL) & ~R92C_SYS_ISO_CTRL_DIOR);
-
-	/* Initialize MAC. */
-	urtwn_write_1(sc, R92C_APSD_CTRL,
-	    urtwn_read_1(sc, R92C_APSD_CTRL) & ~R92C_APSD_CTRL_OFF);
-	for (ntries = 0; ntries < 200; ntries++) {
-		if (!(urtwn_read_1(sc, R92C_APSD_CTRL) &
-		    R92C_APSD_CTRL_OFF_STATUS))
-			break;
-		DELAY(5);
-	}
-	if (ntries == 200) {
-		printf("%s: timeout waiting for MAC initialization\n",
-		    sc->sc_dev.dv_xname);
-		return (ETIMEDOUT);
-	}
 
 	/* Enable MAC DMA/WMAC/SCHEDULE/SEC blocks. */
 	reg = urtwn_read_2(sc, R92C_CR);

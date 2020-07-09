@@ -1,4 +1,4 @@
-/*	$OpenBSD: session.h,v 1.137 2019/05/08 12:41:55 claudio Exp $ */
+/*	$OpenBSD: session.h,v 1.146 2020/05/10 13:38:46 deraadt Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -167,10 +167,14 @@ struct peer_stats {
 	unsigned long long	 prefix_sent_eor;
 	time_t			 last_updown;
 	time_t			 last_read;
+	time_t			 last_write;
 	u_int32_t		 prefix_cnt;
+	u_int32_t		 prefix_out_cnt;
 	u_int8_t		 last_sent_errcode;
 	u_int8_t		 last_sent_suberr;
-	char			 last_shutcomm[SHUT_COMM_LEN];
+	u_int8_t		 last_rcvd_errcode;
+	u_int8_t		 last_rcvd_suberr;
+	char			 last_reason[REASON_LEN];
 };
 
 enum Timer {
@@ -196,7 +200,7 @@ TAILQ_HEAD(peer_timer_head, peer_timer);
 struct peer {
 	struct peer_config	 conf;
 	struct peer_stats	 stats;
-	TAILQ_ENTRY(peer)	 entry;
+	RB_ENTRY(peer)		 entry;
 	struct {
 		struct capabilities	ann;
 		struct capabilities	peer;
@@ -210,6 +214,7 @@ struct peer {
 		u_int8_t		established;
 	}			 auth;
 	struct bgpd_addr	 local;
+	struct bgpd_addr	 local_alt;
 	struct bgpd_addr	 remote;
 	struct peer_timer_head	 timers;
 	struct msgbuf		 wbuf;
@@ -285,7 +290,9 @@ int	pfkey_remove(struct peer *);
 int	pfkey_init(void);
 int	tcp_md5_check(int, struct peer *);
 int	tcp_md5_set(int, struct peer *);
-int	tcp_md5_listen(int, struct peer_head *);
+int	tcp_md5_prep_listener(struct listen_addr *, struct peer_head *);
+void	tcp_md5_add_listener(struct bgpd_config *, struct peer *);
+void	tcp_md5_del_listener(struct bgpd_config *, struct peer *);
 
 /* printconf.c */
 void	print_config(struct bgpd_config *, struct rib_names *);
@@ -294,6 +301,8 @@ void	print_config(struct bgpd_config *, struct rib_names *);
 void	 rde_main(int, int);
 
 /* session.c */
+RB_PROTOTYPE(peer_head, peer, entry, peer_compare);
+
 void		 session_main(int, int);
 void		 bgp_fsm(struct peer *, enum session_events);
 int		 session_neighbor_rrefresh(struct peer *p);
@@ -306,10 +315,9 @@ int		 imsg_ctl_rde(int, pid_t, void *, u_int16_t);
 void		 session_stop(struct peer *, u_int8_t);
 
 /* timer.c */
-time_t			 getmonotime(void);
 struct peer_timer	*timer_get(struct peer *, enum Timer);
-struct peer_timer	*timer_nextisdue(struct peer *);
-time_t			 timer_nextduein(struct peer *);
+struct peer_timer	*timer_nextisdue(struct peer *, time_t);
+time_t			 timer_nextduein(struct peer *, time_t);
 int			 timer_running(struct peer *, enum Timer, time_t *);
 void			 timer_set(struct peer *, enum Timer, u_int);
 void			 timer_stop(struct peer *, enum Timer);

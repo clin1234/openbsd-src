@@ -1,4 +1,4 @@
-/* $OpenBSD: auixp.c,v 1.40 2018/09/03 05:37:32 miko Exp $ */
+/* $OpenBSD: auixp.c,v 1.43 2020/06/27 00:33:59 jsg Exp $ */
 /* $NetBSD: auixp.c,v 1.9 2005/06/27 21:13:09 thorpej Exp $ */
 
 /*
@@ -12,13 +12,6 @@
  *    notice, this list of conditions and the following disclaimer.
  * 2. The name of the author may not be used to endorse or promote products
  *    derived from this software without specific prior written permission.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *	This product includes software developed by the NetBSD
- *	Foundation, Inc. and its contributors.
- * 4. Neither the name of The NetBSD Foundation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
  * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
@@ -382,7 +375,7 @@ auixp_malloc(void *hdl, int direction, size_t size, int pool, int flags)
 	/* get us a dma buffer itself */
 	error = auixp_allocmem(sc, size, 16, dma);
 	if (error) {
-		free(dma, pool, 0);
+		free(dma, pool, sizeof(*dma));
 		printf("%s: auixp_malloc: not enough memory\n",
 		    sc->sc_dev.dv_xname);
 		return NULL;
@@ -415,7 +408,7 @@ auixp_free(void *hdl, void *addr, int pool)
 			SLIST_REMOVE(&sc->sc_dma_list, dma, auixp_dma,
 			    dma_chain);
 			auixp_freemem(sc, dma);
-			free(dma, pool, 0);
+			free(dma, pool, sizeof(*dma));
 			return;
 		}
 	}
@@ -537,7 +530,7 @@ auixp_allocate_dma_chain(struct auixp_softc *sc, struct auixp_dma **dmap)
 	if (error) {
 		printf("%s: can't malloc dma descriptor chain\n",
 		    sc->sc_dev.dv_xname);
-		free(dma, M_DEVBUF, 0);
+		free(dma, M_DEVBUF, sizeof(*dma));
 		return ENOMEM;
 	}
 
@@ -1044,14 +1037,6 @@ auixp_post_config(struct device *self)
 
 	audio_attach_mi(&auixp_hw_if, &sc->sc_codec, &sc->sc_dev);
 
-#if notyet
-	/* copy formats and invalidate entries not suitable for codec0 */
-	sc->has_4ch   = AC97_IS_4CH(sc->sc_codec.codec_if);
-	sc->has_6ch   = AC97_IS_6CH(sc->sc_codec.codec_if);
-	sc->is_fixed  = AC97_IS_FIXED_RATE(sc->sc_codec.codec_if);
-	sc->has_spdif = AC97_HAS_SPDIF(sc->sc_codec.codec_if);
-#endif
-
 	if (sc->has_spdif)
 		sc->has_spdif = 0;
 
@@ -1089,13 +1074,6 @@ auixp_enable_interrupts(struct auixp_softc *sc)
 	value = bus_space_read_4(iot, ioh, ATI_REG_IER);
 
 	value |= ATI_REG_IER_IO_STATUS_EN;
-#ifdef notyet
-	value |= ATI_REG_IER_IN_XRUN_EN;
-	value |= ATI_REG_IER_OUT_XRUN_EN;
-
-	value |= ATI_REG_IER_SPDIF_XRUN_EN;
-	value |= ATI_REG_IER_SPDF_STATUS_EN;
-#endif
 
 	bus_space_write_4(iot, ioh, ATI_REG_IER, value);
 }

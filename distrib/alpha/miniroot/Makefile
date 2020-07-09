@@ -1,6 +1,6 @@
-#	$OpenBSD: Makefile,v 1.14 2019/05/03 20:03:57 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.17 2020/05/18 06:20:43 otto Exp $
 
-FS=		miniroot${OSrev}.fs
+FS=		miniroot${OSrev}.img
 FSSIZE=		5760
 FSDISKTYPE=	fakeramdisk
 CDROM=		cd${OSrev}.iso
@@ -22,12 +22,12 @@ ${FS}: bsd.gz
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
 	vnconfig -v ${FS} > vnd
 	disklabel -w `cat vnd` ${FSDISKTYPE}
-	newfs -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
+	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
 	install -c -m 555 -o root -g wheel \
 	    ${DESTDIR}/usr/mdec/boot ${MOUNT_POINT}/boot
 	/usr/mdec/installboot -v \
-	    ${MOUNT_POINT}/boot ${DESTDRIR}/usr/mdec/bootxx `cat vnd`
+	    ${MOUNT_POINT}/boot ${DESTDIR}/usr/mdec/bootxx `cat vnd`
 	install -c -m 555 -o root -g wheel bsd.gz ${MOUNT_POINT}/bsd
 	df -i ${MOUNT_POINT}
 	umount ${MOUNT_POINT}

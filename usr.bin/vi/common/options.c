@@ -1,4 +1,4 @@
-/*	$OpenBSD: options.c,v 1.26 2017/07/31 19:45:49 martijn Exp $	*/
+/*	$OpenBSD: options.c,v 1.28 2020/04/30 10:40:21 millert Exp $	*/
 
 /*-
  * Copyright (c) 1991, 1993, 1994
@@ -69,6 +69,8 @@ OPTLIST const optlist[] = {
 	{"escapetime",	NULL,		OPT_NUM,	0},
 /* O_ERRORBELLS	    4BSD */
 	{"errorbells",	NULL,		OPT_0BOOL,	0},
+/* O_EXPANDTAB	    NetBSD 5.0 */
+	{"expandtab",	NULL,		OPT_0BOOL,	0},
 /* O_EXRC	System V (undocumented) */
 	{"exrc",	NULL,		OPT_0BOOL,	0},
 /* O_EXTENDED	  4.4BSD */
@@ -136,7 +138,7 @@ OPTLIST const optlist[] = {
 /* O_SECTIONS	    4BSD */
 	{"sections",	f_section,	OPT_STR,	0},
 /* O_SECURE	  4.4BSD */
-	{"secure",	NULL,		OPT_0BOOL,	OPT_NOUNSET},
+	{"secure",	f_secure,	OPT_0BOOL,	OPT_NOUNSET},
 /* O_SHELL	    4BSD */
 	{"shell",	NULL,		OPT_STR,	0},
 /* O_SHELLMETA	  4.4BSD */
@@ -207,6 +209,7 @@ static OABBREV const abbrev[] = {
 	{"co",		O_COLUMNS},		/*   4.4BSD */
 	{"eb",		O_ERRORBELLS},		/*     4BSD */
 	{"ed",		O_EDCOMPATIBLE},	/*     4BSD */
+	{"et",		O_EXPANDTAB},		/* NetBSD 5.0 */
 	{"ex",		O_EXRC},		/* System V (undocumented) */
 	{"ht",		O_HARDTABS},		/*     4BSD */
 	{"ic",		O_IGNORECASE},		/*     4BSD */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: arch.c,v 1.89 2017/07/24 12:07:46 espie Exp $ */
+/*	$OpenBSD: arch.c,v 1.91 2020/01/13 13:54:44 espie Exp $ */
 /*	$NetBSD: arch.c,v 1.17 1996/11/06 17:58:59 christos Exp $	*/
 
 /*
@@ -195,11 +195,10 @@ bool
 Arch_ParseArchive(const char **line, Lst nodes, SymTable *ctxt)
 {
 	bool result;
-	BUFFER expand;
+	static BUFFER expand;
 
-	Buf_Init(&expand, MAKE_BSIZE);
+	Buf_Reinit(&expand, MAKE_BSIZE);
 	result = parse_archive(&expand, line, nodes, ctxt);
-	Buf_Destroy(&expand);
 	return result;
 }
 
@@ -883,7 +882,7 @@ Arch_MemMTime(GNode *gn)
 
 		if (pgn->type & OP_ARCHV) {
 			/* If the parent is an archive specification and is
-			 * being made and its member's name matches the name of
+			 * being built and its member's name matches the name of
 			 * the node we were given, record the modification time
 			 * of the parent in the child. We keep searching its
 			 * parents in case some other parent requires this

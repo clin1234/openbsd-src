@@ -1,4 +1,4 @@
-/*	$OpenBSD: mixerctl.c,v 1.31 2018/08/08 19:35:47 mestre Exp $	*/
+/*	$OpenBSD: mixerctl.c,v 1.33 2020/04/04 08:43:08 ratchov Exp $	*/
 /*	$NetBSD: mixerctl.c,v 1.11 1998/04/27 16:55:23 augustss Exp $	*/
 
 /*
@@ -222,10 +222,10 @@ rdfield(int fd, struct field *p, char *q, int quiet, char *sep)
 		errx(1, "Invalid format.");
 	}
 
-	if (ioctl(fd, AUDIO_MIXER_WRITE, p->valp) < 0) {
+	if (ioctl(fd, AUDIO_MIXER_WRITE, p->valp) == -1) {
 		warn("AUDIO_MIXER_WRITE");
 	} else if (!quiet) {
-		if (ioctl(fd, AUDIO_MIXER_READ, p->valp) < 0) {
+		if (ioctl(fd, AUDIO_MIXER_READ, p->valp) == -1) {
 			warn("AUDIO_MIXER_READ");
 		} else {
 			if (sep) {
@@ -249,7 +249,7 @@ main(int argc, char **argv)
 	int ndev;
 
 	if ((file = getenv("MIXERDEVICE")) == 0 || *file == '\0')
-		file = "/dev/mixer";
+		file = "/dev/audioctl0";
 
 	while ((ch = getopt(argc, argv, "af:nqtvw")) != -1) {
 		switch (ch) {
@@ -284,23 +284,18 @@ main(int argc, char **argv)
 	if (argc == 0 && tflag == 0)
 		aflag = 1;
 
-	if (unveil(file, "rw") == -1)
+	if (unveil(file, "w") == -1)
 		err(1, "unveil");
-
-	if ((fd = open(file, O_RDWR)) == -1) {
-		if (unveil(file, "r") == -1)
-			err(1, "unveil");
-
-		if ((fd = open(file, O_RDONLY)) == -1)
-			err(1, "%s", file);
-	}
 
 	if (unveil(NULL, NULL) == -1)
 		err(1, "unveil");
 
+	if ((fd = open(file, O_WRONLY)) == -1)
+		err(1, "%s", file);
+
 	for (ndev = 0; ; ndev++) {
 		dinfo.index = ndev;
-		if (ioctl(fd, AUDIO_MIXER_DEVINFO, &dinfo) < 0)
+		if (ioctl(fd, AUDIO_MIXER_DEVINFO, &dinfo) == -1)
 			break;
 	}
 
@@ -315,7 +310,7 @@ main(int argc, char **argv)
 
 	for (i = 0; i < ndev; i++) {
 		infos[i].index = i;
-		if (ioctl(fd, AUDIO_MIXER_DEVINFO, &infos[i]) < 0) {
+		if (ioctl(fd, AUDIO_MIXER_DEVINFO, &infos[i]) == -1) {
 			ndev--;
 			i--;
 			continue;
@@ -333,9 +328,9 @@ main(int argc, char **argv)
 		values[i].type = infos[i].type;
 		if (infos[i].type != AUDIO_MIXER_CLASS) {
 			values[i].un.value.num_channels = 2;
-			if (ioctl(fd, AUDIO_MIXER_READ, &values[i]) < 0) {
+			if (ioctl(fd, AUDIO_MIXER_READ, &values[i]) == -1) {
 				values[i].un.value.num_channels = 1;
-				if (ioctl(fd, AUDIO_MIXER_READ, &values[i]) < 0)
+				if (ioctl(fd, AUDIO_MIXER_READ, &values[i]) == -1)
 					err(1, "AUDIO_MIXER_READ");
 			}
 		}

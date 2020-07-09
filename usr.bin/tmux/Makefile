@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.96 2019/05/10 18:04:06 nicm Exp $
+# $OpenBSD: Makefile,v 1.106 2020/05/16 16:30:59 nicm Exp $
 
 PROG=	tmux
 SRCS=	alerts.c \
@@ -32,12 +32,12 @@ SRCS=	alerts.c \
 	cmd-list-panes.c \
 	cmd-list-sessions.c \
 	cmd-list-windows.c \
-	cmd-list.c \
 	cmd-load-buffer.c \
 	cmd-lock-server.c \
 	cmd-move-window.c \
 	cmd-new-session.c \
 	cmd-new-window.c \
+	cmd-parse.y \
 	cmd-paste-buffer.c \
 	cmd-pipe-pane.c \
 	cmd-queue.c \
@@ -63,7 +63,6 @@ SRCS=	alerts.c \
 	cmd-show-options.c \
 	cmd-source-file.c \
 	cmd-split-window.c \
-	cmd-string.c \
 	cmd-swap-pane.c \
 	cmd-swap-window.c \
 	cmd-switch-client.c \
@@ -74,6 +73,7 @@ SRCS=	alerts.c \
 	control-notify.c \
 	control.c \
 	environ.c \
+	file.c \
 	format.c \
 	format-draw.c \
 	grid-view.c \
@@ -94,8 +94,10 @@ SRCS=	alerts.c \
 	options-table.c \
 	options.c \
 	paste.c \
+	popup.c \
 	proc.c \
 	procname.c \
+	regsub.c \
 	resize.c \
 	screen-redraw.c \
 	screen-write.c \
@@ -109,6 +111,7 @@ SRCS=	alerts.c \
 	style.c \
 	tmux.c \
 	tty-acs.c \
+	tty-features.c \
 	tty-keys.c \
 	tty-term.c \
 	tty.c \
@@ -117,17 +120,19 @@ SRCS=	alerts.c \
 	window-client.c \
 	window-clock.c \
 	window-copy.c \
+	window-customize.c \
 	window-tree.c \
 	window.c \
-	xmalloc.c \
-	xterm-keys.c
+	xmalloc.c
 
 CDIAGFLAGS+= -Wno-long-long -Wall -W -Wnested-externs -Wformat=2
 CDIAGFLAGS+= -Wmissing-prototypes -Wstrict-prototypes -Wmissing-declarations
 CDIAGFLAGS+= -Wwrite-strings -Wshadow -Wpointer-arith -Wsign-compare
 CDIAGFLAGS+= -Wundef -Wbad-function-cast -Winline -Wcast-align
 
-LDADD=  -lutil -lcurses -levent
-DPADD=  ${LIBUTIL} ${LIBCURSES} ${LIBEVENT}
+CFLAGS += -I${.CURDIR}
+
+LDADD=  -lutil -lcurses -levent -lm
+DPADD=  ${LIBUTIL} ${LIBCURSES} ${LIBEVENT} ${LIBM}
 
 .include <bsd.prog.mk>

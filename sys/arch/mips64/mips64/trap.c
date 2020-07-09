@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.136 2019/05/15 03:17:20 visa Exp $	*/
+/*	$OpenBSD: trap.c,v 1.145 2020/05/23 07:18:50 visa Exp $	*/
 
 /*
  * Copyright (c) 1988 University of Utah.
@@ -50,6 +50,7 @@
 #include <sys/kernel.h>
 #include <sys/signalvar.h>
 #include <sys/user.h>
+#include <sys/stacktrace.h>
 #include <sys/syscall.h>
 #include <sys/syscall_mi.h>
 #include <sys/buf.h>
@@ -158,6 +159,7 @@ ast(void)
 	 */
 	membar_enter();
 
+	refreshcreds(p);
 	atomic_inc_int(&uvmexp.softs);
 	mi_ast(p, ci->ci_want_resched);
 	userret(p);
@@ -260,31 +262,15 @@ trap(struct trapframe *trapframe)
 #endif
 
 	if (type & T_USER) {
-		vaddr_t sp;
-
 		refreshcreds(p);
-
-		sp = trapframe->sp;
-		if (p->p_vmspace->vm_map.serial != p->p_spserial ||
-		    p->p_spstart == 0 || sp < p->p_spstart ||
-		    sp >= p->p_spend) {
-			KERNEL_LOCK();
-			if (!uvm_map_check_stack_range(p, sp)) {
-				union sigval sv;
-
-				printf("trap [%s]%d/%d type %d: sp %lx not inside %lx-%lx\n",
-				    p->p_p->ps_comm, p->p_p->ps_pid, p->p_tid, type,
-				    sp, p->p_spstart, p->p_spend);
-
-				sv.sival_ptr = (void *)trapframe->pc;
-				trapsignal(p, SIGSEGV, 0, SEGV_ACCERR, sv);
-			}
-			KERNEL_UNLOCK();
-		}
+		if (!uvm_map_inentry(p, &p->p_spinentry, PROC_STACK(p),
+		    "[%s]%d/%d sp=%lx inside %lx-%lx: not MAP_STACK\n",
+		    uvm_map_inentry_sp, p->p_vmspace->vm_map.sserial))
+			goto out;
 	}
 
 	itsa(trapframe, ci, p, type);
-
+out:
 	if (type & T_USER)
 		userret(p);
 }
@@ -777,6 +763,14 @@ fault_common_no_miss:
 		    (instr & 0x001fffc0) == ((ZERO << 16) | (7 << 6))) {
 			signal = SIGFPE;
 			sicode = FPE_INTDIV;
+		} else if ((instr & 0xfc00003f) == 0x00000036 /* tne */ &&
+		    (instr & 0x0000ffc0) == (0x52 << 6)) {
+			KERNEL_LOCK();
+			log(LOG_ERR, "%s[%d]: retguard trap\n",
+			    p->p_p->ps_comm, p->p_p->ps_pid);
+			/* Send uncatchable SIGABRT for coredump */
+			sigexit(p, SIGABRT);
+			/* NOTREACHED */
 		} else {
 			signal = SIGEMT; /* Stuff it with something for now */
 			sicode = 0;
@@ -1491,7 +1485,7 @@ end:
 
 #ifdef DDB
 void
-db_save_stack_trace(struct db_stack_trace *st)
+stacktrace_save_at(struct stacktrace *st, unsigned int skip)
 {
 	extern char k_general[];
 	extern char u_general[];
@@ -1513,12 +1507,16 @@ db_save_stack_trace(struct db_stack_trace *st)
 	sp = (vaddr_t)__builtin_frame_address(0);
 
 	st->st_count = 0;
-	while (st->st_count < DB_STACK_TRACE_MAX && pc != 0) {
+	while (st->st_count < STACKTRACE_MAX && pc != 0) {
 		if (!VALID_ADDRESS(pc) || !VALID_ADDRESS(sp))
 			break;
 
-		if (!first)
-			st->st_pc[st->st_count++] = pc;
+		if (!first) {
+			if (skip == 0)
+				st->st_pc[st->st_count++] = pc;
+			else
+				skip--;
+		}
 		first = 0;
 
 		/* Determine the start address of the current subroutine. */
@@ -1528,8 +1526,9 @@ db_save_stack_trace(struct db_stack_trace *st)
 		db_symbol_values(sym, &name, NULL);
 		subr = pc - (vaddr_t)diff;
 
-		if (subr == (vaddr_t)k_general || subr == (vaddr_t)k_intr ||
-		    subr == (vaddr_t)u_general || subr == (vaddr_t)u_intr) {
+		if (subr == (vaddr_t)u_general || subr == (vaddr_t)u_intr)
+			break;
+		if (subr == (vaddr_t)k_general || subr == (vaddr_t)k_intr) {
 			tf = (struct trapframe *)*(register_t *)sp;
 			pc = tf->pc;
 			ra = tf->ra;
@@ -1545,8 +1544,7 @@ db_save_stack_trace(struct db_stack_trace *st)
 		framesize = 0;
 		for (va = subr; va < pc && !done; va += 4) {
 			inst.word = kdbpeek(va);
-			if (inst_branch(inst.word) || inst_call(inst.word) ||
-			    inst_return(inst.word)) {
+			if (inst_call(inst.word) || inst_return(inst.word)) {
 				/* Check the delay slot and stop. */
 				va += 4;
 				inst.word = kdbpeek(va);

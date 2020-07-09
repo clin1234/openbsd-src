@@ -1,4 +1,4 @@
-/*	$OpenBSD: wd.c,v 1.125 2017/12/30 23:08:29 guenther Exp $ */
+/*	$OpenBSD: wd.c,v 1.127 2020/01/23 05:46:44 tedu Exp $ */
 /*	$NetBSD: wd.c,v 1.193 1999/02/28 17:15:27 explorer Exp $ */
 
 /*
@@ -94,7 +94,7 @@
 
 #define	WDIORETRIES_SINGLE 4	/* number of retries before single-sector */
 #define	WDIORETRIES	5	/* number of retries before giving up */
-#define	RECOVERYTIME hz/2	/* time to wait before retrying a cmd */
+#define	RECOVERYTIME_MSEC 500	/* time to wait before retrying a cmd */
 
 #define DEBUG_INTR   0x01
 #define DEBUG_XFERS  0x02
@@ -228,7 +228,6 @@ wdattach(struct device *parent, struct device *self, void *aux)
 	printf("%s: %d-sector PIO,", wd->sc_dev.dv_xname, wd->sc_multi);
 
 	/* use 48-bit LBA if enabled */
-	/* XXX: shall we use it if drive capacity < 137Gb? */
 	if ((wd->sc_params.atap_cmd2_en & ATAPI_CMD2_48AD) != 0)
 		wd->sc_flags |= WDF_LBA48;
 
@@ -555,7 +554,8 @@ retry:
 		    wd->sc_wdc_bio.blkdone, wd->sc_dk.dk_label);
 		if (wd->retries++ < WDIORETRIES) {
 			printf(", retrying\n");
-			timeout_add(&wd->sc_restart_timeout, RECOVERYTIME);
+			timeout_add_msec(&wd->sc_restart_timeout,
+			    RECOVERYTIME_MSEC);
 			return;
 		}
 		printf("\n");

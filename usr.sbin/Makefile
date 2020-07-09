@@ -1,9 +1,9 @@
-#	$OpenBSD: Makefile,v 1.206 2019/04/25 20:25:27 florian Exp $
+#	$OpenBSD: Makefile,v 1.210 2020/02/07 10:19:50 florian Exp $
 
 .include <bsd.own.mk>
 
 SUBDIR=	ac accton acme-client acpidump adduser amd apm apmd arp \
-	authpf bgpctl bgpd bind chroot config cron crunchgen dev_mkdb \
+	authpf bgpctl bgpd chroot config cron crunchgen dev_mkdb \
 	dhcpd dhcrelay dhcrelay6 dvmrpctl dvmrpd edquota eeprom eigrpd eigrpctl \
 	fdformat ftp-proxy gpioctl hostapd hostctl hotplugd httpd identd \
 	ifstated ikectl inetd installboot iostat iscsictl iscsid kgmon \
@@ -13,10 +13,10 @@ SUBDIR=	ac accton acme-client acpidump adduser amd apm apmd arp \
 	npppctl npppd nsd ntpd ocspcheck ospfctl ospfd ospf6d ospf6ctl \
 	pcidump pkg_add portmap pppd procmap pstat pwd_mkdb \
 	quot quotaon ractl rad radiusctl radiusd rarpd rbootd \
-	rcctl rdate rdsetroot rebound relayctl relayd repquota ripctl ripd \
-	rmt route6d rpc.bootparamd rpc.lockd rpc.statd \
+	rcctl rdate rdsetroot relayctl relayd repquota ripctl ripd \
+	rmt route6d rpc.bootparamd rpc.lockd rpc.statd rpki-client \
 	sa sasyncd sensorsd slaacctl slowcgi smtpd \
-	snmpctl snmpd spamdb switchctl switchd syslogc syslogd sysmerge \
+	snmpd spamdb switchctl switchd syslogc syslogd sysmerge \
 	syspatch sysupgrade tcpdrop tcpdump tftp-proxy tftpd tokenadm \
 	tokeninit traceroute trpt unbound unwindctl usbdevs user vmd vmctl \
 	vipw watchdogd wsconscfg wsfontload wsmoused zdump zic

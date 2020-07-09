@@ -1,4 +1,4 @@
-/*	$OpenBSD: traphandler.c,v 1.13 2019/05/11 17:46:02 rob Exp $	*/
+/*	$OpenBSD: traphandler.c,v 1.16 2020/03/11 06:53:42 martijn Exp $	*/
 
 /*
  * Copyright (c) 2014 Bret Stephen Lambert <blambert@openbsd.org>
@@ -205,7 +205,7 @@ traphandler_recvmsg(int fd, short events, void *arg)
 
  done:
 	if (req != NULL)
-		ber_free_elements(req);
+		ober_free_elements(req);
 	return;
 }
 
@@ -221,28 +221,32 @@ traphandler_parse(char *buf, size_t n, struct ber_element **req,
 	u_int			 vers, gtype, etype;
 
 	bzero(&ber, sizeof(ber));
-	ber_set_application(&ber, smi_application);
-	ber_set_readbuf(&ber, buf, n);
+	ober_set_application(&ber, smi_application);
+	ober_set_readbuf(&ber, buf, n);
 
-	if ((*req = ber_read_elements(&ber, NULL)) == NULL)
+	if ((*req = ober_read_elements(&ber, NULL)) == NULL)
 		goto done;
 
-	if (ber_scanf_elements(*req, "{dSe", &vers, &elm) == -1)
+	if (ober_scanf_elements(*req, "{dSe", &vers, &elm) == -1)
 		goto done;
 
 	switch (vers) {
 	case SNMP_V1:
-		if (ber_scanf_elements(elm, "{oSddd",
-		    trapoid, &gtype, &etype, uptime) == -1)
+		if (ober_scanf_elements(elm, "{oSddde",
+		    trapoid, &gtype, &etype, uptime, &elm) == -1)
 			goto done;
 		traphandler_v1translate(trapoid, gtype, etype);
+		if (elm->be_type != BER_TYPE_SEQUENCE)
+			goto done;
+		*vbinds = elm->be_sub;
 		break;
 
 	case SNMP_V2:
-		if (ber_scanf_elements(elm, "{SSSS{e}}", &elm) == -1 ||
-		    ber_scanf_elements(elm, "{SdS}{So}e",
-		    uptime, trapoid, vbinds) == -1)
+		if (ober_scanf_elements(elm, "{SSS{e}}", &elm) == -1 ||
+		    ober_scanf_elements(elm, "{Sd}{So}",
+		    uptime, trapoid) == -1)
 			goto done;
+		*vbinds = elm->be_next->be_next;
 		break;
 
 	default:
@@ -250,13 +254,13 @@ traphandler_parse(char *buf, size_t n, struct ber_element **req,
 		goto done;
 	}
 
-	ber_free(&ber);
+	ober_free(&ber);
 	return (0);
 
  done:
-	ber_free(&ber);
+	ober_free(&ber);
 	if (*req)
-		ber_free_elements(*req);
+		ober_free_elements(*req);
 	*req = NULL;
 	return (-1);
 }
@@ -339,7 +343,7 @@ traphandler_fork_handler(struct privsep_proc *p, struct imsg *imsg)
 		trapcmd_exec(cmd, sa, iter, oidbuf, uptime);
 
 	if (req != NULL)
-		ber_free_elements(req);
+		ober_free_elements(req);
 
 	exit(0);
 }
@@ -408,7 +412,7 @@ trapcmd_exec(struct trapcmd *cmd, struct sockaddr *sa,
 		goto out;
 
 	for (; iter != NULL; iter = iter->be_next) {
-		if (ber_scanf_elements(iter, "{oe}", &oid, &elm) == -1)
+		if (ober_scanf_elements(iter, "{oe}", &oid, &elm) == -1)
 			goto out;
 		if ((value = smi_print_element(elm)) == NULL)
 			goto out;
@@ -470,7 +474,7 @@ trapcmd_cmp(struct trapcmd *cmd1, struct trapcmd *cmd2)
 {
 	int ret;
 
-	ret = ber_oid_cmp(cmd2->cmd_oid, cmd1->cmd_oid);
+	ret = ober_oid_cmp(cmd2->cmd_oid, cmd1->cmd_oid);
 	switch (ret) {
 	case 2:
 		/* cmd1 is a child of cmd2 */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmwpvs.c,v 1.14 2016/08/26 00:45:50 jsg Exp $ */
+/*	$OpenBSD: vmwpvs.c,v 1.18 2020/06/27 14:29:45 krw Exp $ */
 
 /*
  * Copyright (c) 2013 David Gwynne <dlg@openbsd.org>
@@ -356,11 +356,7 @@ struct cfdriver vmwpvs_cd = {
 void		vmwpvs_scsi_cmd(struct scsi_xfer *);
 
 struct scsi_adapter vmwpvs_switch = {
-	vmwpvs_scsi_cmd,
-	scsi_minphys,
-	NULL,
-	NULL,
-	NULL
+	vmwpvs_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 #define dwordsof(s)		(sizeof(s) / sizeof(u_int32_t))
@@ -566,12 +562,11 @@ vmwpvs_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_link.adapter = &vmwpvs_switch;
 	sc->sc_link.adapter_softc = sc;
-	sc->sc_link.adapter_target = -1;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.adapter_buswidth = sc->sc_bus_width;
 	sc->sc_link.openings = VMWPVS_OPENINGS;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	sc->sc_scsibus = (struct scsibus_softc *)config_found(&sc->sc_dev,

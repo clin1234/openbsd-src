@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_mroute.c,v 1.125 2019/02/13 23:47:43 dlg Exp $	*/
+/*	$OpenBSD: ip_mroute.c,v 1.130 2020/05/27 11:19:29 mpi Exp $	*/
 /*	$NetBSD: ip_mroute.c,v 1.85 2004/04/26 01:31:57 matt Exp $	*/
 
 /*
@@ -127,7 +127,7 @@ int ip_mdq(struct mbuf *, struct ifnet *, struct rtentry *);
 struct ifnet *if_lookupbyvif(vifi_t, unsigned int);
 struct rtentry *rt_mcast_add(struct ifnet *, struct sockaddr *,
     struct sockaddr *);
-int rt_mcast_del(struct rtentry *, unsigned int);
+void mrt_mcast_del(struct rtentry *, unsigned int);
 
 /*
  * Kernel multicast routing API capabilities and setup.
@@ -259,21 +259,24 @@ mrt_ioctl(struct socket *so, u_long cmd, caddr_t data)
 	struct inpcb *inp = sotoinpcb(so);
 	int error;
 
+	if (inp == NULL)
+		return (ENOTCONN);
+
 	if (so != ip_mrouter[inp->inp_rtableid])
 		error = EINVAL;
 	else
 		switch (cmd) {
 		case SIOCGETVIFCNT:
-			NET_RLOCK();
+			NET_RLOCK_IN_IOCTL();
 			error = get_vif_cnt(inp->inp_rtableid,
 			    (struct sioc_vif_req *)data);
-			NET_RUNLOCK();
+			NET_RUNLOCK_IN_IOCTL();
 			break;
 		case SIOCGETSGCNT:
-			NET_RLOCK();
+			NET_RLOCK_IN_IOCTL();
 			error = get_sg_cnt(inp->inp_rtableid,
 			    (struct sioc_sg_req *)data);
-			NET_RUNLOCK();
+			NET_RUNLOCK_IN_IOCTL();
 			break;
 		default:
 			error = ENOTTY;
@@ -473,8 +476,10 @@ mrt_sysctl_mfc(void *oldp, size_t *oldlenp)
 	msa.msa_len = *oldlenp;
 	msa.msa_needed = 0;
 
-	for (rtableid = 0; rtableid <= RT_TABLEID_MAX; rtableid++)
-		rtable_walk(rtableid, AF_INET, mrt_rtwalk_mfcsysctl, &msa);
+	for (rtableid = 0; rtableid <= RT_TABLEID_MAX; rtableid++) {
+		rtable_walk(rtableid, AF_INET, NULL, mrt_rtwalk_mfcsysctl,
+		    &msa);
+	}
 
 	if (msa.msa_minfos != NULL && msa.msa_needed > 0 &&
 	    (error = copyout(msa.msa_minfos, oldp, msa.msa_needed)) != 0) {
@@ -527,10 +532,7 @@ mrouter_rtwalk_delete(struct rtentry *rt, void *arg, unsigned int rtableid)
 	    (RTF_HOST | RTF_MULTICAST))
 		return (0);
 
-	/* Remove all timers related to this route. */
-	rt_timer_remove_all(rt);
-	rt_mcast_del(rt, rtableid);
-	return (0);
+	return EEXIST;
 }
 
 /*
@@ -542,12 +544,24 @@ ip_mrouter_done(struct socket *so)
 	struct inpcb *inp = sotoinpcb(so);
 	struct ifnet *ifp;
 	unsigned int rtableid = inp->inp_rtableid;
+	int error;
 
 	NET_ASSERT_LOCKED();
 
 	/* Delete all remaining installed multicast routes. */
-	rtable_walk(rtableid, AF_INET, mrouter_rtwalk_delete, NULL);
+	do {
+		struct rtentry *rt = NULL;
 
+		error = rtable_walk(rtableid, AF_INET, &rt,
+		    mrouter_rtwalk_delete, NULL);
+		if (rt != NULL && error == EEXIST) {
+			mrt_mcast_del(rt, rtableid);
+			error = EAGAIN;
+		}
+		rtfree(rt);
+	} while (error == EAGAIN);
+
+	/* Unregister all interfaces in the domain. */
 	TAILQ_FOREACH(ifp, &ifnet, if_list) {
 		if (ifp->if_rdomain != rtableid)
 			continue;
@@ -758,7 +772,9 @@ vif_delete(struct ifnet *ifp)
 	satosin(&ifr.ifr_addr)->sin_len = sizeof(struct sockaddr_in);
 	satosin(&ifr.ifr_addr)->sin_family = AF_INET;
 	satosin(&ifr.ifr_addr)->sin_addr = zeroin_addr;
+	KERNEL_LOCK();
 	(*ifp->if_ioctl)(ifp, SIOCDELMULTI, (caddr_t)&ifr);
+	KERNEL_UNLOCK();
 
 	free(v, M_MRTABLE, sizeof(*v));
 }
@@ -787,9 +803,7 @@ mfc_expire_route(struct rtentry *rt, struct rttimer *rtt)
 		return;
 	}
 
-	/* Remove all timers related to this route. */
-	rt_timer_remove_all(rt);
-	rt_mcast_del(rt, rtableid);
+	mrt_mcast_del(rt, rtableid);
 }
 
 int
@@ -812,7 +826,8 @@ mfc_add_route(struct ifnet *ifp, struct sockaddr *origin,
 		    satosin(origin)->sin_addr.s_addr,
 		    satosin(group)->sin_addr.s_addr,
 		    mfccp->mfcc_parent, ifp->if_xname);
-		rt_mcast_del(rt, rtableid);
+		mrt_mcast_del(rt, rtableid);
+		rtfree(rt);
 		return (ENOMEM);
 	}
 
@@ -880,8 +895,8 @@ update_mfc_params(struct mfcctl2 *mfccp, int wait, unsigned int rtableid)
 
 			DPRINTF("del route (group %#08X) for vif %d (%s)",
 			    mfccp->mfcc_mcastgrp.s_addr, i, ifp->if_xname);
-			rt_timer_remove_all(rt);
-			rt_mcast_del(rt, rtableid);
+			mrt_mcast_del(rt, rtableid);
+			rtfree(rt);
 			continue;
 		}
 
@@ -1028,9 +1043,8 @@ del_mfc(struct socket *so, struct mbuf *m)
 
 	while ((rt = mfc_find(NULL, &mfcctl2.mfcc_origin,
 	    &mfcctl2.mfcc_mcastgrp, rtableid)) != NULL) {
-		/* Remove all timers related to this route. */
-		rt_timer_remove_all(rt);
-		rt_mcast_del(rt, rtableid);
+		mrt_mcast_del(rt, rtableid);
+		rtfree(rt);
 	}
 
 	return (0);
@@ -1320,30 +1334,26 @@ rt_mcast_add(struct ifnet *ifp, struct sockaddr *origin, struct sockaddr *group)
 	return (mfc_find(ifp, NULL, &satosin(group)->sin_addr, rtableid));
 }
 
-int
-rt_mcast_del(struct rtentry *rt, unsigned int rtableid)
+void
+mrt_mcast_del(struct rtentry *rt, unsigned int rtableid)
 {
 	struct ifnet		*ifp;
-	int			 rv;
+	int			 error;
+
+	/* Remove all timers related to this route. */
+	rt_timer_remove_all(rt);
 
 	free(rt->rt_llinfo, M_MRTABLE, sizeof(struct mfc));
 	rt->rt_llinfo = NULL;
 
-	if ((ifp = if_get(rt->rt_ifidx)) == NULL) {
-		DPRINTF("if_get(%d) failed", rt->rt_ifidx);
-		rtfree(rt);
-		return (ENOENT);
-	}
-
-	rv = rtdeletemsg(rt, ifp, rtableid);
+	ifp = if_get(rt->rt_ifidx);
+	if (ifp == NULL)
+		return;
+	error = rtdeletemsg(rt, ifp, rtableid);
 	if_put(ifp);
-	if (rv != 0) {
-		DPRINTF("rtdeletemsg failed (%d)", rv);
-		rtfree(rt);
-		return (rv);
-	}
+
+	if (error)
+		DPRINTF("delete route error %d\n", error);
 
 	mrt_count[rtableid]--;
-
-	return (0);
 }

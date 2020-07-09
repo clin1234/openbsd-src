@@ -1,4 +1,4 @@
-/*	$OpenBSD: ffs_alloc.c,v 1.108 2016/05/23 20:47:49 tb Exp $	*/
+/*	$OpenBSD: ffs_alloc.c,v 1.113 2020/06/20 07:49:04 otto Exp $	*/
 /*	$NetBSD: ffs_alloc.c,v 1.11 1996/05/11 18:27:09 mycroft Exp $	*/
 
 /*
@@ -63,14 +63,14 @@
 	    (fs)->fs_fsmnt, (cp));				\
 } while (0)
 
-daddr_t		ffs_alloccg(struct inode *, int, daddr_t, int);
-struct buf *	ffs_cgread(struct fs *, struct inode *, int);
+daddr_t		ffs_alloccg(struct inode *, u_int, daddr_t, int);
+struct buf *	ffs_cgread(struct fs *, struct inode *, u_int);
 daddr_t		ffs_alloccgblk(struct inode *, struct buf *, daddr_t);
 ufsino_t	ffs_dirpref(struct inode *);
-daddr_t		ffs_fragextend(struct inode *, int, daddr_t, int, int);
-daddr_t		ffs_hashalloc(struct inode *, int, daddr_t, int,
-		    daddr_t (*)(struct inode *, int, daddr_t, int));
-daddr_t		ffs_nodealloccg(struct inode *, int, daddr_t, int);
+daddr_t		ffs_fragextend(struct inode *, u_int, daddr_t, int, int);
+daddr_t		ffs_hashalloc(struct inode *, u_int, daddr_t, int,
+		    daddr_t (*)(struct inode *, u_int, daddr_t, int));
+daddr_t		ffs_nodealloccg(struct inode *, u_int, daddr_t, int);
 daddr_t		ffs_mapsearch(struct fs *, struct cg *, daddr_t, int);
 
 static const struct timeval	fserr_interval = { 2, 0 };
@@ -102,7 +102,7 @@ ffs_alloc(struct inode *ip, daddr_t lbn, daddr_t bpref, int size,
 	static struct timeval fsfull_last;
 	struct fs *fs;
 	daddr_t bno;
-	int cg;
+	u_int cg;
 	int error;
 
 	*bnp = 0;
@@ -174,7 +174,8 @@ ffs_realloccg(struct inode *ip, daddr_t lbprev, daddr_t bpref, int osize,
 	struct fs *fs;
 	struct buf *bp = NULL;
 	daddr_t quota_updated = 0;
-	int cg, request, error;
+	int request, error;
+	u_int cg;
 	daddr_t bprev, bno;
 
 	if (bpp != NULL)
@@ -360,7 +361,8 @@ ffs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 	struct fs *fs;
 	struct inode *ip;
 	ufsino_t ino, ipref;
-	int cg, error;
+	u_int cg;
+	int error;
 
 	*vpp = NULL;
 	fs = pip->i_fs;
@@ -413,16 +415,13 @@ ffs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 
 	/*
 	 * Set up a new generation number for this inode.
-	 * XXX - just increment for now, this is wrong! (millert)
-	 *       Need a way to preserve randomization.
+	 * On wrap, we make sure to assign a number != 0 and != UINT_MAX
+	 * (the origial value).
 	 */
 	if (DIP(ip, gen) != 0)
 		DIP_ADD(ip, gen, 1);
-	if (DIP(ip, gen) == 0)
-		DIP_ASSIGN(ip, gen, arc4random() & INT_MAX);
-
-	if (DIP(ip, gen) == 0 || DIP(ip, gen) == -1)
-		DIP_ASSIGN(ip, gen, 1);	/* Shouldn't happen */
+	while (DIP(ip, gen) == 0)
+		DIP_ASSIGN(ip, gen, arc4random_uniform(UINT_MAX));
 
 	return (0);
 
@@ -452,11 +451,12 @@ ufsino_t
 ffs_dirpref(struct inode *pip)
 {
 	struct fs *fs;
-	int	cg, prefcg, dirsize, cgsize;
-	int	avgifree, avgbfree, avgndir, curdirsize;
-	int	minifree, minbfree, maxndir;
-	int	mincg, minndir;
-	int	maxcontigdirs;
+	u_int	cg, prefcg;
+	u_int	dirsize, cgsize;
+	u_int	avgifree, avgbfree, avgndir, curdirsize;
+	u_int	minifree, minbfree, maxndir;
+	u_int	mincg, minndir;
+	u_int	maxcontigdirs;
 
 	fs = pip->i_fs;
 
@@ -518,7 +518,7 @@ ffs_dirpref(struct inode *pip)
 		maxcontigdirs = 1;
 
 	/*
-	 * Limit number of dirs in one cg and reserve space for 
+	 * Limit number of dirs in one cg and reserve space for
 	 * regular files, but only if we have no deficit in
 	 * inodes or space.
 	 *
@@ -527,16 +527,17 @@ ffs_dirpref(struct inode *pip)
 	 * We scan from our preferred cylinder group forward looking
 	 * for a cylinder group that meets our criterion. If we get
 	 * to the final cylinder group and do not find anything,
-	 * we start scanning backwards from our preferred cylinder
-	 * group. The ideal would be to alternate looking forward
-	 * and backward, but tha tis just too complex to code for
-	 * the gain it would get. The most likely place where the
-	 * backward scan would take effect is when we start near
-	 * the end of the filesystem and do not find anything from
-	 * where we are to the end. In that case, scanning backward
-	 * will likely find us a suitable cylinder group much closer
-	 * to our desired location than if we were to start scanning
-	 * forward from the beginning for the filesystem.
+	 * we start scanning forwards from the beginning of the
+	 * filesystem. While it might seem sensible to start scanning
+	 * backwards or even to alternate looking forward and backward,
+	 * this approach fails badly when the filesystem is nearly full.
+	 * Specifically, we first search all the areas that have no space
+	 * and finally try the one preceding that. We repeat this on
+	 * every request and in the case of the final block end up
+	 * searching the entire filesystem. By jumping to the front
+	 * of the filesystem, our future forward searches always look
+	 * in new cylinder groups so finds every possible block after
+	 * one pass over the filesystem.
 	 */
 	for (cg = prefcg; cg < fs->fs_ncg; cg++)
 		if (fs->fs_cs(fs, cg).cs_ndir < maxndir &&
@@ -545,7 +546,7 @@ ffs_dirpref(struct inode *pip)
 			if (fs->fs_contigdirs[cg] < maxcontigdirs)
 				goto end;
 		}
-	for (cg = prefcg - 1; cg >= 0; cg--)
+	for (cg = 0; cg < prefcg; cg++)
 		if (fs->fs_cs(fs, cg).cs_ndir < maxndir &&
 		    fs->fs_cs(fs, cg).cs_nifree >= minifree &&
 	    	    fs->fs_cs(fs, cg).cs_nbfree >= minbfree) {
@@ -558,7 +559,7 @@ ffs_dirpref(struct inode *pip)
 	for (cg = prefcg; cg < fs->fs_ncg; cg++)
 		if (fs->fs_cs(fs, cg).cs_nifree >= avgifree)
 			goto end;
-	for (cg = prefcg - 1; cg >= 0; cg--)
+	for (cg = 0; cg < prefcg; cg++)
 		if (fs->fs_cs(fs, cg).cs_nifree >= avgifree)
 			goto end;
 end:
@@ -594,7 +595,8 @@ int32_t
 ffs1_blkpref(struct inode *ip, daddr_t lbn, int indx, int32_t *bap)
 {
 	struct fs *fs;
-	int cg, inocg, avgbfree, startcg;
+	u_int cg, inocg;
+	u_int avgbfree, startcg;
 	uint32_t pref;
 
 	KASSERT(indx <= 0 || bap != NULL);
@@ -694,7 +696,8 @@ int64_t
 ffs2_blkpref(struct inode *ip, daddr_t lbn, int indx, int64_t *bap)
 {
 	struct fs *fs;
-	int cg, inocg, avgbfree, startcg;
+	u_int cg, inocg;
+	u_int avgbfree, startcg;
 	uint64_t pref;
 
 	KASSERT(indx <= 0 || bap != NULL);
@@ -798,12 +801,12 @@ ffs2_blkpref(struct inode *ip, daddr_t lbn, int indx, int64_t *bap)
  *   3) brute force search for a free block.
  */
 daddr_t
-ffs_hashalloc(struct inode *ip, int cg, daddr_t pref, int size,
-    daddr_t (*allocator)(struct inode *, int, daddr_t, int))
+ffs_hashalloc(struct inode *ip, u_int cg, daddr_t pref, int size,
+    daddr_t (*allocator)(struct inode *, u_int, daddr_t, int))
 {
 	struct fs *fs;
 	daddr_t result;
-	int i, icg = cg;
+	u_int i, icg = cg;
 
 	fs = ip->i_fs;
 	/*
@@ -841,7 +844,7 @@ ffs_hashalloc(struct inode *ip, int cg, daddr_t pref, int size,
 }
 
 struct buf *
-ffs_cgread(struct fs *fs, struct inode *ip, int cg)
+ffs_cgread(struct fs *fs, struct inode *ip, u_int cg)
 {
 	struct buf *bp;
 
@@ -866,11 +869,12 @@ ffs_cgread(struct fs *fs, struct inode *ip, int cg)
  * if they are, allocate them.
  */
 daddr_t
-ffs_fragextend(struct inode *ip, int cg, daddr_t bprev, int osize, int nsize)
+ffs_fragextend(struct inode *ip, u_int cg, daddr_t bprev, int osize, int nsize)
 {
 	struct fs *fs;
 	struct cg *cgp;
 	struct buf *bp;
+	struct timespec now;
 	daddr_t bno;
 	int i, frags, bbase;
 
@@ -888,7 +892,9 @@ ffs_fragextend(struct inode *ip, int cg, daddr_t bprev, int osize, int nsize)
 		return (0);
 
 	cgp = (struct cg *)bp->b_data;
-	cgp->cg_ffs2_time = cgp->cg_time = time_second;
+	nanotime(&now);
+	cgp->cg_ffs2_time = now.tv_sec;
+	cgp->cg_time = now.tv_sec;
 
 	bno = dtogd(fs, bprev);
 	for (i = numfrags(fs, osize); i < frags; i++)
@@ -929,11 +935,12 @@ ffs_fragextend(struct inode *ip, int cg, daddr_t bprev, int osize, int nsize)
  * and if it is, allocate it.
  */
 daddr_t
-ffs_alloccg(struct inode *ip, int cg, daddr_t bpref, int size)
+ffs_alloccg(struct inode *ip, u_int cg, daddr_t bpref, int size)
 {
 	struct fs *fs;
 	struct cg *cgp;
 	struct buf *bp;
+	struct timespec now;
 	daddr_t bno, blkno;
 	int i, frags, allocsiz;
 
@@ -950,7 +957,9 @@ ffs_alloccg(struct inode *ip, int cg, daddr_t bpref, int size)
 		return (0);
 	}
 
-	cgp->cg_ffs2_time = cgp->cg_time = time_second;
+	nanotime(&now);
+	cgp->cg_ffs2_time = now.tv_sec;
+	cgp->cg_time = now.tv_sec;
 
 	if (size == fs->fs_bsize) {
 		/* allocate and return a complete data block */
@@ -1081,11 +1090,12 @@ gotit:
 
 /* inode allocation routine */
 daddr_t
-ffs_nodealloccg(struct inode *ip, int cg, daddr_t ipref, int mode)
+ffs_nodealloccg(struct inode *ip, u_int cg, daddr_t ipref, int mode)
 {
 	struct fs *fs;
 	struct cg *cgp;
 	struct buf *bp;
+	struct timespec now;
 	int start, len, loc, map, i;
 #ifdef FFS2
 	struct buf *ibp = NULL;
@@ -1114,7 +1124,9 @@ ffs_nodealloccg(struct inode *ip, int cg, daddr_t ipref, int mode)
 	 * We are committed to the allocation from now on, so update the time
 	 * on the cylinder group.
 	 */
-	cgp->cg_ffs2_time = cgp->cg_time = time_second;
+	nanotime(&now);
+	cgp->cg_ffs2_time = now.tv_sec;
+	cgp->cg_time = now.tv_sec;
 
 	/*
 	 * If there was a preferred location for the new inode, try to find it.
@@ -1191,14 +1203,15 @@ gotit:
 
                 ibp = getblk(ip->i_devvp, fsbtodb(fs,
                     ino_to_fsba(fs, cg * fs->fs_ipg + cgp->cg_initediblk)),
-                    (int)fs->fs_bsize, 0, 0);
+                    (int)fs->fs_bsize, 0, INFSLP);
 
                 memset(ibp->b_data, 0, fs->fs_bsize);
                 dp2 = (struct ufs2_dinode *)(ibp->b_data);
 
-		/* Give each inode a positive generation number */
+		/* Give each inode a generation number */
                 for (i = 0; i < INOPB(fs); i++) {
-                        dp2->di_gen = (arc4random() & INT32_MAX) / 2 + 1;
+                        while (dp2->di_gen == 0)
+				dp2->di_gen = arc4random();
                         dp2++;
                 }
 
@@ -1249,6 +1262,7 @@ ffs_blkfree(struct inode *ip, daddr_t bno, long size)
 	struct fs *fs;
 	struct cg *cgp;
 	struct buf *bp;
+	struct timespec now;
 	daddr_t blkno;
 	int i, cg, blk, frags, bbase;
 
@@ -1270,7 +1284,9 @@ ffs_blkfree(struct inode *ip, daddr_t bno, long size)
 		return;
 
 	cgp = (struct cg *)bp->b_data;
-	cgp->cg_ffs2_time = cgp->cg_time = time_second;
+	nanotime(&now);
+	cgp->cg_ffs2_time = now.tv_sec;
+	cgp->cg_time = now.tv_sec;
 
 	bno = dtogd(fs, bno);
 	if (size == fs->fs_bsize) {
@@ -1367,10 +1383,11 @@ ffs_freefile(struct inode *pip, ufsino_t ino, mode_t mode)
 	struct fs *fs;
 	struct cg *cgp;
 	struct buf *bp;
-	int cg;
+	struct timespec now;
+	u_int cg;
 
 	fs = pip->i_fs;
-	if ((u_int)ino >= fs->fs_ipg * fs->fs_ncg)
+	if (ino >= fs->fs_ipg * fs->fs_ncg)
 		panic("ffs_freefile: range: dev = 0x%x, ino = %d, fs = %s",
 		    pip->i_dev, ino, fs->fs_fsmnt);
 
@@ -1379,7 +1396,9 @@ ffs_freefile(struct inode *pip, ufsino_t ino, mode_t mode)
 		return (0);
 
 	cgp = (struct cg *)bp->b_data;
-	cgp->cg_ffs2_time = cgp->cg_time = time_second;
+	nanotime(&now);
+	cgp->cg_ffs2_time = now.tv_sec;
+	cgp->cg_time = now.tv_sec;
 
 	ino %= fs->fs_ipg;
 	if (isclr(cg_inosused(cgp), ino)) {

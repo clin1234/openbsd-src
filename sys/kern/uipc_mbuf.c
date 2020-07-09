@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_mbuf.c,v 1.268 2019/02/10 22:45:58 tedu Exp $	*/
+/*	$OpenBSD: uipc_mbuf.c,v 1.275 2020/06/21 05:37:26 dlg Exp $	*/
 /*	$NetBSD: uipc_mbuf.c,v 1.15.4.1 1996/06/13 17:11:44 cgd Exp $	*/
 
 /*
@@ -34,11 +34,11 @@
 
 /*
  *	@(#)COPYRIGHT	1.1 (NRL) 17 January 1995
- * 
+ *
  * NRL grants permission for redistribution and use in source and binary
  * forms, with or without modification, of the software and documentation
  * created at NRL provided that the following conditions are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
@@ -46,14 +46,14 @@
  *    documentation and/or other materials provided with the distribution.
  * 3. All advertising materials mentioning features or use of this software
  *    must display the following acknowledgements:
- * 	This product includes software developed by the University of
- * 	California, Berkeley and its contributors.
- * 	This product includes software developed at the Information
- * 	Technology Division, US Naval Research Laboratory.
+ *	This product includes software developed by the University of
+ *	California, Berkeley and its contributors.
+ *	This product includes software developed at the Information
+ *	Technology Division, US Naval Research Laboratory.
  * 4. Neither the name of the NRL nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
- * 
+ *
  * THE SOFTWARE PROVIDED BY NRL IS PROVIDED BY NRL AND CONTRIBUTORS ``AS
  * IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
@@ -65,7 +65,7 @@
  * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- * 
+ *
  * The views and conclusions contained in the software and documentation
  * are those of the authors and should not be interpreted as representing
  * official policies, either expressed or implied, of the US Naval
@@ -76,6 +76,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/atomic.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
@@ -131,12 +132,10 @@ int max_hdr;			/* largest link+protocol header */
 struct	mutex m_extref_mtx = MUTEX_INITIALIZER(IPL_NET);
 
 void	m_extfree(struct mbuf *);
-void	nmbclust_update(void);
 void	m_zero(struct mbuf *);
 
-struct mutex m_pool_mtx = MUTEX_INITIALIZER(IPL_NET);
-unsigned int mbuf_mem_limit; /* how much memory can be allocated */
-unsigned int mbuf_mem_alloc; /* how much memory has been allocated */
+unsigned long mbuf_mem_limit;	/* how much memory can be allocated */
+unsigned long mbuf_mem_alloc;	/* how much memory has been allocated */
 
 void	*m_pool_alloc(struct pool *, int, int *);
 void	m_pool_free(struct pool *, void *);
@@ -161,14 +160,13 @@ static u_int num_extfree_fns;
 void
 mbinit(void)
 {
-	int i;
+	int i, error;
 	unsigned int lowbits;
 
 	CTASSERT(MSIZE == sizeof(struct mbuf));
 
 	m_pool_allocator.pa_pagesz = pool_allocator_multi.pa_pagesz;
 
-	nmbclust_update();
 	mbuf_mem_alloc = 0;
 
 #if DIAGNOSTIC
@@ -196,6 +194,9 @@ mbinit(void)
 		m_pool_init(&mclpools[i], mclsizes[i], 64, mclnames[i]);
 	}
 
+	error = nmbclust_update(nmbclust);
+	KASSERT(error == 0);
+
 	(void)mextfree_register(m_extfree_pool);
 	KASSERT(num_extfree_fns == 1);
 }
@@ -214,11 +215,22 @@ mbcpuinit()
 		pool_cache_init(&mclpools[i]);
 }
 
-void
-nmbclust_update(void)
+int
+nmbclust_update(long newval)
 {
+	int i;
+
+	if (newval < 0 || newval > LONG_MAX / MCLBYTES)
+		return ERANGE;
 	/* update the global mbuf memory limit */
+	nmbclust = newval;
 	mbuf_mem_limit = nmbclust * MCLBYTES;
+
+	pool_wakeup(&mbpool);
+	for (i = 0; i < nitems(mclsizes); i++)
+		pool_wakeup(&mclpools[i]);
+
+	return 0;
 }
 
 /*
@@ -1445,33 +1457,34 @@ fail:
 	return (NULL);
 }
 
+void
+m_microtime(const struct mbuf *m, struct timeval *tv)
+{
+	if (ISSET(m->m_pkthdr.csum_flags, M_TIMESTAMP)) {
+		struct timeval btv, utv;
+
+		NSEC_TO_TIMEVAL(m->m_pkthdr.ph_timestamp, &utv);
+		microboottime(&btv);
+		timeradd(&btv, &utv, tv);
+	} else
+		microtime(tv);
+}
+
 void *
 m_pool_alloc(struct pool *pp, int flags, int *slowdown)
 {
-	void *v = NULL;
-	int avail = 1;
+	void *v;
 
-	if (mbuf_mem_alloc + pp->pr_pgsize > mbuf_mem_limit)
-		return (NULL);
+	if (atomic_add_long_nv(&mbuf_mem_alloc, pp->pr_pgsize) > mbuf_mem_limit)
+		goto fail;
 
-	mtx_enter(&m_pool_mtx);
-	if (mbuf_mem_alloc + pp->pr_pgsize > mbuf_mem_limit)
-		avail = 0;
-	else
-		mbuf_mem_alloc += pp->pr_pgsize;
-	mtx_leave(&m_pool_mtx);
+	v = (*pool_allocator_multi.pa_alloc)(pp, flags, slowdown);
+	if (v != NULL)
+		return (v);
 
-	if (avail) {
-		v = (*pool_allocator_multi.pa_alloc)(pp, flags, slowdown);
-
-		if (v == NULL) {
-			mtx_enter(&m_pool_mtx);
-			mbuf_mem_alloc -= pp->pr_pgsize;
-			mtx_leave(&m_pool_mtx);
-		}
-	}
-
-	return (v);
+ fail:
+	atomic_sub_long(&mbuf_mem_alloc, pp->pr_pgsize);
+	return (NULL);
 }
 
 void
@@ -1479,9 +1492,7 @@ m_pool_free(struct pool *pp, void *v)
 {
 	(*pool_allocator_multi.pa_free)(pp, v);
 
-	mtx_enter(&m_pool_mtx);
-	mbuf_mem_alloc -= pp->pr_pgsize;
-	mtx_leave(&m_pool_mtx);
+	atomic_sub_long(&mbuf_mem_alloc, pp->pr_pgsize);
 }
 
 void
@@ -1623,6 +1634,19 @@ ml_purge(struct mbuf_list *ml)
 	return (len);
 }
 
+unsigned int
+ml_hdatalen(struct mbuf_list *ml)
+{
+	struct mbuf *m;
+
+	m = ml->ml_head;
+	if (m == NULL)
+		return (0);
+
+	KASSERT(ISSET(m->m_flags, M_PKTHDR));
+	return (m->m_pkthdr.len);
+}
+
 /*
  * mbuf queues
  */
@@ -1633,6 +1657,25 @@ mq_init(struct mbuf_queue *mq, u_int maxlen, int ipl)
 	mtx_init(&mq->mq_mtx, ipl);
 	ml_init(&mq->mq_list);
 	mq->mq_maxlen = maxlen;
+}
+
+int
+mq_push(struct mbuf_queue *mq, struct mbuf *m)
+{
+	struct mbuf *dropped = NULL;
+
+	mtx_enter(&mq->mq_mtx);
+	if (mq_len(mq) >= mq->mq_maxlen) {
+		mq->mq_drops++;
+		dropped = ml_dequeue(&mq->mq_list);
+	}
+	ml_enqueue(&mq->mq_list, m);
+	mtx_leave(&mq->mq_mtx);
+
+	if (dropped)
+		m_freem(dropped);
+
+	return (dropped != NULL);
 }
 
 int
@@ -1719,6 +1762,18 @@ mq_purge(struct mbuf_queue *mq)
 	mq_delist(mq, &ml);
 
 	return (ml_purge(&ml));
+}
+
+unsigned int
+mq_hdatalen(struct mbuf_queue *mq)
+{
+	unsigned int hdatalen;
+
+	mtx_enter(&mq->mq_mtx);
+	hdatalen = ml_hdatalen(&mq->mq_list);
+	mtx_leave(&mq->mq_mtx);
+
+	return (hdatalen);
 }
 
 int

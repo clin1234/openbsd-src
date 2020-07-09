@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpi_machdep.c,v 1.86 2018/10/23 17:51:32 kettenis Exp $	*/
+/*	$OpenBSD: acpi_machdep.c,v 1.91 2020/06/17 06:14:52 dlg Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -96,7 +96,8 @@ acpi_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_iot = ba->ba_iot;
 	sc->sc_memt = ba->ba_memt;
-	sc->sc_dmat = &pci_bus_dma_tag;
+	sc->sc_cc_dmat = &pci_bus_dma_tag;
+	sc->sc_ci_dmat = &pci_bus_dma_tag;
 
 	acpi_attach_common(sc, ba->ba_acpipbase);
 }
@@ -194,7 +195,7 @@ acpi_intr_establish(int irq, int flags, int level,
 
 	type = (flags & LR_EXTIRQ_MODE) ? IST_EDGE : IST_LEVEL;
 	return (intr_establish(-1, (struct pic *)apic, map->ioapic_pin,
-	    type, level, handler, arg, what));
+	    type, level, NULL, handler, arg, what));
 #else
 	return NULL;
 #endif
@@ -375,35 +376,6 @@ acpi_sleep_clocks(struct acpi_softc *sc, int state)
 }
 
 /*
- * We repair the interrupt hardware so that any events which occur
- * will cause the least number of unexpected side effects.  We re-start
- * the clocks early because we will soon run AML whigh might do DELAY.
- */ 
-void
-acpi_resume_clocks(struct acpi_softc *sc)
-{
-#if NISA > 0
-	i8259_default_setup();
-#endif
-	intr_calculatemasks(curcpu());
-
-#if NIOAPIC > 0
-	ioapic_enable();
-#endif
-
-#if NLAPIC > 0
-	lapic_enable();
-	if (initclock_func == lapic_initclocks)
-		lapic_startclock();
-	lapic_set_lvt();
-#endif
-
-	i8254_startclock();
-	if (initclock_func == i8254_initclocks)
-		rtcstart();		/* in i8254 mode, rtc is profclock */
-}
-
-/*
  * This function may not have local variables due to a bug between
  * acpi_savecpu() and the resume path.
  */
@@ -476,13 +448,43 @@ acpi_sleep_cpu(struct acpi_softc *sc, int state)
 	return (0);
 }
 
+/*
+ * First repair the interrupt hardware so that any events which occur
+ * will cause the least number of unexpected side effects.  We re-start
+ * the clocks early because we will soon run AML whigh might do DELAY.
+ * Then PM, and then further system/CPU work for the BSP cpu.
+ */ 
 void
-acpi_resume_cpu(struct acpi_softc *sc)
+acpi_resume_cpu(struct acpi_softc *sc, int state)
 {
-	fpuinit(&cpu_info_primary);
+	cpu_init_msrs(&cpu_info_primary);
 
-	cpu_init(&cpu_info_primary);
+#if NISA > 0
+	i8259_default_setup();
+#endif
+	intr_calculatemasks(curcpu());
+
+#if NIOAPIC > 0
+	ioapic_enable();
+#endif
+
+#if NLAPIC > 0
+	lapic_enable();
+	if (initclock_func == lapic_initclocks)
+		lapic_startclock();
+	lapic_set_lvt();
+#endif
+
+	i8254_startclock();
+	if (initclock_func == i8254_initclocks)
+		rtcstart();		/* in i8254 mode, rtc is profclock */
+
+	acpi_resume_pm(sc, state);
+
 	cpu_ucode_apply(&cpu_info_primary);
+	cpu_tsx_disable(&cpu_info_primary);
+	fpuinit(&cpu_info_primary);
+	cpu_init(&cpu_info_primary);
 
 	/* Re-initialise memory range handling on BSP */
 	if (mem_range_softc.mr_op != NULL)

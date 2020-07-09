@@ -1,4 +1,4 @@
-/*	$OpenBSD: mps.c,v 1.25 2019/05/16 05:00:00 martijn Exp $	*/
+/*	$OpenBSD: mps.c,v 1.29 2020/06/30 17:11:49 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -48,8 +48,6 @@
 struct ber_oid *
 	 mps_table(struct oid *, struct ber_oid *, struct ber_oid *);
 
-extern void control_event_add(struct ctl_conn *, int, int, struct timeval *); /* XXX */
-
 int
 mps_getstr(struct oid *oid, struct ber_oid *o, struct ber_element **elm)
 {
@@ -57,7 +55,7 @@ mps_getstr(struct oid *oid, struct ber_oid *o, struct ber_element **elm)
 
 	if (s == NULL)
 		return (-1);
-	*elm = ber_add_string(*elm, s);
+	*elm = ober_add_string(*elm, s);
 	return (0);
 }
 
@@ -73,7 +71,7 @@ mps_setstr(struct oid *oid, struct ber_oid *o, struct ber_element **elm)
 	if (ber->be_class != BER_CLASS_UNIVERSAL ||
 	    ber->be_type != BER_TYPE_OCTETSTRING)
 		return (-1);
-	if (ber_get_string(ber, &s) == -1)
+	if (ober_get_string(ber, &s) == -1)
 		return (-1);
 	if ((v = (void *)strdup(s)) == NULL)
 		return (-1);
@@ -87,7 +85,7 @@ mps_setstr(struct oid *oid, struct ber_oid *o, struct ber_element **elm)
 int
 mps_getint(struct oid *oid, struct ber_oid *o, struct ber_element **elm)
 {
-	*elm = ber_add_integer(*elm, oid->o_val);
+	*elm = ober_add_integer(*elm, oid->o_val);
 	return (0);
 }
 
@@ -96,7 +94,7 @@ mps_setint(struct oid *oid, struct ber_oid *o, struct ber_element **elm)
 {
 	long long	 i;
 
-	if (ber_get_integer(*elm, &i) == -1)
+	if (ober_get_integer(*elm, &i) == -1)
 		return (-1);
 	oid->o_val = i;
 
@@ -106,8 +104,8 @@ mps_setint(struct oid *oid, struct ber_oid *o, struct ber_element **elm)
 int
 mps_getts(struct oid *oid, struct ber_oid *o, struct ber_element **elm)
 {
-	*elm = ber_add_integer(*elm, oid->o_val);
-	ber_set_header(*elm, BER_CLASS_APPLICATION, SNMP_T_TIMETICKS);
+	*elm = ober_add_integer(*elm, oid->o_val);
+	ober_set_header(*elm, BER_CLASS_APPLICATION, SNMP_T_TIMETICKS);
 	return (0);
 }
 
@@ -131,20 +129,6 @@ mps_getreq(struct snmp_message *msg, struct ber_element *root,
 	if (OID_NOTSET(value))
 		goto fail;
 
-	if (value->o_flags & OID_REGISTERED) {
-		struct agentx_pdu	*pdu;
-
-		if ((pdu = snmp_agentx_get_pdu((struct snmp_oid *)o, 1)) == NULL)
-			return (-1);
-		pdu->cookie = msg;
-		if (snmp_agentx_send(value->o_session->handle, pdu) == -1)
-			return (-1);
-
-		control_event_add(value->o_session,
-		    value->o_session->handle->fd, EV_WRITE, NULL);
-		return (1);
-	}
-
 	if (value->o_get == NULL)
 		goto fail;
 
@@ -155,7 +139,7 @@ mps_getreq(struct snmp_message *msg, struct ber_element *root,
 	}
 
 	if ((value->o_flags & OID_TABLE) == 0)
-		elm = ber_add_oid(elm, o);
+		elm = ober_add_oid(elm, o);
 	if (value->o_get(value, o, &elm) != 0)
 		goto fail;
 
@@ -166,9 +150,9 @@ fail:
 		return (-1);
 
 	/* Set SNMPv2 extended error response. */
-	elm = ber_add_oid(elm, o);
-	elm = ber_add_null(elm);
-	ber_set_header(elm, BER_CLASS_CONTEXT, error_type);
+	elm = ober_add_oid(elm, o);
+	elm = ober_add_null(elm);
+	ober_set_header(elm, BER_CLASS_CONTEXT, error_type);
 	return (0);
 }
 
@@ -211,20 +195,6 @@ mps_getnextreq(struct snmp_message *msg, struct ber_element *root,
 	value = smi_nfind(&key);
 	if (value == NULL)
 		goto fail;
-
-	if (value->o_flags & OID_REGISTERED) {
-		struct agentx_pdu	*pdu;
-
-		if ((pdu = snmp_agentx_getnext_pdu((struct snmp_oid *)o, 1)) == NULL)
-			return (-1);
-		pdu->cookie = msg;
-		if (snmp_agentx_send(value->o_session->handle, pdu) == -1)
-			return (-1);
-
-		control_event_add(value->o_session,
-		    value->o_session->handle->fd, EV_WRITE, NULL);
-		return (1);
-	}
 
 	if (value->o_flags & OID_TABLE) {
 		/* Get the next table row for this column */
@@ -277,7 +247,7 @@ mps_getnextreq(struct snmp_message *msg, struct ber_element *root,
 		/* No instance identifier specified. Append .0. */
 		if (o->bo_n + 1 > BER_MAX_OID_LEN)
 			goto fail;
-		ber = ber_add_noid(ber, o, ++o->bo_n);
+		ber = ober_add_noid(ber, o, ++o->bo_n);
 		if ((ret = next->o_get(next, o, &ber)) != 0)
 			goto fail;
 	}
@@ -289,9 +259,9 @@ fail:
 		return (-1);
 
 	/* Set SNMPv2 extended error response. */
-	ber = ber_add_oid(ber, o);
-	ber = ber_add_null(ber);
-	ber_set_header(ber, BER_CLASS_CONTEXT, error_type);
+	ber = ober_add_oid(ber, o);
+	ber = ober_add_null(ber);
+	ober_set_header(ber, BER_CLASS_CONTEXT, error_type);
 	return (0);
 }
 
@@ -308,7 +278,7 @@ mps_getbulkreq(struct snmp_message *msg, struct ber_element **root,
 	*end = NULL;
 
 	for (d = NULL, len = 0; j > 0; j--) {
-		e = ber_add_sequence(NULL);
+		e = ober_add_sequence(NULL);
 		if (c == NULL)
 			c = e;
 		ret = mps_getnextreq(msg, e, o);
@@ -317,18 +287,18 @@ mps_getbulkreq(struct snmp_message *msg, struct ber_element **root,
 			return (1);
 		}
 		if (ret == -1) {
-			ber_free_elements(e);
+			ober_free_elements(e);
 			if (d == NULL)
 				return (-1);
 			break;
 		}
-		len += ber_calc_len(e);
+		len += ober_calc_len(e);
 		if (len > SNMPD_MAXVARBINDLEN) {
-			ber_free_elements(e);
+			ober_free_elements(e);
 			break;
 		}
 		if (d != NULL)
-			ber_link_elements(d, e);
+			ober_link_elements(d, e);
 		d = e;
 		*end = d;
 	}

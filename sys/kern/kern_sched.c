@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sched.c,v 1.56 2019/03/26 04:24:22 visa Exp $	*/
+/*	$OpenBSD: kern_sched.c,v 1.67 2020/06/11 00:00:01 dlg Exp $	*/
 /*
  * Copyright (c) 2007, 2008 Artur Grabowski <art@openbsd.org>
  *
@@ -26,6 +26,7 @@
 #include <sys/mutex.h>
 #include <sys/task.h>
 #include <sys/smr.h>
+#include <sys/tracepoint.h>
 
 #include <uvm/uvm_extern.h>
 
@@ -52,10 +53,6 @@ uint64_t sched_noidle;		/* Times we didn't pick the idle task */
 uint64_t sched_stolen;		/* Times we stole proc from other cpus */
 uint64_t sched_choose;		/* Times we chose a cpu */
 uint64_t sched_wasidle;		/* Times we came out of idle */
-
-#ifdef MULTIPROCESSOR
-struct taskq *sbartq;
-#endif
 
 int sched_smt;
 
@@ -117,7 +114,7 @@ sched_kthreads_create(void *v)
 	static int num;
 
 	if (fork1(&proc0, FORK_SHAREVM|FORK_SHAREFILES|FORK_NOZOMBIE|
-	    FORK_SYSTEM|FORK_SIGHAND|FORK_IDLE, sched_idle, ci, NULL,
+	    FORK_SYSTEM|FORK_IDLE, sched_idle, ci, NULL,
 	    &spc->spc_idleproc))
 		panic("fork idle");
 
@@ -244,14 +241,24 @@ sched_init_runqueues(void)
 }
 
 void
-setrunqueue(struct proc *p)
+setrunqueue(struct cpu_info *ci, struct proc *p, uint8_t prio)
 {
 	struct schedstate_percpu *spc;
-	int queue = p->p_priority >> 2;
+	int queue = prio >> 2;
 
+	if (ci == NULL)
+		ci = sched_choosecpu(p);
+
+	KASSERT(ci != NULL);
 	SCHED_ASSERT_LOCKED();
+
+	p->p_cpu = ci;
+	p->p_stat = SRUN;
+	p->p_runpri = prio;
+
 	spc = &p->p_cpu->ci_schedstate;
 	spc->spc_nrun++;
+	TRACEPOINT(sched, enqueue, p->p_tid, p->p_p->ps_pid);
 
 	TAILQ_INSERT_TAIL(&spc->spc_qs[queue], p, p_runq);
 	spc->spc_whichqs |= (1 << queue);
@@ -259,17 +266,21 @@ setrunqueue(struct proc *p)
 
 	if (cpuset_isset(&sched_idle_cpus, p->p_cpu))
 		cpu_unidle(p->p_cpu);
+
+	if (prio < spc->spc_curpriority)
+		need_resched(ci);
 }
 
 void
 remrunqueue(struct proc *p)
 {
 	struct schedstate_percpu *spc;
-	int queue = p->p_priority >> 2;
+	int queue = p->p_runpri >> 2;
 
 	SCHED_ASSERT_LOCKED();
 	spc = &p->p_cpu->ci_schedstate;
 	spc->spc_nrun--;
+	TRACEPOINT(sched, dequeue, p->p_tid, p->p_p->ps_pid);
 
 	TAILQ_REMOVE(&spc->spc_qs[queue], p, p_runq);
 	if (TAILQ_EMPTY(&spc->spc_qs[queue])) {
@@ -294,8 +305,7 @@ sched_chooseproc(void)
 			for (queue = 0; queue < SCHED_NQS; queue++) {
 				while ((p = TAILQ_FIRST(&spc->spc_qs[queue]))) {
 					remrunqueue(p);
-					p->p_cpu = sched_choosecpu(p);
-					setrunqueue(p);
+					setrunqueue(NULL, p, p->p_runpri);
 					if (p->p_cpu == curcpu()) {
 						KASSERT(p->p_flag & P_CPUPEG);
 						goto again;
@@ -317,7 +327,8 @@ again:
 		p = TAILQ_FIRST(&spc->spc_qs[queue]);
 		remrunqueue(p);
 		sched_noidle++;
-		KASSERT(p->p_stat == SRUN);
+		if (p->p_stat != SRUN)
+			panic("thread %d not in SRUN: %d", p->p_tid, p->p_stat);
 	} else if ((p = sched_steal_proc(curcpu())) == NULL) {
 		p = spc->spc_idleproc;
 		if (p == NULL) {
@@ -509,7 +520,6 @@ sched_steal_proc(struct cpu_info *self)
 	if (best == NULL)
 		return (NULL);
 
-	spc = &best->p_cpu->ci_schedstate;
 	remrunqueue(best);
 	best->p_cpu = self;
 
@@ -566,7 +576,7 @@ sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p)
 	 * and the higher the priority of the proc.
 	 */
 	if (!cpuset_isset(&sched_idle_cpus, ci)) {
-		cost += (p->p_priority - spc->spc_curpriority) *
+		cost += (p->p_usrpri - spc->spc_curpriority) *
 		    sched_cost_priority;
 		cost += sched_cost_runnable;
 	}
@@ -610,11 +620,8 @@ sched_peg_curproc(struct cpu_info *ci)
 	int s;
 
 	SCHED_LOCK(s);
-	p->p_priority = p->p_usrpri;
-	p->p_stat = SRUN;
-	p->p_cpu = ci;
 	atomic_setbits_int(&p->p_flag, P_CPUPEG);
-	setrunqueue(p);
+	setrunqueue(ci, p, p->p_usrpri);
 	p->p_ru.ru_nvcsw++;
 	mi_switch();
 	SCHED_UNLOCK(s);

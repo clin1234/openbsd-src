@@ -1,4 +1,4 @@
-/*	$OpenBSD: diff3.c,v 1.62 2016/10/18 21:06:52 millert Exp $	*/
+/*	$OpenBSD: diff3.c,v 1.64 2020/06/26 07:28:47 stsp Exp $	*/
 
 /*
  * Copyright (C) Caldera International Inc.  2001-2002.
@@ -207,11 +207,11 @@ cvs_merge_file(struct cvs_file *cf, int verbose)
 	argv[argc++] = path2;
 	argv[argc++] = path3;
 
-	if (lseek(fds[2], 0, SEEK_SET) < 0)
+	if (lseek(fds[2], 0, SEEK_SET) == -1)
 		fatal("cvs_merge_file: lseek fds[2]: %s", strerror(errno));
-	if (lseek(fds[3], 0, SEEK_SET) < 0)
+	if (lseek(fds[3], 0, SEEK_SET) == -1)
 		fatal("cvs_merge_file: lseek fds[3]: %s", strerror(errno));
-	if (lseek(fds[4], 0, SEEK_SET) < 0)
+	if (lseek(fds[4], 0, SEEK_SET) == -1)
 		fatal("cvs_merge_file: lseek fds[4]: %s", strerror(errno));
 
 	diff3_conflicts = diff3_internal(argc, argv, cf->file_path, r2);
@@ -798,9 +798,16 @@ edscript(int n)
 			diff_output("%da\n=======\n", de[n].old.to -1);
 		(void)fseek(fp[2], (long)de[n].new.from, SEEK_SET);
 		for (k = de[n].new.to-de[n].new.from; k > 0; k-= j) {
+			size_t r;
 			j = k > BUFSIZ ? BUFSIZ : k;
-			if (fread(block, 1, j, fp[2]) != (size_t)j)
+			r = fread(block, 1, j, fp[2]);
+			if (r == 0) {
+				if (feof(fp[2]))
+					break;
 				return (-1);
+			}
+			if (r != (size_t)j)
+				j = r;
 			block[j] = '\0';
 			diff_output("%s", block);
 		}

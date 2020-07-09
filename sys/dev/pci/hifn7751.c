@@ -1,4 +1,4 @@
-/*	$OpenBSD: hifn7751.c,v 1.178 2018/04/28 15:44:59 jasper Exp $	*/
+/*	$OpenBSD: hifn7751.c,v 1.180 2020/05/29 04:42:25 deraadt Exp $	*/
 
 /*
  * Invertex AEON / Hifn 7751 driver
@@ -55,7 +55,6 @@
 #include <sys/device.h>
 
 #include <crypto/cryptodev.h>
-#include <dev/rndvar.h>
 
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
@@ -375,12 +374,9 @@ hifn_init_pubrng(struct hifn_softc *sc)
 			    HIFN_RNGCFG_ENA);
 
 		sc->sc_rngfirst = 1;
-		if (hz >= 100)
-			sc->sc_rnghz = hz / 100;
-		else
-			sc->sc_rnghz = 1;
+		sc->sc_rngms = 10;
 		timeout_set(&sc->sc_rngto, hifn_rng, sc);
-		timeout_add(&sc->sc_rngto, sc->sc_rnghz);
+		timeout_add_msec(&sc->sc_rngto, sc->sc_rngms);
 	}
 
 	/* Enable public key engine, if available */
@@ -433,7 +429,7 @@ hifn_rng(void *vsc)
 			enqueue_randomness(num1);
 	}
 
-	timeout_add(&sc->sc_rngto, sc->sc_rnghz);
+	timeout_add_msec(&sc->sc_rngto, sc->sc_rngms);
 }
 
 void

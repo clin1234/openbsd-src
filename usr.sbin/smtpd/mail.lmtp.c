@@ -41,30 +41,32 @@ enum phase {
 struct session {
 	const char	*lhlo;
 	const char	*mailfrom;
+	char		*rcptto;
 
 	char		**rcpts;
 	int		n_rcpts;
 };
 
-static FILE *lmtp_connect(const char *);
-static void lmtp_engine(FILE *, struct session *);
+static int lmtp_connect(const char *);
+static void lmtp_engine(int, struct session *);
 static void stream_file(FILE *);
 	
 int
 main(int argc, char *argv[])
 {
 	int ch;
-	FILE *conn;
+	int conn;
 	const char *destination = "localhost";
 	struct session	session;
 
 	if (! geteuid())
-		errx(1, "mail.lmtp: may not be executed as root");
+		errx(EX_TEMPFAIL, "mail.lmtp: may not be executed as root");
 
 	session.lhlo = "localhost";
-	session.mailfrom = NULL;
+	session.mailfrom = getenv("SENDER");
+	session.rcptto = NULL;
 
-	while ((ch = getopt(argc, argv, "d:l:f:")) != -1) {
+	while ((ch = getopt(argc, argv, "d:l:f:ru")) != -1) {
 		switch (ch) {
 		case 'd':
 			destination = optarg;
@@ -75,6 +77,15 @@ main(int argc, char *argv[])
 		case 'f':
 			session.mailfrom = optarg;
 			break;
+
+		case 'r':
+			session.rcptto = getenv("RECIPIENT");
+			break;
+
+		case 'u':
+			session.rcptto = getenv("USER");
+			break;
+
 		default:
 			break;
 		}
@@ -83,13 +94,19 @@ main(int argc, char *argv[])
 	argv += optind;
 
 	if (session.mailfrom == NULL)
-		errx(1, "sender must be specified with -f");
+		errx(EX_TEMPFAIL, "sender must be specified with -f");
 
-	if (argc == 0)
-		errx(1, "no recipient was specified");
+	if (argc == 0 && session.rcptto == NULL)
+		errx(EX_TEMPFAIL, "no recipient was specified");
 
-	session.rcpts = argv;
-	session.n_rcpts = argc;
+	if (session.rcptto) {
+		session.rcpts = &session.rcptto;
+		session.n_rcpts = 1;
+	}
+	else {
+		session.rcpts = argv;
+		session.n_rcpts = argc;
+	}
 
 	conn = lmtp_connect(destination);
 	lmtp_engine(conn, &session);
@@ -97,7 +114,7 @@ main(int argc, char *argv[])
 	return (0);
 }
 
-static FILE *
+static int
 lmtp_connect_inet(const char *destination)
 {
 	struct addrinfo hints, *res, *res0;
@@ -109,14 +126,14 @@ lmtp_connect_inet(const char *destination)
 	int n, s = -1, save_errno;
 
 	if ((destcopy = strdup(destination)) == NULL)
-		err(1, NULL);
+		err(EX_TEMPFAIL, NULL);
 
 	servname = "25";
 	hostname = destcopy;
 	p = destcopy;
 	if (*p == '[') {
 		if ((p = strchr(destcopy, ']')) == NULL)
-			errx(1, "inet: invalid address syntax");
+			errx(EX_TEMPFAIL, "inet: invalid address syntax");
 
 		/* remove [ and ] */
 		*p = '\0';
@@ -132,7 +149,7 @@ lmtp_connect_inet(const char *destination)
 		case '\0':
 			break;
 		default:
-			errx(1, "inet: invalid address syntax");
+			errx(EX_TEMPFAIL, "inet: invalid address syntax");
 		}
 	}
 	else if ((p = strchr(destcopy, ':')) != NULL) {
@@ -146,7 +163,7 @@ lmtp_connect_inet(const char *destination)
 	hints.ai_flags = AI_NUMERICSERV;
 	n = getaddrinfo(hostname, servname, &hints, &res0);
 	if (n)
-		errx(1, "inet: %s", gai_strerror(n));
+		errx(EX_TEMPFAIL, "inet: %s", gai_strerror(n));
 
 	for (res = res0; res; res = res->ai_next) {
 		s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -170,34 +187,35 @@ lmtp_connect_inet(const char *destination)
 	if (s == -1)
 		errx(EX_TEMPFAIL, "%s", cause);
 
-	return fdopen(s, "r+");
+	free(destcopy);
+	return s;
 }
 
-static FILE *
+static int
 lmtp_connect_unix(const char *destination)
 {
 	struct sockaddr_un addr;
 	int s;
 
 	if (*destination != '/')
-		errx(1, "unix: path must be absolute");
+		errx(EX_TEMPFAIL, "unix: path must be absolute");
 	
 	if ((s = socket(PF_LOCAL, SOCK_STREAM, 0)) == -1)
-		err(1, NULL);
+		err(EX_TEMPFAIL, NULL);
 
 	memset(&addr, 0, sizeof addr);
 	addr.sun_family = AF_UNIX;
 	if (strlcpy(addr.sun_path, destination, sizeof addr.sun_path)
 	    >= sizeof addr.sun_path)
-		errx(1, "unix: socket path is too long");
+		errx(EX_TEMPFAIL, "unix: socket path is too long");
 
 	if (connect(s, (struct sockaddr *)&addr, sizeof addr) == -1)
 		err(EX_TEMPFAIL, "connect");
 
-	return fdopen(s, "r+");
+	return s;
 }
 
-static FILE *
+static int
 lmtp_connect(const char *destination)
 {
 	if (destination[0] == '/')
@@ -206,29 +224,46 @@ lmtp_connect(const char *destination)
 }
 
 static void
-lmtp_engine(FILE *conn, struct session *session)
+lmtp_engine(int fd_read, struct session *session)
 {
+	int fd_write = 0;
+	FILE *file_read = 0;
+	FILE *file_write = 0;
 	char *line = NULL;
 	size_t linesize = 0;
 	ssize_t linelen;
 	enum phase phase = PHASE_BANNER;
 
+	if ((fd_write = dup(fd_read)) == -1)
+		err(EX_TEMPFAIL, "dup");
+
+	if ((file_read = fdopen(fd_read, "r")) == NULL)
+		err(EX_TEMPFAIL, "fdopen");
+
+	if ((file_write = fdopen(fd_write, "w")) == NULL)
+		err(EX_TEMPFAIL, "fdopen");
+
 	do {
-		fflush(conn);
-		if ((linelen = getline(&line, &linesize, conn)) == -1)
-			err(1, "getline");
+		fflush(file_write);
+
+		if ((linelen = getline(&line, &linesize, file_read)) == -1) {
+			if (ferror(file_read))
+				err(EX_TEMPFAIL, "getline");
+			else
+				errx(EX_TEMPFAIL, "unexpected EOF from LMTP server");
+		}
 		line[strcspn(line, "\n")] = '\0';
 		line[strcspn(line, "\r")] = '\0';
 
 		if (linelen < 4 ||
-		    !isdigit(line[0]) ||
-		    !isdigit(line[1]) ||
-		    !isdigit(line[2]) ||
+		    !isdigit((unsigned char)line[0]) ||
+		    !isdigit((unsigned char)line[1]) ||
+		    !isdigit((unsigned char)line[2]) ||
 		    (line[3] != ' ' && line[3] != '-'))
-			errx(1, "LMTP server sent an invalid line");
+			errx(EX_TEMPFAIL, "LMTP server sent an invalid line");
 
 		if (line[0] != (phase == PHASE_DATA ? '3' : '2'))
-			errx(1, "LMTP server error: %s", line);
+			errx(EX_TEMPFAIL, "LMTP server error: %s", line);
 		
 		if (line[3] == '-')
 			continue;
@@ -236,17 +271,17 @@ lmtp_engine(FILE *conn, struct session *session)
 		switch (phase) {
 
 		case PHASE_BANNER:
-			fprintf(conn, "LHLO %s\r\n", session->lhlo);
+			fprintf(file_write, "LHLO %s\r\n", session->lhlo);
 			phase++;
 			break;
 
 		case PHASE_HELO:
-			fprintf(conn, "MAIL FROM:<%s>\r\n", session->mailfrom);
+			fprintf(file_write, "MAIL FROM:<%s>\r\n", session->mailfrom);
 			phase++;
 			break;
 
 		case PHASE_MAILFROM:
-			fprintf(conn, "RCPT TO:<%s>\r\n", session->rcpts[session->n_rcpts - 1]);
+			fprintf(file_write, "RCPT TO:<%s>\r\n", session->rcpts[session->n_rcpts - 1]);
 			if (session->n_rcpts - 1 == 0) {
 				phase++;
 				break;
@@ -255,18 +290,18 @@ lmtp_engine(FILE *conn, struct session *session)
 			break;
 
 		case PHASE_RCPTTO:
-			fprintf(conn, "DATA\r\n");
+			fprintf(file_write, "DATA\r\n");
 			phase++;
 			break;
 
 		case PHASE_DATA:
-			stream_file(conn);
-			fprintf(conn, ".\r\n");
+			stream_file(file_write);
+			fprintf(file_write, ".\r\n");
 			phase++;
 			break;
 
 		case PHASE_EOM:
-			fprintf(conn, "QUIT\r\n");
+			fprintf(file_write, "QUIT\r\n");
 			phase++;
 			break;						
 
@@ -274,9 +309,6 @@ lmtp_engine(FILE *conn, struct session *session)
 			exit(0);
 		}
 	} while (1);
-
-	if (ferror(conn))
-		err(1, "getline");
 }
 
 static void
@@ -288,11 +320,11 @@ stream_file(FILE *conn)
 
 	while ((linelen = getline(&line, &linesize, stdin)) != -1) {
 		line[strcspn(line, "\n")] = '\0';
-		if (strcmp(line, ".") == 0)
+		if (line[0] == '.')
 			fprintf(conn, ".");
 		fprintf(conn, "%s\r\n", line);
 	}
 	free(line);
 	if (ferror(stdin))
-		err(1, "getline");
+		err(EX_TEMPFAIL, "getline");
 }

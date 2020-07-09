@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtp_client.c,v 1.9 2019/05/14 12:08:54 eric Exp $	*/
+/*	$OpenBSD: smtp_client.c,v 1.14 2020/04/24 11:34:07 eric Exp $	*/
 
 /*
  * Copyright (c) 2018 Eric Faurot <eric@openbsd.org>
@@ -168,7 +168,7 @@ smtp_cert_verified(struct smtp_client *proto, int verified)
 
 	else if (proto->params.tls_verify) {
 		errno = EAUTH;
-		smtp_client_cancel(proto, FAIL_CONN,
+		smtp_client_abort(proto, FAIL_CONN,
 		    "Invalid server certificate");
 		return;
 	}
@@ -182,6 +182,12 @@ smtp_cert_verified(struct smtp_client *proto, int verified)
 		proto->ext = 0;
 		smtp_client_state(proto, STATE_EHLO);
 	}
+}
+
+void
+smtp_set_tls(struct smtp_client *proto, void *ctx)
+{
+	io_start_tls(proto->io, ctx);
 }
 
 void
@@ -500,7 +506,7 @@ smtp_client_response(struct smtp_client *proto, const char *line)
 			smtp_client_state(proto, STATE_AUTH);
 		}
 		else
-			io_start_tls(proto->io, proto->params.tls_ctx);
+			smtp_require_tls(proto->tag, proto);
 		break;
 
 	case STATE_AUTH_PLAIN:
@@ -610,7 +616,7 @@ smtp_client_io(struct io *io, int evt, void *arg)
 	case IO_CONNECTED:
 		if (proto->params.tls_req == TLS_SMTPS) {
 			io_set_write(io);
-			io_start_tls(proto->io, proto->params.tls_ctx);
+			smtp_require_tls(proto->tag, proto);
 		}
 		else
 			smtp_client_state(proto, STATE_BANNER);
@@ -619,7 +625,7 @@ smtp_client_io(struct io *io, int evt, void *arg)
 	case IO_TLSREADY:
 		proto->flags |= FLAG_TLS;
 		io_pause(proto->io, IO_IN);
-		smtp_verify_server_cert(proto->tag, proto, io_ssl(proto->io));
+		smtp_verify_server_cert(proto->tag, proto, io_tls(proto->io));
 		break;
 
 	case IO_DATAIN:
@@ -673,6 +679,10 @@ smtp_client_readline(struct smtp_client *proto)
 			smtp_client_abort(proto, FAIL_PROTO, "Line too long");
 		return 0;
 	}
+
+	/* Strip trailing '\r' */
+	if (len && line[len - 1] == '\r')
+		line[--len] = '\0';
 
 	log_trace(TRACE_SMTPCLT, "%p: <<< %s", proto, line);
 
@@ -773,9 +783,10 @@ smtp_client_replycat(struct smtp_client *proto, const char *line)
 		line += 3;
 		if (line[0]) {
 			line += 1;
-			if (isdigit((int)line[0]) && line[1] == '.' &&
-			    isdigit((int)line[2]) && line[3] == '.' &&
-			    isdigit((int)line[4]) && isspace((int)line[5]))
+			if (isdigit((unsigned char)line[0]) && line[1] == '.' &&
+			    isdigit((unsigned char)line[2]) && line[3] == '.' &&
+			    isdigit((unsigned char)line[4]) &&
+			    isspace((unsigned char)line[5]))
 				line += 5;
 		}
 	} else

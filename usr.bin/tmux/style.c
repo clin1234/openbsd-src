@@ -1,4 +1,4 @@
-/* $OpenBSD: style.c,v 1.20 2019/05/12 18:16:33 nicm Exp $ */
+/* $OpenBSD: style.c,v 1.28 2020/05/16 16:02:24 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -26,22 +26,26 @@
 #include "tmux.h"
 
 /* Mask for bits not included in style. */
-#define STYLE_ATTR_MASK (~GRID_ATTR_CHARSET)
+#define STYLE_ATTR_MASK (~0)
 
 /* Default style. */
 static struct style style_default = {
-	{ 0, 0, 8, 8, { { ' ' }, 0, 1, 1 } },
+	{ { { ' ' }, 0, 1, 1 }, 0, 0, 8, 8, 0  },
+	0,
 
+	8,
 	STYLE_ALIGN_DEFAULT,
 	STYLE_LIST_OFF,
 
-	STYLE_RANGE_NONE, 0
+	STYLE_RANGE_NONE, 0,
+
+	STYLE_DEFAULT_BASE
 };
 
 /*
- * Parse an embedded style of the form "fg=colour,bg=colour,bright,...".
- * Note that this adds onto the given style, so it must have been initialized
- * alredy.
+ * Parse an embedded style of the form "fg=colour,bg=colour,bright,...".  Note
+ * that this adds onto the given style, so it must have been initialized
+ * already.
  */
 int
 style_parse(struct style *sy, const struct grid_cell *base, const char *in)
@@ -56,6 +60,7 @@ style_parse(struct style *sy, const struct grid_cell *base, const char *in)
 		return (0);
 	style_copy(&saved, sy);
 
+	log_debug("%s: %s", __func__, in);
 	do {
 		while (*in != '\0' && strchr(delimiters, *in) != NULL)
 			in++;
@@ -68,12 +73,21 @@ style_parse(struct style *sy, const struct grid_cell *base, const char *in)
 		memcpy(tmp, in, end);
 		tmp[end] = '\0';
 
+		log_debug("%s: %s", __func__, tmp);
 		if (strcasecmp(tmp, "default") == 0) {
 			sy->gc.fg = base->fg;
 			sy->gc.bg = base->bg;
 			sy->gc.attr = base->attr;
 			sy->gc.flags = base->flags;
-		} else if (strcasecmp(tmp, "nolist") == 0)
+		} else if (strcasecmp(tmp, "ignore") == 0)
+			sy->ignore = 1;
+		else if (strcasecmp(tmp, "noignore") == 0)
+			sy->ignore = 0;
+		else if (strcasecmp(tmp, "push-default") == 0)
+			sy->default_type = STYLE_DEFAULT_PUSH;
+		else if (strcasecmp(tmp, "pop-default") == 0)
+			sy->default_type = STYLE_DEFAULT_POP;
+		else if (strcasecmp(tmp, "nolist") == 0)
 			sy->list = STYLE_LIST_OFF;
 		else if (strncasecmp(tmp, "list=", 5) == 0) {
 			if (strcasecmp(tmp + 5, "on") == 0)
@@ -127,6 +141,10 @@ style_parse(struct style *sy, const struct grid_cell *base, const char *in)
 				sy->align = STYLE_ALIGN_RIGHT;
 			else
 				goto error;
+		} else if (end > 5 && strncasecmp(tmp, "fill=", 5) == 0) {
+			if ((value = colour_fromstring(tmp + 5)) == -1)
+				goto error;
+			sy->fill = value;
 		} else if (end > 3 && strncasecmp(tmp + 1, "g=", 2) == 0) {
 			if ((value = colour_fromstring(tmp + 3)) == -1)
 				goto error;
@@ -213,6 +231,19 @@ style_tostring(struct style *sy)
 		    tmp);
 		comma = ",";
 	}
+	if (sy->default_type != STYLE_DEFAULT_BASE) {
+		if (sy->default_type == STYLE_DEFAULT_PUSH)
+			tmp = "push-default";
+		else if (sy->default_type == STYLE_DEFAULT_POP)
+			tmp = "pop-default";
+		off += xsnprintf(s + off, sizeof s - off, "%s%s", comma, tmp);
+		comma = ",";
+	}
+	if (sy->fill != 8) {
+		off += xsnprintf(s + off, sizeof s - off, "%sfill=%s", comma,
+		    colour_tostring(sy->fill));
+		comma = ",";
+	}
 	if (gc->fg != 8) {
 		off += xsnprintf(s + off, sizeof s - off, "%sfg=%s", comma,
 		    colour_tostring(gc->fg));
@@ -223,7 +254,7 @@ style_tostring(struct style *sy)
 		    colour_tostring(gc->bg));
 		comma = ",";
 	}
-	if (gc->attr != 0 && gc->attr != GRID_ATTR_CHARSET) {
+	if (gc->attr != 0) {
 		xsnprintf(s + off, sizeof s - off, "%s%s", comma,
 		    attributes_tostring(gc->attr));
 		comma = ",";
@@ -234,32 +265,37 @@ style_tostring(struct style *sy)
 	return (s);
 }
 
-/* Apply a style. */
+/* Apply a style on top of the given style. */
 void
-style_apply(struct grid_cell *gc, struct options *oo, const char *name)
+style_add(struct grid_cell *gc, struct options *oo, const char *name,
+    struct format_tree *ft)
 {
-	struct style	*sy;
+	struct style		*sy;
+	struct format_tree	*ft0 = NULL;
 
-	memcpy(gc, &grid_default_cell, sizeof *gc);
-	sy = options_get_style(oo, name);
-	gc->fg = sy->gc.fg;
-	gc->bg = sy->gc.bg;
-	gc->attr |= sy->gc.attr;
-}
+	if (ft == NULL)
+		ft = ft0 = format_create(NULL, NULL, 0, FORMAT_NOJOBS);
 
-/* Apply a style, updating if default. */
-void
-style_apply_update(struct grid_cell *gc, struct options *oo, const char *name)
-{
-	struct style	*sy;
-
-	sy = options_get_style(oo, name);
+	sy = options_string_to_style(oo, name, ft);
+	if (sy == NULL)
+		sy = &style_default;
 	if (sy->gc.fg != 8)
 		gc->fg = sy->gc.fg;
 	if (sy->gc.bg != 8)
 		gc->bg = sy->gc.bg;
-	if (sy->gc.attr != 0)
-		gc->attr |= sy->gc.attr;
+	gc->attr |= sy->gc.attr;
+
+	if (ft0 != NULL)
+		format_free(ft0);
+}
+
+/* Apply a style on top of the default style. */
+void
+style_apply(struct grid_cell *gc, struct options *oo, const char *name,
+    struct format_tree *ft)
+{
+	memcpy(gc, &grid_default_cell, sizeof *gc);
+	style_add(gc, oo, name, ft);
 }
 
 /* Initialize style from cell. */
@@ -275,29 +311,4 @@ void
 style_copy(struct style *dst, struct style *src)
 {
 	memcpy(dst, src, sizeof *dst);
-}
-
-/* Check if two styles are (visibly) the same. */
-int
-style_equal(struct style *sy1, struct style *sy2)
-{
-	struct grid_cell	*gc1 = &sy1->gc;
-	struct grid_cell	*gc2 = &sy2->gc;
-
-	if (gc1->fg != gc2->fg)
-		return (0);
-	if (gc1->bg != gc2->bg)
-		return (0);
-	if ((gc1->attr & STYLE_ATTR_MASK) != (gc2->attr & STYLE_ATTR_MASK))
-		return (0);
-	if (sy1->align != sy2->align)
-		return (0);
-	return (1);
-}
-
-/* Is this style default? */
-int
-style_is_default(struct style *sy)
-{
-	return (style_equal(sy, &style_default));
 }

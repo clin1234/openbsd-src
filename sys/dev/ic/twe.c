@@ -1,4 +1,4 @@
-/*	$OpenBSD: twe.c,v 1.46 2016/01/22 00:40:25 jsg Exp $	*/
+/*	$OpenBSD: twe.c,v 1.54 2020/06/27 17:28:58 krw Exp $	*/
 
 /*
  * Copyright (c) 2000-2002 Michael Shalayeff.  All rights reserved.
@@ -65,7 +65,7 @@ struct cfdriver twe_cd = {
 void	twe_scsi_cmd(struct scsi_xfer *);
 
 struct scsi_adapter twe_switch = {
-	twe_scsi_cmd, tweminphys, 0, 0,
+	twe_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 void *twe_get_ccb(void *);
@@ -119,7 +119,7 @@ twe_dispose(sc)
 			if (ccb->ccb_dmamap)
 				bus_dmamap_destroy(sc->dmat, ccb->ccb_dmamap);
 	}
-	bus_dmamem_unmap(sc->dmat, sc->sc_cmds, 
+	bus_dmamem_unmap(sc->dmat, sc->sc_cmds,
 	    sizeof(struct twe_cmd) * TWE_MAXCMDS);
 	bus_dmamem_free(sc->dmat, sc->sc_cmdseg, 1);
 }
@@ -396,12 +396,11 @@ twe_attach(sc)
 
 	sc->sc_link.adapter_softc = sc;
 	sc->sc_link.adapter = &twe_switch;
-	sc->sc_link.adapter_target = TWE_MAX_UNITS;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.openings = TWE_MAXCMDS / nunits;
 	sc->sc_link.adapter_buswidth = TWE_MAX_UNITS;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	config_found(&sc->sc_dev, &saa, scsiprint);
@@ -487,7 +486,7 @@ twe_thread(v)
 
 		TWE_UNLOCK(sc, lock);
 		sc->sc_thread_on = 1;
-		tsleep(sc, PWAIT, "twespank", 0);
+		tsleep_nsec(sc, PWAIT, "twespank", INFSLP);
 	}
 }
 
@@ -750,14 +749,6 @@ twe_done(sc, ccb)
 	TWE_UNLOCK(sc, lock);
 
 	return 0;
-}
-
-void
-tweminphys(struct buf *bp, struct scsi_link *sl)
-{
-	if (bp->b_bcount > TWE_MAXFER)
-		bp->b_bcount = TWE_MAXFER;
-	minphys(bp);
 }
 
 void
@@ -1052,6 +1043,6 @@ twe_aen(void *cookie, void *io)
 	}
 
 	aen = *(u_int16_t *)pb->data;
-	if (aen != TWE_AEN_QEMPTY) 
+	if (aen != TWE_AEN_QEMPTY)
 		scsi_ioh_add(&sc->sc_aen);
 }

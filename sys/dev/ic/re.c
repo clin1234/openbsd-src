@@ -1,4 +1,4 @@
-/*	$OpenBSD: re.c,v 1.202 2017/06/19 09:36:27 mpi Exp $	*/
+/*	$OpenBSD: re.c,v 1.205 2020/06/22 02:27:04 dlg Exp $	*/
 /*	$FreeBSD: if_re.c,v 1.31 2004/09/04 07:54:05 ru Exp $	*/
 /*
  * Copyright (c) 1997, 1998-2003
@@ -1398,10 +1398,12 @@ re_rxeof(struct rl_softc *sc)
 		ml_enqueue(&ml, m);
 	}
 
+	if (ifiq_input(&ifp->if_rcv, &ml))
+		if_rxr_livelocked(&sc->rl_ldata.rl_rx_ring);
+
 	sc->rl_ldata.rl_rx_considx = i;
 	re_rx_list_fill(sc);
 
-	if_input(ifp, &ml);
 
 	return (rx);
 }
@@ -1415,8 +1417,6 @@ re_txeof(struct rl_softc *sc)
 	unsigned int	prod, cons;
 	unsigned int	idx;
 	int		free = 0;
-
-	ifp = &sc->sc_arpcom.ac_if;
 
 	prod = sc->rl_ldata.rl_txq_prodidx;
 	cons = sc->rl_ldata.rl_txq_considx;
@@ -1955,7 +1955,7 @@ re_init(struct ifnet *ifp)
 	 * Enable interrupts.
 	 */
 	re_setup_intr(sc, 1, sc->rl_imtype);
-	CSR_WRITE_2(sc, RL_ISR, sc->rl_imtype);
+	CSR_WRITE_2(sc, RL_ISR, sc->rl_intrs);
 
 	/* Start RX/TX process. */
 	CSR_WRITE_4(sc, RL_MISSEDPKT, 0);

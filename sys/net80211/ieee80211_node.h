@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_node.h,v 1.80 2019/03/01 08:13:11 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_node.h,v 1.86 2020/05/31 09:11:12 stsp Exp $	*/
 /*	$NetBSD: ieee80211_node.h,v 1.9 2004/04/30 22:57:32 dyoung Exp $	*/
 
 /*-
@@ -39,8 +39,9 @@
 #define	IEEE80211_TRANS_WAIT	5		/* transition wait */
 #define	IEEE80211_INACT_WAIT	5		/* inactivity timer interval */
 #define	IEEE80211_INACT_MAX	(300/IEEE80211_INACT_WAIT)
-#define	IEEE80211_CACHE_SIZE	100
+#define	IEEE80211_CACHE_SIZE	512
 #define	IEEE80211_CACHE_WAIT	30
+#define	IEEE80211_INACT_SCAN	10		/* for station mode */
 
 struct ieee80211_rateset {
 	u_int8_t		rs_nrates;
@@ -171,7 +172,7 @@ enum {
 	RSNA_SUPP_INITIALIZE,		/* not expecting any messages */
 	RSNA_SUPP_PTKSTART,		/* awaiting handshake message 1 */
 	RSNA_SUPP_PTKNEGOTIATING,	/* got message 1 and derived PTK */
-	RNSA_SUPP_PTKDONE		/* got message 3 and authenticated AP */
+	RSNA_SUPP_PTKDONE		/* got message 3 and authenticated AP */
 };
 
 struct ieee80211_rxinfo {
@@ -204,6 +205,9 @@ struct ieee80211_tx_ba {
 #define IEEE80211_BA_MAX_WINSZ	64	/* corresponds to maximum ADDBA BUFSZ */
 
 	u_int8_t		ba_token;
+
+	/* Bitmap for ACK'd frames in the current BA window. */
+	uint64_t		ba_bitmap;
 };
 
 struct ieee80211_rx_ba {
@@ -330,6 +334,11 @@ struct ieee80211_node {
 	uint16_t		ni_htop2;
 	uint8_t			ni_basic_mcs[howmany(128,NBBY)];
 
+	/* Timeout handlers which trigger Tx Block Ack negotiation. */
+	struct timeout		ni_addba_req_to[IEEE80211_NUM_TID];
+	int			ni_addba_req_intval[IEEE80211_NUM_TID];
+#define IEEE80211_ADDBA_REQ_INTVAL_MAX 30	/* in seconds */
+
 	/* Block Ack records */
 	struct ieee80211_tx_ba	ni_tx_ba[IEEE80211_NUM_TID];
 	struct ieee80211_rx_ba	ni_rx_ba[IEEE80211_NUM_TID];
@@ -344,6 +353,16 @@ struct ieee80211_node {
 	u_int16_t		ni_qos_txseqs[IEEE80211_NUM_TID];
 	u_int16_t		ni_qos_rxseqs[IEEE80211_NUM_TID];
 	int			ni_fails;	/* failure count to associate */
+	uint32_t		ni_assoc_fail;	/* assoc failure reasons */
+#define IEEE80211_NODE_ASSOCFAIL_CHAN		0x01
+#define IEEE80211_NODE_ASSOCFAIL_IBSS		0x02
+#define IEEE80211_NODE_ASSOCFAIL_PRIVACY	0x04
+#define IEEE80211_NODE_ASSOCFAIL_BASIC_RATE	0x08
+#define IEEE80211_NODE_ASSOCFAIL_ESSID		0x10
+#define IEEE80211_NODE_ASSOCFAIL_BSSID		0x20
+#define IEEE80211_NODE_ASSOCFAIL_WPA_PROTO	0x40
+#define IEEE80211_NODE_ASSOCFAIL_WPA_KEY	0x80
+
 	int			ni_inact;	/* inactivity mark count */
 	int			ni_txrate;	/* index to ni_rates[] */
 	int			ni_state;
@@ -472,6 +491,7 @@ struct ieee80211_node *ieee80211_dup_bss(struct ieee80211com *,
 		const u_int8_t *);
 struct ieee80211_node *ieee80211_find_node(struct ieee80211com *,
 		const u_int8_t *);
+void ieee80211_ba_del(struct ieee80211_node *);
 struct ieee80211_node *ieee80211_find_rxnode(struct ieee80211com *,
 		const struct ieee80211_frame *);
 struct ieee80211_node *ieee80211_find_txnode(struct ieee80211com *,
@@ -482,6 +502,7 @@ struct ieee80211_node *
 		const char *, u_int8_t);
 void ieee80211_release_node(struct ieee80211com *,
 		struct ieee80211_node *);
+void ieee80211_node_cleanup(struct ieee80211com *, struct ieee80211_node *);
 void ieee80211_free_allnodes(struct ieee80211com *, int);
 void ieee80211_iterate_nodes(struct ieee80211com *,
 		ieee80211_iter_func *, void *);
@@ -494,6 +515,7 @@ int ieee80211_setup_htop(struct ieee80211_node *, const uint8_t *,
     uint8_t, int);
 int ieee80211_setup_rates(struct ieee80211com *,
 	    struct ieee80211_node *, const u_int8_t *, const u_int8_t *, int);
+void ieee80211_node_trigger_addba_req(struct ieee80211_node *, int);
 int ieee80211_iserp_sta(const struct ieee80211_node *);
 void ieee80211_count_longslotsta(void *, struct ieee80211_node *);
 void ieee80211_count_nonerpsta(void *, struct ieee80211_node *);
@@ -503,8 +525,7 @@ void ieee80211_node_join(struct ieee80211com *,
 		struct ieee80211_node *, int);
 void ieee80211_node_leave(struct ieee80211com *,
 		struct ieee80211_node *);
-int ieee80211_match_bss(struct ieee80211com *,
-		struct ieee80211_node *);
+int ieee80211_match_bss(struct ieee80211com *, struct ieee80211_node *, int);
 struct ieee80211_node *ieee80211_node_choose_bss(struct ieee80211com *, int,
 		struct ieee80211_node **);
 void ieee80211_node_join_bss(struct ieee80211com *, struct ieee80211_node *);
@@ -512,6 +533,7 @@ void ieee80211_create_ibss(struct ieee80211com* ,
 		struct ieee80211_channel *);
 void ieee80211_notify_dtim(struct ieee80211com *);
 void ieee80211_set_tim(struct ieee80211com *, int, int);
+void ieee80211_free_node(struct ieee80211com *, struct ieee80211_node *);
 
 int ieee80211_node_cmp(const struct ieee80211_node *,
 		const struct ieee80211_node *);

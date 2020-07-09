@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.43 2019/04/29 05:14:38 remi Exp $ */
+/*	$OpenBSD: parse.y,v 1.49 2020/01/21 20:38:52 remi Exp $ */
 
 /*
  * Copyright (c) 2004, 2005 Esben Norby <norby@openbsd.org>
@@ -102,6 +102,7 @@ struct config_defaults {
 	u_int16_t	rxmt_interval;
 	u_int16_t	metric;
 	u_int8_t	priority;
+	u_int8_t	p2p;
 };
 
 struct config_defaults	 globaldefs;
@@ -117,6 +118,7 @@ typedef struct {
 		int64_t		 number;
 		char		*string;
 		struct redistribute *redist;
+		struct in_addr	 id;
 	} v;
 	int lineno;
 } YYSTYPE;
@@ -125,7 +127,7 @@ typedef struct {
 
 %token	AREA INTERFACE ROUTERID FIBPRIORITY FIBUPDATE REDISTRIBUTE RTLABEL
 %token	RDOMAIN STUB ROUTER SPFDELAY SPFHOLDTIME EXTTAG
-%token	METRIC PASSIVE
+%token	METRIC P2P PASSIVE
 %token	HELLOINTERVAL TRANSMITDELAY
 %token	RETRANSMITINTERVAL ROUTERDEADTIME ROUTERPRIORITY
 %token	SET TYPE
@@ -139,6 +141,7 @@ typedef struct {
 %type	<v.number>	yesno no optlist, optlist_l option demotecount
 %type	<v.string>	string dependon
 %type	<v.redist>	redistribute
+%type	<v.id>		areaid
 
 %%
 
@@ -287,8 +290,10 @@ redistribute	: no REDISTRIBUTE STRING optlist dependon {
 				r->type = REDIST_STATIC;
 			else if (!strcmp($3, "connected"))
 				r->type = REDIST_CONNECTED;
-			else if (prefix($3, &r->addr, &r->prefixlen))
+			else if (prefix($3, &r->addr, &r->prefixlen)) {
 				r->type = REDIST_ADDR;
+				conf->redist_label_or_prefix = !$1;
+			}
 			else {
 				yyerror("unknown redistribute type");
 				free($3);
@@ -316,6 +321,8 @@ redistribute	: no REDISTRIBUTE STRING optlist dependon {
 			r->label = rtlabel_name2id($4);
 			if ($1)
 				r->type |= REDIST_NO;
+			else
+				conf->redist_label_or_prefix = 1;
 			r->metric = $5;
 			if ($6)
 				strlcpy(r->dependon, $6, sizeof(r->dependon));
@@ -443,6 +450,9 @@ defaults	: METRIC NUMBER {
 			}
 			defs->rxmt_interval = $2;
 		}
+		| TYPE P2P		{
+			defs->p2p = 1;
+		}
 		;
 
 optnl		: '\n' optnl
@@ -456,15 +466,8 @@ comma		: ','
 		| /*empty*/
 		;
 
-area		: AREA STRING {
-			struct in_addr	id;
-			if (inet_aton($2, &id) == 0) {
-				yyerror("error parsing area");
-				free($2);
-				YYERROR;
-			}
-			free($2);
-			area = conf_get_area(id);
+area		: AREA areaid {
+			area = conf_get_area($2);
 
 			memcpy(&areadefs, defs, sizeof(areadefs));
 			defs = &areadefs;
@@ -476,6 +479,23 @@ area		: AREA STRING {
 
 demotecount	: NUMBER	{ $$ = $1; }
 		| /*empty*/	{ $$ = 1; }
+		;
+
+areaid		: NUMBER {
+			if ($1 < 0 || $1 > 0xffffffff) {
+				yyerror("invalid area id");
+				YYERROR;
+			}
+			$$.s_addr = htonl($1);
+		}
+		| STRING {
+			if (inet_aton($1, &$$) == 0) {
+				yyerror("error parsing area");
+				free($1);
+				YYERROR;
+			}
+			free($1);
+		}
 		;
 
 areaopts_l	: areaopts_l areaoptsl nl
@@ -521,7 +541,7 @@ interface	: INTERFACE STRING	{
 				YYERROR;
 			}
 			free($2);
-			iface->area_id.s_addr = area->id.s_addr;
+			iface->area = area;
 			LIST_INSERT_HEAD(&area->iface_list, iface, entry);
 
 			memcpy(&ifacedefs, defs, sizeof(ifacedefs));
@@ -534,6 +554,8 @@ interface	: INTERFACE STRING	{
 			iface->metric = defs->metric;
 			iface->priority = defs->priority;
 			iface->cflags |= F_IFACE_CONFIGURED;
+			if (defs->p2p == 1)
+				iface->type = IF_TYPE_POINTOPOINT;
 			iface = NULL;
 			/* interface is always part of an area */
 			defs = &areadefs;
@@ -629,6 +651,7 @@ lookup(char *s)
 		{"metric",		METRIC},
 		{"no",			NO},
 		{"on",			ON},
+		{"p2p",			P2P},
 		{"passive",		PASSIVE},
 		{"rdomain",		RDOMAIN},
 		{"redistribute",	REDISTRIBUTE},
@@ -1013,6 +1036,7 @@ parse_config(char *filename, int opts)
 	defs->rxmt_interval = DEFAULT_RXMT_INTERVAL;
 	defs->metric = DEFAULT_METRIC;
 	defs->priority = DEFAULT_PRIORITY;
+	defs->p2p = 0;
 
 	conf->spf_delay = DEFAULT_SPF_DELAY;
 	conf->spf_hold_time = DEFAULT_SPF_HOLDTIME;
@@ -1191,6 +1215,16 @@ conf_check_rdomain(u_int rdomain)
 }
 
 void
+conf_clear_redist_list(struct redist_list *rl)
+{
+	struct redistribute *r;
+	while ((r = SIMPLEQ_FIRST(rl)) != NULL) {
+		SIMPLEQ_REMOVE_HEAD(rl, entry);
+		free(r);
+	}
+}
+
+void
 clear_config(struct ospfd_conf *xconf)
 {
 	struct area	*a;
@@ -1199,6 +1233,8 @@ clear_config(struct ospfd_conf *xconf)
 		LIST_REMOVE(a, entry);
 		area_del(a);
 	}
+
+	conf_clear_redist_list(&xconf->redist_list);
 
 	free(xconf);
 }

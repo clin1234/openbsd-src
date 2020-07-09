@@ -1,4 +1,4 @@
-/*	$OpenBSD: pci.h,v 1.1 2019/04/14 10:14:53 jsg Exp $	*/
+/*	$OpenBSD: pci.h,v 1.5 2020/06/08 04:48:15 jsg Exp $	*/
 /*
  * Copyright (c) 2015 Mark Kettenis
  *
@@ -19,24 +19,33 @@
 #define _LINUX_PCI_H
 
 #include <sys/types.h>
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
 /* sparc64 cpu.h needs time.h and siginfo.h (indirect via param.h) */
 #include <sys/param.h>
 #include <machine/cpu.h>
+
+#include <dev/pci/pcireg.h>
+#include <dev/pci/pcivar.h>
+#include <dev/pci/pcidevs.h>
 #include <uvm/uvm_extern.h>
 
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/kobject.h>
+#include <linux/dma-mapping.h> /* pci-dma-compat.h -> dma-mapping.h */
+#include <linux/mod_devicetable.h>
 
 struct pci_dev;
 
 struct pci_bus {
 	pci_chipset_tag_t pc;
 	unsigned char	number;
+	int		domain_nr;
 	pcitag_t	*bridgetag;
 	struct pci_dev	*self;
+};
+
+struct pci_acpi {
+	struct aml_node	*node;
 };
 
 struct pci_dev {
@@ -57,8 +66,22 @@ struct pci_dev {
 	int		irq;
 	int		msi_enabled;
 	uint8_t		no_64bit_msi;
+
+	struct pci_acpi dev;
 };
 #define PCI_ANY_ID (uint16_t) (~0U)
+
+#ifndef PCI_MEM_START
+#define PCI_MEM_START	0
+#endif
+
+#ifndef PCI_MEM_END
+#define PCI_MEM_END	0xffffffff
+#endif
+
+#ifndef PCI_MEM64_END
+#define PCI_MEM64_END	0xffffffffffffffff
+#endif
 
 #define PCI_VENDOR_ID_APPLE	PCI_VENDOR_APPLE
 #define PCI_VENDOR_ID_ASUSTEK	PCI_VENDOR_ASUSTEK
@@ -78,6 +101,7 @@ struct pci_dev {
 #define PCI_DEVFN(slot, func)	((slot) << 3 | (func))
 #define PCI_SLOT(devfn)		((devfn) >> 3)
 #define PCI_FUNC(devfn)		((devfn) & 0x7)
+#define PCI_BUS_NUM(devfn)	(((devfn) >> 8) & 0xff)
 
 #define pci_dev_put(x)
 
@@ -88,6 +112,12 @@ struct pci_dev {
 #define PCI_EXP_LNKCTL		0x10
 #define PCI_EXP_LNKCTL_HAWD	0x0200
 #define PCI_EXP_LNKCTL2		0x30
+#define PCI_EXP_LNKCTL2_ENTER_COMP	0x0010
+#define PCI_EXP_LNKCTL2_TX_MARGIN	0x0380
+#define PCI_EXP_LNKCTL2_TLS		PCI_PCIE_LCSR2_TLS
+#define PCI_EXP_LNKCTL2_TLS_2_5GT	PCI_PCIE_LCSR2_TLS_2_5
+#define PCI_EXP_LNKCTL2_TLS_5_0GT	PCI_PCIE_LCSR2_TLS_5
+#define PCI_EXP_LNKCTL2_TLS_8_0GT	PCI_PCIE_LCSR2_TLS_8
 
 #define PCI_COMMAND		PCI_COMMAND_STATUS_REG
 #define PCI_COMMAND_MEMORY	PCI_COMMAND_MEM_ENABLE
@@ -202,6 +232,12 @@ pci_pcie_cap(struct pci_dev *pdev)
 }
 
 static inline bool
+pci_is_pcie(struct pci_dev *pdev)
+{
+	return (pci_pcie_cap(pdev) > 0);
+}
+
+static inline bool
 pci_is_root_bus(struct pci_bus *pbus)
 {
 	return (pbus->bridgetag == NULL);
@@ -218,6 +254,51 @@ pcie_capability_read_dword(struct pci_dev *pdev, int off, u32 *val)
 	}
 	*val = pci_conf_read(pdev->pc, pdev->tag, pos + off);
 	return 0;
+}
+
+static inline int
+pcie_capability_read_word(struct pci_dev *pdev, int off, u16 *val)
+{
+	int pos;
+	if (!pci_get_capability(pdev->pc, pdev->tag, PCI_CAP_PCIEXPRESS,
+	    &pos, NULL)) {
+		*val = 0;
+		return -EINVAL;
+	}
+	pci_read_config_word(pdev, pos + off, val);
+	return 0;
+}
+
+static inline int
+pcie_capability_write_word(struct pci_dev *pdev, int off, u16 val)
+{
+	int pos;
+	if (!pci_get_capability(pdev->pc, pdev->tag, PCI_CAP_PCIEXPRESS,
+	    &pos, NULL))
+		return -EINVAL;
+	pci_write_config_word(pdev, pos + off, val);
+	return 0;
+}
+
+static inline int
+pcie_get_readrq(struct pci_dev *pdev)
+{
+	uint16_t val;
+
+	pcie_capability_read_word(pdev, PCI_PCIE_DCSR, &val);
+
+	return 128 << ((val & PCI_PCIE_DCSR_MPS) >> 12);
+}
+
+static inline int
+pcie_set_readrq(struct pci_dev *pdev, int rrq)
+{
+	uint16_t val;
+	
+	pcie_capability_read_word(pdev, PCI_PCIE_DCSR, &val);
+	val &= ~PCI_PCIE_DCSR_MPS;
+	val |= (ffs(rrq) - 8) << 12;
+	return pcie_capability_write_word(pdev, PCI_PCIE_DCSR, val);
 }
 
 #define pci_set_master(x)
@@ -260,6 +341,20 @@ enum pci_bus_speed pcie_get_speed_cap(struct pci_dev *);
 enum pcie_link_width pcie_get_width_cap(struct pci_dev *);
 int pci_resize_resource(struct pci_dev *, int, int);
 
+static inline void
+pcie_bandwidth_available(struct pci_dev *pdev, struct pci_dev **ldev,
+    enum pci_bus_speed *speed, enum pcie_link_width *width)
+{
+	struct pci_dev *bdev = pdev->bus->self;
+	if (bdev == NULL)
+		return;
+
+	if (speed)
+		*speed = pcie_get_speed_cap(bdev);
+	if (width)
+		*width = pcie_get_width_cap(bdev);
+}
+
 #define pci_save_state(x)
 #define pci_enable_device(x)		0
 #define pci_disable_device(x)
@@ -267,12 +362,40 @@ int pci_resize_resource(struct pci_dev *, int, int);
 #define pci_set_drvdata(x, y)
 
 static inline int
+pci_domain_nr(struct pci_bus *pbus)
+{
+	return pbus->domain_nr;
+}
+
+static inline int
+pci_irq_vector(struct pci_dev *pdev, unsigned int num)
+{
+	return pdev->irq;
+}
+
+static inline void
+pci_free_irq_vectors(struct pci_dev *pdev)
+{
+}
+
+static inline int
 pci_set_power_state(struct pci_dev *dev, int state)
 {
 	return 0;
 }
 
-#if defined(__amd64__) || defined(__i386__)
+static inline struct pci_dev *
+pci_get_class(pcireg_t class, struct pci_dev *pdev)
+{
+	return NULL;
+}
+
+#define PCI_CLASS_DISPLAY_VGA \
+    (PCI_CLASS_DISPLAY | PCI_SUBCLASS_DISPLAY_VGA)
+#define PCI_CLASS_DISPLAY_OTHER \
+    (PCI_CLASS_DISPLAY | PCI_SUBCLASS_DISPLAY_MISC)
+
+#if defined(__amd64__) || defined(__arm64__) || defined(__i386__)
 
 #define PCI_DMA_BIDIRECTIONAL	0
 
@@ -296,6 +419,6 @@ pci_dma_mapping_error(struct pci_dev *pdev, dma_addr_t dma_addr)
 #define pci_set_dma_mask(x, y)			0
 #define pci_set_consistent_dma_mask(x, y)	0
 
-#endif /* defined(__amd64__) || defined(__i386__) */
+#endif /* defined(__amd64__) || defined(__arm64__) || defined(__i386__) */
 
 #endif

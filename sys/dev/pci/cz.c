@@ -1,4 +1,4 @@
-/*	$OpenBSD: cz.c,v 1.21 2018/02/19 08:59:52 mpi Exp $ */
+/*	$OpenBSD: cz.c,v 1.24 2020/05/21 09:31:59 mpi Exp $ */
 /*	$NetBSD: cz.c,v 1.15 2001/01/20 19:10:36 thorpej Exp $	*/
 
 /*-
@@ -181,7 +181,6 @@ struct	cztty_softc * cztty_getttysoftc(dev_t dev);
 int	cztty_findmajor(void);
 int	cztty_major;
 int	cztty_attached_ttys;
-int	cz_timeout_ticks;
 
 cdev_decl(cztty);
 
@@ -362,11 +361,8 @@ cz_attach(parent, self, aux)
  polling_mode:
 	if (cz->cz_ih == NULL) {
 		timeout_set(&cz->cz_timeout, cz_poll, cz);
-		if (cz_timeout_ticks == 0)
-			cz_timeout_ticks = max(1, hz * CZ_POLL_MS / 1000);
-		printf("%s: polling mode, %d ms interval (%d tick%s)\n",
-		    cz->cz_dev.dv_xname, CZ_POLL_MS, cz_timeout_ticks,
-		    cz_timeout_ticks == 1 ? "" : "s");
+		printf("%s: polling mode, %d ms interval\n",
+		    cz->cz_dev.dv_xname, CZ_POLL_MS);
 	}
 
 	if (cztty_major == 0)
@@ -667,7 +663,7 @@ cz_poll(void *arg)
 	struct cz_softc *cz = arg;
 
 	cz_intr(cz);
-	timeout_add(&cz->cz_timeout, cz_timeout_ticks);
+	timeout_add_msec(&cz->cz_timeout, CZ_POLL_MS);
 
 	splx(s);
 }
@@ -825,7 +821,8 @@ cz_wait_pci_doorbell(struct cz_softc *cz, char *wstring)
 	int	error;
 
 	while (CZ_PLX_READ(cz, PLX_PCI_LOCAL_DOORBELL)) {
-		error = tsleep(cz, TTIPRI | PCATCH, wstring, max(1, hz/100));
+		error = tsleep_nsec(cz, TTIPRI | PCATCH, wstring,
+		    MSEC_TO_NSEC(10));
 		if ((error != 0) && (error != EWOULDBLOCK))
 			return (error);
 	}
@@ -921,7 +918,7 @@ cztty_shutdown(struct cztty_softc *sc)
 	 */
 	if (ISSET(tp->t_cflag, HUPCL)) {
 		cztty_modem(sc, 0);
-		(void) tsleep(tp, TTIPRI, ttclos, hz);
+		tsleep_nsec(tp, TTIPRI, ttclos, SEC_TO_NSEC(1));
 	}
 
 	/* Disable the channel. */
@@ -983,7 +980,7 @@ czttyopen(dev_t dev, int flags, int mode, struct proc *p)
 			printf("%s: Enabling polling.\n",
 			    cz->cz_dev.dv_xname);
 #endif
-			timeout_add(&cz->cz_timeout, cz_timeout_ticks);
+			timeout_add_msec(&cz->cz_timeout, CZ_POLL_MS);
 		}
 
 		/*
@@ -1116,22 +1113,6 @@ czttywrite(dev_t dev, struct uio *uio, int flags)
 
 	return ((*linesw[tp->t_line].l_write)(tp, uio, flags));
 }
-
-#if 0
-/*
- * czttypoll:
- *
- *	Poll a Cyclades-Z serial port.
- */
-int
-czttypoll(dev_t dev, int events, struct proc *p)
-{
-	struct cztty_softc *sc = CZTTY_SOFTC(dev);
-	struct tty *tp = sc->sc_tty;
- 
-	return ((*linesw[tp->t_line].l_poll)(tp, events, p));
-}
-#endif
 
 /*
  * czttyioctl:

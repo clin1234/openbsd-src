@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.9 2019/04/20 22:59:03 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.12 2020/03/03 19:04:28 otto Exp $
 
 .include "${.CURDIR}/../Makefile.inc"
 
@@ -21,19 +21,19 @@ SRCS=	alloc.c cons.c ctime.c exit.c getchar.c getfile.c getln.c globals.c \
 	snprintf.c strchr.c strcmp.c strerror.c strncmp.c strncpy.c strtol.c
 
 # io routines
-SRCS+=	close.c closeall.c dev.c disklabel.c dkcksum.c fstat.c ioctl.c \
-	lseek.c open.c read.c readdir.c stat.c write.c
+SRCS+=	close.c closeall.c dev.c disklabel.c dkcksum.c fchmod.c fstat.c \
+	ioctl.c lseek.c open.c read.c readdir.c stat.c write.c
 #SRCS+=	nullfs.c
 
 #SRCS+=	cread.c
 #CPPFLAGS+= -D__INTERNAL_LIBSA_CREAD
 
 # boot filesystems
-SRCS+=	ufs.c cd9660.c
+SRCS+=	ufs.c ufs2.c cd9660.c
 
 CFLAGS+=-DNO_NET
 
-SRCS+=	loadfile.c
+SRCS+=	loadfile.c arc4.c
 
 ${OBJS}:	${.CURDIR}/../Makefile.inc
 

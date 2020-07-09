@@ -215,7 +215,6 @@ struct hvs_softc {
 	int			 sc_initiator;
 
 	struct scsi_iopool	 sc_iopool;
-	struct scsi_adapter	 sc_switch;
 	struct scsi_link         sc_link;
 	struct device		*sc_scsibus;
 	struct task		 sc_probetask;
@@ -247,6 +246,10 @@ struct cfdriver hvs_cd = {
 
 const struct cfattach hvs_ca = {
 	sizeof(struct hvs_softc), hvs_match, hvs_attach
+};
+
+struct scsi_adapter hvs_switch = {
+	hvs_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 int
@@ -305,18 +308,14 @@ hvs_attach(struct device *parent, struct device *self, void *aux)
 
 	task_set(&sc->sc_probetask, hvs_scsi_probe, sc);
 
-	sc->sc_switch.scsi_cmd = hvs_scsi_cmd;
-	sc->sc_switch.scsi_minphys = scsi_minphys;
-
-	sc->sc_link.adapter = &sc->sc_switch;
+	sc->sc_link.adapter = &hvs_switch;
 	sc->sc_link.adapter_softc = self;
 	sc->sc_link.luns = sc->sc_flags & HVSF_SCSI ? 64 : 1;
 	sc->sc_link.adapter_buswidth = 2;
-	sc->sc_link.adapter_target = 2;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.openings = sc->sc_nccb;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	memset(&saa, 0, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 	sc->sc_scsibus = config_found(self, &saa, scsiprint);
 
@@ -600,7 +599,7 @@ fixup_inquiry(struct scsi_xfer *xs, struct hvs_srb *srb)
 	    sc->sc_proto == HVS_PROTO_VERSION_WIN7) &&
 	    !is_inquiry_valid(inq) && datalen >= 4 &&
 	    (inq->version == 0 || inq->response_format == 0)) {
-		inq->version = 0x05; /* SPC-3 */
+		inq->version = SCSI_REV_SPC3;
 		inq->response_format = 2;
 	} else if (datalen >= SID_INQUIRY_HDR + SID_SCSI2_ALEN) {
 		/*
@@ -610,9 +609,9 @@ fixup_inquiry(struct scsi_xfer *xs, struct hvs_srb *srb)
 		scsi_strvis(vendor, inq->vendor, sizeof(vendor));
 		if ((sc->sc_proto == HVS_PROTO_VERSION_WIN8_1 ||
 		    sc->sc_proto == HVS_PROTO_VERSION_WIN8) &&
-		    SCSISPC(inq->version) == 2 &&
+		    (SID_ANSII_REV(inq) == SCSI_REV_SPC2) &&
 		    !strncmp(vendor, "Msft", 4))
-			inq->version = 0x05; /* SPC-3 */
+			inq->version = SCSI_REV_SPC3;
 	}
 }
 

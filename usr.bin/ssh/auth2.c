@@ -1,4 +1,4 @@
-/* $OpenBSD: auth2.c,v 1.155 2019/03/25 22:34:52 djm Exp $ */
+/* $OpenBSD: auth2.c,v 1.158 2020/03/06 18:16:21 markus Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  *
@@ -23,7 +23,6 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
@@ -36,6 +35,7 @@
 #include <unistd.h>
 #include <time.h>
 
+#include "stdlib.h"
 #include "atomicio.h"
 #include "xmalloc.h"
 #include "ssh2.h"
@@ -207,7 +207,7 @@ input_service_request(int type, u_int32_t seq, struct ssh *ssh)
 	r = 0;
  out:
 	free(service);
-	return 0;
+	return r;
 }
 
 #define MIN_FAIL_DELAY_SECONDS 0.005
@@ -668,7 +668,7 @@ auth2_record_info(Authctxt *authctxt, const char *fmt, ...)
 	i = vasprintf(&authctxt->auth_method_info, fmt, ap);
 	va_end(ap);
 
-	if (i < 0 || authctxt->auth_method_info == NULL)
+	if (i == -1)
 		fatal("%s: vasprintf failed", __func__);
 }
 

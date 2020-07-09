@@ -1,4 +1,4 @@
-/*	$OpenBSD: z8530tty.c,v 1.30 2018/02/19 08:59:52 mpi Exp $	*/
+/*	$OpenBSD: z8530tty.c,v 1.32 2020/01/09 14:35:19 mpi Exp $	*/
 /*	$NetBSD: z8530tty.c,v 1.77 2001/05/30 15:24:24 lukem Exp $	*/
 
 /*-
@@ -429,7 +429,7 @@ zs_shutdown(struct zstty_softc *zst)
 	if (ISSET(tp->t_cflag, HUPCL) || ISSET(tp->t_state, TS_WOPEN)) {
 		zs_modem(zst, 0);
 		/* hold low for 1 second */
-		(void)tsleep(cs, TTIPRI, ttclos, hz);
+		tsleep_nsec(cs, TTIPRI, ttclos, SEC_TO_NSEC(1));
 	}
 
 	/* Turn off interrupts if not the console. */
@@ -630,7 +630,7 @@ zsopen(dev_t dev, int flags, int mode, struct proc *p)
 			break;
 
 		error = ttysleep(tp, (caddr_t)&tp->t_rawq, TTIPRI | PCATCH,
-		    ttopen, 0);
+		    ttopen);
 
 		if (!ZSDIALOUT(dev) && cs->cs_cua && error == EINTR) {
 			error = 0;

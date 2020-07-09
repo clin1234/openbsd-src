@@ -1,6 +1,6 @@
 define(MACHINE,hppa)dnl
 vers(__file__,
-	{-$OpenBSD: MAKEDEV.md,v 1.60 2016/09/04 15:38:59 naddy Exp $-},
+	{-$OpenBSD: MAKEDEV.md,v 1.65 2020/07/06 06:11:26 dlg Exp $-},
 etc.MACHINE)dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
@@ -53,6 +53,7 @@ _TITLE(usb)
 _DEV(uall)
 _DEV(usb, 40)
 _DEV(uhid, 41)
+_DEV(fido, 61)
 _DEV(ugen, 42)
 _DEV(ulpt, 43)
 _DEV(ttyU, 45)
@@ -61,6 +62,7 @@ _DEV(au, 35)
 _DEV(bio, 37)
 _DEV(bpf, 17)
 _DEV(diskmap,56)
+_DEV(dt, 32)
 _DEV(fdesc, 16)
 _DEV(fuse, 58)
 _DEV(hotplug, 47)
@@ -68,6 +70,7 @@ _DEV(pci, 31)
 _DEV(pdc, 22)
 _DEV(pf, 21)
 _DEV(pppx,57)
+_DEV(pppac,62)
 _DEV(rnd, 20)
 _DEV(tun, 18)
 _DEV(tap, 59)
@@ -75,6 +78,7 @@ _DEV(uk, 15)
 _DEV(vi, 33)
 _DEV(vscsi, 54)
 _DEV(switch, 60)
+_DEV(kstat, 51)
 dnl
 divert(__mddivert)dnl
 dnl
@@ -89,7 +93,7 @@ _std(1, 2, 25, 6)
 dnl
 dnl *** hppa specific devices
 dnl
-twrget(all, au, audio, 0, 1, 2)dnl
+twrget(all, au, audio, 0, 1, 2, 3)dnl
 target(all, ch, 0)dnl
 target(all, bio)dnl
 target(all, vscsi, 0)dnl

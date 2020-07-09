@@ -1,4 +1,4 @@
-.\"     $OpenBSD: mq_init.9,v 1.9 2018/02/09 02:26:33 patrick Exp $
+.\"     $OpenBSD: mq_init.9,v 1.12 2020/06/21 05:43:48 dlg Exp $
 .\"
 .\"  Copyright (c) 2015 David Gwynne <dlg@openbsd.org>
 .\"
@@ -14,12 +14,13 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: February 9 2018 $
+.Dd $Mdocdate: June 21 2020 $
 .Dt MQ_INIT 9
 .Os
 .Sh NAME
 .Nm mq_init ,
 .Nm mq_enqueue ,
+.Nm mq_push ,
 .Nm mq_dequeue ,
 .Nm mq_enlist ,
 .Nm mq_delist ,
@@ -27,6 +28,7 @@
 .Nm mq_len ,
 .Nm mq_empty ,
 .Nm mq_full ,
+.Nm mq_hdatalen ,
 .Nm mq_purge ,
 .Nm mq_drops ,
 .Nm mq_set_maxlen ,
@@ -38,6 +40,8 @@
 .Fn mq_init "struct mbuf_queue *mq" "unsigned int maxlen" "int ipl"
 .Ft int
 .Fn mq_enqueue "struct mbuf_queue *mq" "struct mbuf *m"
+.Ft int
+.Fn mq_push "struct mbuf_queue *mq" "struct mbuf *m"
 .Ft struct mbuf *
 .Fn mq_dequeue "struct mbuf_queue *mq"
 .Ft int
@@ -52,6 +56,8 @@
 .Fn mq_empty "struct mbuf_queue *mq"
 .Ft int
 .Fn mq_full "struct mbuf_queue *mq"
+.Ft unsigned int
+.Fn mq_hdatalen "struct mbuf_queue *mq"
 .Ft unsigned int
 .Fn mq_purge "struct mbuf_queue *mq"
 .Ft unsigned int
@@ -109,6 +115,17 @@ Enqueue mbuf
 on the end of the
 .Fa mq
 mbuf queue.
+If the queue is full then
+.Fa m
+will be dropped.
+.It Fn mq_push "struct mbuf_queue *mq" "struct mbuf *m"
+Enqueue mbuf
+.Fa m
+on the end of the
+.Fa mq
+mbuf queue.
+If the queue is full then the mbuf at the head of the queue
+will be dropped.
 .It Fn mq_dequeue "struct mbuf_queue *mq"
 Dequeue an mbuf from the front of the
 .Fa mq
@@ -142,6 +159,10 @@ mbuf queue is empty.
 Return if the
 .Fa mq
 mbuf queue is full.
+.It Fn mq_hdatalen "struct mbuf_queue *mq"
+Return the number of bytes in the packet at the head of the
+.Fa mq
+mbuf queue.
 .It Fn mq_purge "struct mbuf_queue *mq"
 Free all the mbufs on the
 .Fa mq
@@ -164,6 +185,7 @@ already exist on the queue.
 .Sh CONTEXT
 .Fn mq_init ,
 .Fn mq_enqueue ,
+.Fn mq_push ,
 .Fn mq_dequeue ,
 .Fn mq_enlist ,
 .Fn mq_delist ,
@@ -205,9 +227,16 @@ returns 0 if the mbuf was successfully queued, or non-zero if the
 mbuf was freed because it would cause the queue to exceed its maximum
 length.
 .Pp
+.Fn mq_push
+returns 0 if there was space on the queue for the mbuf, or non-zero
+if the head of the queue was freed to make space for it.
+.Pp
 .Fn mq_enlist
 returns the number of mbufs that were dropped from the list if the
 length of the queue exceeded its maximum length.
+.Pp
+.Fn mq_hdatalen
+returns the size of a packet on the queue, or 0 if the queue is empty.
 .Pp
 .Fn mq_purge
 returns the number of mbufs that were freed.

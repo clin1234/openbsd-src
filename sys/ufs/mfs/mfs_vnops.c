@@ -1,4 +1,4 @@
-/*	$OpenBSD: mfs_vnops.c,v 1.51 2018/04/28 03:13:05 visa Exp $	*/
+/*	$OpenBSD: mfs_vnops.c,v 1.54 2020/05/21 09:35:09 mpi Exp $	*/
 /*	$NetBSD: mfs_vnops.c,v 1.8 1996/03/17 02:16:32 christos Exp $	*/
 
 /*
@@ -47,7 +47,7 @@
 #include <ufs/mfs/mfs_extern.h>
 
 /* mfs vnode operations. */
-struct vops mfs_vops = {
+const struct vops mfs_vops = {
         .vop_lookup     = mfs_badop,
         .vop_create     = mfs_badop,
         .vop_mknod      = mfs_badop,
@@ -60,6 +60,7 @@ struct vops mfs_vops = {
         .vop_write      = mfs_badop,
         .vop_ioctl      = mfs_ioctl,
         .vop_poll       = mfs_badop,
+        .vop_kqfilter   = mfs_badop,
         .vop_revoke     = mfs_revoke,
         .vop_fsync      = spec_fsync,
         .vop_remove     = mfs_badop,
@@ -193,7 +194,8 @@ mfs_close(void *v)
 	 * On last close of a memory filesystem we must invalidate any in
 	 * core blocks, so that we can free up its vnode.
 	 */
-	if ((error = vinvalbuf(vp, V_SAVE, ap->a_cred, ap->a_p, 0, 0)) != 0)
+	error = vinvalbuf(vp, V_SAVE, ap->a_cred, ap->a_p, 0, INFSLP);
+	if (error != 0)
 		return (error);
 
 #ifdef DIAGNOSTIC

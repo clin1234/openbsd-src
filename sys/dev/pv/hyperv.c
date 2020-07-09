@@ -63,8 +63,6 @@
 
 #include <machine/i82489var.h>
 
-#include <dev/rndvar.h>
-
 #include <dev/pv/pvvar.h>
 #include <dev/pv/pvreg.h>
 #include <dev/pv/hypervreg.h>
@@ -143,7 +141,7 @@ struct {
 };
 
 struct timecounter hv_timecounter = {
-	hv_gettime, 0, 0xffffffff, 10000000, "hyperv", 9001
+	hv_gettime, 0, 0xffffffff, 10000000, "hyperv", 9001, NULL, 0
 };
 
 struct cfdriver hyperv_cd = {
@@ -805,6 +803,7 @@ int
 hv_vmbus_connect(struct hv_softc *sc)
 {
 	const uint32_t versions[] = {
+		VMBUS_VERSION_WIN10,
 		VMBUS_VERSION_WIN8_1, VMBUS_VERSION_WIN8,
 		VMBUS_VERSION_WIN7, VMBUS_VERSION_WS2008
 	};

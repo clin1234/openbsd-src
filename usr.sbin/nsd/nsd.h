@@ -11,9 +11,21 @@
 #define	_NSD_H_
 
 #include <signal.h>
+#include <net/if.h>
+#ifndef IFNAMSIZ
+#  ifdef IF_NAMESIZE
+#    define IFNAMSIZ IF_NAMESIZE
+#  else
+#    define IFNAMSIZ 16
+#  endif
+#endif
+#ifdef HAVE_OPENSSL_SSL_H
+#include <openssl/ssl.h>
+#endif
 
 #include "dns.h"
 #include "edns.h"
+#include "bitset.h"
 struct netio_handler;
 struct nsd_options;
 struct udb_base;
@@ -107,17 +119,37 @@ typedef	unsigned long stc_type;
 #define	ZTATUP2(nsd, zone, stc, i) /* Nothing */
 #endif /* USE_ZONE_STATS */
 
+#define NSD_SOCKET_IS_OPTIONAL (1<<0)
+#define NSD_BIND_DEVICE (1<<1)
+
+struct nsd_addrinfo
+{
+	int ai_flags;
+	int ai_family;
+	int ai_socktype;
+	socklen_t ai_addrlen;
+	struct sockaddr_storage ai_addr;
+};
+
 struct nsd_socket
 {
-	struct addrinfo	*	addr;
-	int			s;
-	int			fam;
+	struct nsd_addrinfo addr;
+	int s;
+	int flags;
+	struct nsd_bitset *servers;
+	char device[IFNAMSIZ];
+	int fib;
 };
 
 struct nsd_child
 {
-	 /* The type of child process (UDP or TCP handler). */
-	int   kind;
+#ifdef HAVE_CPUSET_T
+	/* Processor(s) that child process must run on (if applicable). */
+	cpuset_t *cpuset;
+#endif
+
+	/* The type of child process (UDP or TCP handler). */
+	int kind;
 
 	/* The child's process id.  */
 	pid_t pid;
@@ -206,12 +238,17 @@ struct	nsd
 	const char		*version;
 	const char		*identity;
 	uint16_t		nsid_len;
-	unsigned char   *nsid;
+	unsigned char		*nsid;
 	uint8_t 		file_rotation_ok;
+
+#ifdef HAVE_CPUSET_T
+	int			use_cpu_affinity;
+	cpuset_t*		cpuset;
+	cpuset_t*		xfrd_cpuset;
+#endif
 
 	/* number of interfaces */
 	size_t	ifs;
-	uint8_t grab_ip6_optional;
 	/* non0 if so_reuseport is in use, if so, tcp, udp array increased */
 	int reuseport;
 
@@ -244,6 +281,7 @@ struct	nsd
 		stc_type qclass[4];	/* Class IN or Class CH or other */
 		stc_type qudp, qudp6;	/* Number of queries udp and udp6 */
 		stc_type ctcp, ctcp6;	/* Number of tcp and tcp6 connections */
+		stc_type ctls, ctls6;	/* Number of tls and tls6 connections */
 		stc_type rcode[17], opcode[6]; /* Rcodes & opcodes */
 		/* Dropped, truncated, queries for nonconfigured zone, tx errors */
 		stc_type dropped, truncated, wrongzone, txerr, rxerr;
@@ -276,6 +314,11 @@ struct	nsd
 	unsigned int err_limit_count;
 
 	struct nsd_options* options;
+
+#ifdef HAVE_SSL
+	/* TLS specific configuration */
+	SSL_CTX *tls_ctx;
+#endif
 };
 
 extern struct nsd nsd;
@@ -295,6 +338,7 @@ void server_child(struct nsd *nsd);
 void server_shutdown(struct nsd *nsd) ATTR_NORETURN;
 void server_close_all_sockets(struct nsd_socket sockets[], size_t n);
 struct event_base* nsd_child_event_base(void);
+void service_remaining_tcp(struct nsd* nsd);
 /* extra domain numbers for temporary domains */
 #define EXTRA_DOMAIN_NUMBERS 1024
 #define SLOW_ACCEPT_TIMEOUT 2 /* in seconds */
@@ -311,6 +355,11 @@ void server_prepare_xfrd(struct nsd *nsd);
 void server_start_xfrd(struct nsd *nsd, int del_db, int reload_active);
 /* send SOA serial numbers to xfrd */
 void server_send_soa_xfrd(struct nsd *nsd, int shortsoa);
+#ifdef HAVE_SSL
+SSL_CTX* server_tls_ctx_setup(char* key, char* pem, char* verifypem);
+SSL_CTX* server_tls_ctx_create(struct nsd *nsd, char* verifypem, char* ocspfile);
+void perform_openssl_init(void);
+#endif
 ssize_t block_read(struct nsd* nsd, int s, void* p, ssize_t sz, int timeout);
 
 #endif	/* _NSD_H_ */

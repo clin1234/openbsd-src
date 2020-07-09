@@ -1,4 +1,4 @@
-/* $OpenBSD: server-fn.c,v 1.121 2019/05/03 20:44:24 nicm Exp $ */
+/* $OpenBSD: server-fn.c,v 1.127 2020/07/04 14:24:02 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -183,10 +183,11 @@ server_kill_pane(struct window_pane *wp)
 	struct window	*w = wp->window;
 
 	if (window_count_panes(w) == 1) {
-		server_kill_window(w);
+		server_kill_window(w, 1);
 		recalculate_sizes();
 	} else {
 		server_unzoom_window(w);
+		server_client_remove_pane(wp);
 		layout_close_pane(wp);
 		window_remove_pane(w, wp);
 		server_redraw_window(w);
@@ -194,19 +195,15 @@ server_kill_pane(struct window_pane *wp)
 }
 
 void
-server_kill_window(struct window *w)
+server_kill_window(struct window *w, int renumber)
 {
-	struct session		*s, *next_s, *target_s;
-	struct session_group	*sg;
-	struct winlink		*wl;
+	struct session	*s, *s1;
+	struct winlink	*wl;
 
-	next_s = RB_MIN(sessions, &sessions);
-	while (next_s != NULL) {
-		s = next_s;
-		next_s = RB_NEXT(sessions, &sessions, s);
-
+	RB_FOREACH_SAFE(s, sessions, &sessions, s1) {
 		if (!session_has(s, w))
 			continue;
+
 		server_unzoom_window(w);
 		while ((wl = winlink_find_by_window(&s->windows, w)) != NULL) {
 			if (session_detach(s, wl)) {
@@ -216,15 +213,33 @@ server_kill_window(struct window *w)
 				server_redraw_session_group(s);
 		}
 
-		if (options_get_number(s->options, "renumber-windows")) {
-			if ((sg = session_group_contains(s)) != NULL) {
-				TAILQ_FOREACH(target_s, &sg->sessions, gentry)
-					session_renumber_windows(target_s);
-			} else
-				session_renumber_windows(s);
-		}
+		if (renumber)
+			server_renumber_session(s);
 	}
 	recalculate_sizes();
+}
+
+void
+server_renumber_session(struct session *s)
+{
+	struct session_group	*sg;
+
+	if (options_get_number(s->options, "renumber-windows")) {
+		if ((sg = session_group_contains(s)) != NULL) {
+			TAILQ_FOREACH(s, &sg->sessions, gentry)
+			    session_renumber_windows(s);
+		} else
+			session_renumber_windows(s);
+	}
+}
+
+void
+server_renumber_all(void)
+{
+	struct session	*s;
+
+	RB_FOREACH(s, sessions, &sessions)
+		server_renumber_session(s);
 }
 
 int
@@ -307,7 +322,7 @@ server_destroy_pane(struct window_pane *wp, int notify)
 		wp->fd = -1;
 	}
 
-	if (options_get_number(w->options, "remain-on-exit")) {
+	if (options_get_number(wp->options, "remain-on-exit")) {
 		if (~wp->flags & PANE_STATUSREADY)
 			return;
 
@@ -318,7 +333,7 @@ server_destroy_pane(struct window_pane *wp, int notify)
 		if (notify)
 			notify_pane("pane-died", wp);
 
-		screen_write_start(&ctx, wp, &wp->base);
+		screen_write_start_pane(&ctx, wp, &wp->base);
 		screen_write_scrollregion(&ctx, 0, screen_size_y(ctx.s) - 1);
 		screen_write_cursormove(&ctx, 0, screen_size_y(ctx.s) - 1, 0);
 		screen_write_linefeed(&ctx, 1, 8);
@@ -334,8 +349,8 @@ server_destroy_pane(struct window_pane *wp, int notify)
 			    tim);
 		} else if (WIFSIGNALED(wp->status)) {
 			screen_write_nputs(&ctx, -1, &gc,
-			    "Pane is dead (signal %d, %s)",
-			    WTERMSIG(wp->status),
+			    "Pane is dead (signal %s, %s)",
+			    sig2name(WTERMSIG(wp->status)),
 			    tim);
 		}
 
@@ -348,11 +363,12 @@ server_destroy_pane(struct window_pane *wp, int notify)
 		notify_pane("pane-exited", wp);
 
 	server_unzoom_window(w);
+	server_client_remove_pane(wp);
 	layout_close_pane(wp);
 	window_remove_pane(w, wp);
 
 	if (TAILQ_EMPTY(&w->panes))
-		server_kill_window(w);
+		server_kill_window(w, 1);
 	else
 		server_redraw_window(w);
 }
@@ -437,36 +453,6 @@ server_check_unattached(void)
 		if (options_get_number (s->options, "destroy-unattached"))
 			session_destroy(s, 1, __func__);
 	}
-}
-
-int
-server_set_stdin_callback(struct client *c, void (*cb)(struct client *, int,
-    void *), void *cb_data, char **cause)
-{
-	if (c == NULL || c->session != NULL) {
-		*cause = xstrdup("no client with stdin");
-		return (-1);
-	}
-	if (c->flags & CLIENT_TERMINAL) {
-		*cause = xstrdup("stdin is a tty");
-		return (-1);
-	}
-	if (c->stdin_callback != NULL) {
-		*cause = xstrdup("stdin is in use");
-		return (-1);
-	}
-
-	c->stdin_callback_data = cb_data;
-	c->stdin_callback = cb;
-
-	c->references++;
-
-	if (c->stdin_closed)
-		c->stdin_callback(c, 1, c->stdin_callback_data);
-
-	proc_send(c->peer, MSG_STDIN, -1, NULL, 0);
-
-	return (0);
 }
 
 void

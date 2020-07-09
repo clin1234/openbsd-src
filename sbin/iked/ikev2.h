@@ -1,4 +1,4 @@
-/*	$OpenBSD: ikev2.h,v 1.30 2019/05/11 16:30:23 patrick Exp $	*/
+/*	$OpenBSD: ikev2.h,v 1.33 2020/05/26 20:24:31 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -225,13 +225,16 @@ extern struct iked_constmap ikev2_xformprf_map[];
 #define IKEV2_XFORMAUTH_HMAC_SHA2_384_192 13	/* RFC4868 */
 #define IKEV2_XFORMAUTH_HMAC_SHA2_512_256 14	/* RFC4868 */
 
+/* Placeholders for AEAD ciphers (only used internally) */
+#define IKEV2_XFORMAUTH_AES_GCM_8	2018	/* internal */
+#define IKEV2_XFORMAUTH_AES_GCM_12	2019	/* internal */
+#define IKEV2_XFORMAUTH_AES_GCM_16	2020	/* internal */
+
 extern struct iked_constmap ikev2_xformauth_map[];
 
 #define IKEV2_XFORMDH_NONE		0	/* No DH */
 #define IKEV2_XFORMDH_MODP_768		1	/* DH Group 1 */
 #define IKEV2_XFORMDH_MODP_1024		2	/* DH Group 2 */
-#define IKEV2_XFORMDH_EC2N_155		3	/* DH Group 3 */
-#define IKEV2_XFORMDH_EC2N_185		4	/* DH Group 3 */
 #define IKEV2_XFORMDH_MODP_1536		5	/* DH Group 5 */
 #define IKEV2_XFORMDH_MODP_2048		14	/* DH Group 14 */
 #define IKEV2_XFORMDH_MODP_3072		15	/* DH Group 15 */
@@ -255,6 +258,8 @@ extern struct iked_constmap ikev2_xformdh_map[];
 #define IKEV2_MAXLEN_IPV4_FRAG		(576 - IKEV2_IPV4_OVERHEAD)
 #define IKEV2_IPV6_OVERHEAD		(40 + 8 + 28) /* IPv6 + UDP + IKE_HDR*/
 #define IKEV2_MAXLEN_IPV6_FRAG		(1280 - IKEV2_IPV6_OVERHEAD)
+
+#define IKEV2_MAXNUM_TSS		255	/* 8 bit Number of TSs field */
 
 #define IKEV2_XFORMESN_NONE		0	/* No ESN */
 #define IKEV2_XFORMESN_ESN		1	/* ESN */

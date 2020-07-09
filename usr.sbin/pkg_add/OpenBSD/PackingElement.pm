@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: PackingElement.pm,v 1.269 2018/09/17 12:39:46 espie Exp $
+# $OpenBSD: PackingElement.pm,v 1.277 2020/06/09 20:16:12 sthen Exp $
 #
 # Copyright (c) 2003-2014 Marc Espie <espie@openbsd.org>
 #
@@ -361,6 +361,7 @@ sub write
 {
 	my ($self, $fh) = @_;
 	print $fh "\@comment no checksum\n" if defined $self->{nochecksum};
+	print $fh "\@comment no debug\n" if defined $self->{nodebug};
 	$self->SUPER::write($fh);
 	if (defined $self->{d}) {
 		$self->{d}->write($fh);
@@ -392,6 +393,10 @@ sub destate
 	if (defined $state->{nochecksum}) {
 		$self->{nochecksum} = 1;
 		undef $state->{nochecksum};
+	}
+	if (defined $state->{nodebug}) {
+		$self->{nodebug} = 1;
+		undef $state->{nodebug};
 	}
 }
 
@@ -455,6 +460,9 @@ sub check_digest
 
 sub IsFile() { 1 }
 
+package OpenBSD::PackingElement::FileWithDebugInfo;
+our @ISA=qw(OpenBSD::PackingElement::FileBase);
+
 package OpenBSD::PackingElement::File;
 our @ISA=qw(OpenBSD::PackingElement::FileBase);
 
@@ -496,8 +504,8 @@ sub destate
 {
 	my ($self, $state) = @_;
 	if ($state->{lastfile}->isa("OpenBSD::PackingElement::SpecialFile")) {
-		die "Can't \@sample a specialfile: ". 
-		    $state->{lastfile}->stringize. "\n";
+		die "Can't \@sample a specialfile: ",
+		    $state->{lastfile}->stringize;
 	}
 	$self->{copyfrom} = $state->{lastfile};
 	$self->compute_fullname($state);
@@ -573,7 +581,7 @@ __PACKAGE__->register_with_factory;
 sub dirclass() { "OpenBSD::PackingElement::Infodir" }
 
 package OpenBSD::PackingElement::Shell;
-our @ISA=qw(OpenBSD::PackingElement::FileBase);
+our @ISA=qw(OpenBSD::PackingElement::FileWithDebugInfo);
 
 sub keyword() { "shell" }
 __PACKAGE__->register_with_factory;
@@ -621,7 +629,7 @@ sub format
 		$state->error("empty source manpage: #1", $fname);
 		return;
 	}
-	open(my $fh, '<', $fname) or die "Can't read $fname";
+	open(my $fh, '<', $fname) or die "Can't read $fname: $!";
 	my $line = <$fh>;
 	close $fh;
 	my @extra = ();
@@ -642,9 +650,9 @@ sub format
 	if (my ($dir, $file) = $fname =~ m/^(.*)\/([^\/]+\/[^\/]+)$/) {
 		my $r = $state->system(sub {
 		    open STDOUT, '>&', $destfh or
-			die "Can't write to $dest";
+			die "Can't write to $dest: $!";
 		    close $destfh;
-		    chdir($dir) or die "Can't chdir to $dir";
+		    chdir($dir) or die "Can't chdir to $dir: $!";
 		    },
 		    $state->{groff} // OpenBSD::Paths->groff,
 		    qw(-mandoc -mtty-char -E -Ww -Tascii -P -c),
@@ -661,7 +669,7 @@ sub format
 }
 
 package OpenBSD::PackingElement::Lib;
-our @ISA=qw(OpenBSD::PackingElement::FileBase);
+our @ISA=qw(OpenBSD::PackingElement::FileWithDebugInfo);
 
 our $todo = 0;
 
@@ -686,6 +694,24 @@ sub parse
 
 sub is_a_library() { 1 }
 
+package OpenBSD::PackingElement::Binary;
+our @ISA=qw(OpenBSD::PackingElement::FileWithDebugInfo);
+
+sub keyword() { "bin" }
+__PACKAGE__->register_with_factory;
+
+package OpenBSD::PackingElement::StaticLib;
+our @ISA=qw(OpenBSD::PackingElement::FileWithDebugInfo);
+
+sub keyword() { "static-lib" }
+__PACKAGE__->register_with_factory;
+
+package OpenBSD::PackingElement::SharedObject;
+our @ISA=qw(OpenBSD::PackingElement::FileWithDebugInfo);
+
+sub keyword() { "so" }
+__PACKAGE__->register_with_factory;
+
 package OpenBSD::PackingElement::PkgConfig;
 our @ISA=qw(OpenBSD::PackingElement::FileBase);
 
@@ -696,12 +722,6 @@ package OpenBSD::PackingElement::LibtoolLib;
 our @ISA=qw(OpenBSD::PackingElement::FileBase);
 
 sub keyword() { "ltlib" }
-__PACKAGE__->register_with_factory;
-
-package OpenBSD::PackingElement::Binary;
-our @ISA=qw(OpenBSD::PackingElement::FileBase);
-
-sub keyword() { "bin" }
 __PACKAGE__->register_with_factory;
 
 # Comment is very special
@@ -725,8 +745,13 @@ sub add
 		return OpenBSD::PackingElement::CVSTag->add($plist, $args);
 	} elsif ($args =~ m/^(?:subdir|pkgpath)\=(.*?)\s+cdrom\=(.*?)\s+ftp\=(.*?)\s*$/o) {
 		return OpenBSD::PackingElement::ExtraInfo->add($plist, $1, $2, $3);
+	} elsif ($args =~ m/^(?:subdir|pkgpath)\=(.*?)\s+ftp\=(.*?)\s*$/o) {
+		return OpenBSD::PackingElement::ExtraInfo->add($plist, $1, undef, $2);
 	} elsif ($args eq 'no checksum') {
-		$plist->{state}->{nochecksum} = 1;
+		$plist->{state}{nochecksum} = 1;
+		return;
+	} elsif ($args eq 'no debug') {
+		$plist->{state}{nodebug} = 1;
 		return;
 	} else {
 		return $class->SUPER::add($plist, $args);
@@ -907,14 +932,17 @@ sub new
 {
 	my ($class, $subdir, $cdrom, $ftp) = @_;
 
-	$cdrom =~ s/^\"(.*)\"$/$1/;
-	$cdrom =~ s/^\'(.*)\'$/$1/;
 	$ftp =~ s/^\"(.*)\"$/$1/;
 	$ftp =~ s/^\'(.*)\'$/$1/;
-	bless { subdir => $subdir,
-		path => OpenBSD::PkgPath->new($subdir),
-	    cdrom => $cdrom,
+	my $o = bless { subdir => $subdir,
+	    path => OpenBSD::PkgPath->new($subdir),
 	    ftp => $ftp}, $class;
+	if (defined $cdrom) {
+		$cdrom =~ s/^\"(.*)\"$/$1/;
+		$cdrom =~ s/^\'(.*)\'$/$1/;
+		$o->{cdrom} = $cdrom;
+	}
+	return $o;
 }
 
 sub subdir
@@ -935,10 +963,13 @@ sub may_quote
 sub stringize
 {
 	my $self = shift;
-	return join(' ',
-	    "pkgpath=".$self->{subdir},
-	    "cdrom=".may_quote($self->{cdrom}),
-	    "ftp=".may_quote($self->{ftp}));
+	my @l = (
+	    "pkgpath=".$self->{subdir});
+	if (defined $self->{cdrom}) {
+		push @l, "cdrom=".may_quote($self->{cdrom});
+	}
+	push(@l, "ftp=".may_quote($self->{ftp}));
+	return join(' ', @l);
 }
 
 package OpenBSD::PackingElement::Name;
@@ -1037,7 +1068,7 @@ OpenBSD::Auto::cache(spec,
 	return OpenBSD::LibSpec->from_string($self->name);
     });
 
-package OpeNBSD::PackingElement::Libset;
+package OpenBSD::PackingElement::Libset;
 our @ISA=qw(OpenBSD::PackingElement::Meta);
 
 sub category() { "libset" }
@@ -1654,24 +1685,33 @@ sub reload
 
 sub update_fontalias
 {
-	my $dirname = shift;
-	my @aliases;
+	my ($state, $dirname) = @_;
 
-	if (-d "$dirname") {
-		for my $alias (glob "$dirname/fonts.alias-*") {
-			open my $f ,'<', $alias or next;
-			push(@aliases, <$f>);
-			close $f;
+	my $alias_name = "$dirname/fonts.alias";
+	if ($state->verbose > 1) {
+		$state->say("Assembling #1 from #2", 
+		    $alias_name, "$alias_name-*");
+	}
+
+	if (open my $out, '>', $alias_name) {
+		for my $alias (glob "$alias_name-*") {
+			if (open my $f ,'<', $alias) {
+				print {$out} <$f>;
+				close $f;
+			} else {
+				$state->errsay("Couldn't read #1: #2", 
+				    $alias, $!);
+			}
 		}
-		open my $f, '>', "$dirname/fonts.alias";
-		print $f @aliases;
-		close $f;
+		close $out;
+	} else {
+		$state->errsay("Couldn't write #1: #2", $alias_name, $!);
 	}
 }
 
 sub restore_fontdir
 {
-	my ($dirname, $state) = @_;
+	my ($state, $dirname) = @_;
 	if (-f "$dirname/fonts.dir.dist") {
 
 		unlink("$dirname/fonts.dir");
@@ -1694,20 +1734,22 @@ sub run_if_exists
 sub finish
 {
 	my ($class, $state) = @_;
+	return if $state->{not};
+
 	my @l = keys %{$state->{recorder}->{fonts_todo}};
+	@l = grep {-d $_} @l;
 
 	if (@l != 0) {
+		$state->print("Updating font cache: ") if $state->verbose < 2;
 		require OpenBSD::Error;
 
-		return if $state->{not};
-		map { update_fontalias($_) } @l;
-		if (-d "@l") {
-			run_if_exists($state, OpenBSD::Paths->mkfontscale, '--', @l);
-			run_if_exists($state, OpenBSD::Paths->mkfontdir, '--', @l);
-			map { restore_fontdir($_, $state) } @l;
-		}
+		map { update_fontalias($state, $_) } @l;
+		run_if_exists($state, OpenBSD::Paths->mkfontscale, '--', @l);
+		run_if_exists($state, OpenBSD::Paths->mkfontdir, '--', @l);
+		map { restore_fontdir($state, $_) } @l;
 
 		run_if_exists($state, OpenBSD::Paths->fc_cache, '--', @l);
+		$state->say("ok") if $state->verbose < 2;
 	}
 }
 
@@ -1936,7 +1978,7 @@ sub new
 {
 	my ($class, $args) = @_;
 	unless ($args =~ m/^[\w\d\.\-\+\@]+$/) {
-		die "Invalid characters in signer $args\n";
+		die "Invalid characters in signer $args";
 	}
 	$class->SUPER::new($args);
 }

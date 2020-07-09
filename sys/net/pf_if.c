@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf_if.c,v 1.96 2018/12/10 16:48:15 kn Exp $ */
+/*	$OpenBSD: pf_if.c,v 1.100 2020/06/24 22:03:42 cheloha Exp $ */
 
 /*
  * Copyright 2005 Henning Brauer <henning@openbsd.org>
@@ -121,7 +121,7 @@ pfi_kif_get(const char *kif_name)
 		return (NULL);
 
 	strlcpy(kif->pfik_name, kif_name, sizeof(kif->pfik_name));
-	kif->pfik_tzero = time_second;
+	kif->pfik_tzero = gettime();
 	TAILQ_INIT(&kif->pfik_dynaddrs);
 
 	if (!strcmp(kif->pfik_name, "any")) {
@@ -146,6 +146,9 @@ pfi_kif_ref(struct pfi_kif *kif, enum pfi_kif_refs what)
 		break;
 	case PFI_KIF_REF_ROUTE:
 		kif->pfik_routes++;
+		break;
+	case PFI_KIF_REF_SRCNODE:
+		kif->pfik_srcnodes++;
 		break;
 	default:
 		panic("pfi_kif_ref with unknown type");
@@ -185,6 +188,14 @@ pfi_kif_unref(struct pfi_kif *kif, enum pfi_kif_refs what)
 		}
 		kif->pfik_routes--;
 		break;
+	case PFI_KIF_REF_SRCNODE:
+		if (kif->pfik_srcnodes <= 0) {
+			DPFPRINTF(LOG_ERR,
+			    "pfi_kif_unref: src-node refcount <= 0");
+			return;
+		}
+		kif->pfik_srcnodes--;
+		break;
 	default:
 		panic("pfi_kif_unref with unknown type");
 	}
@@ -192,7 +203,8 @@ pfi_kif_unref(struct pfi_kif *kif, enum pfi_kif_refs what)
 	if (kif->pfik_ifp != NULL || kif->pfik_group != NULL || kif == pfi_all)
 		return;
 
-	if (kif->pfik_rules || kif->pfik_states || kif->pfik_routes)
+	if (kif->pfik_rules || kif->pfik_states || kif->pfik_routes ||
+	    kif->pfik_srcnodes)
 		return;
 
 	RB_REMOVE(pfi_ifhead, &pfi_ifs, kif);
@@ -223,6 +235,7 @@ void
 pfi_attach_ifnet(struct ifnet *ifp)
 {
 	struct pfi_kif		*kif;
+	struct task		*t;
 
 	pfi_initialize();
 	pfi_update++;
@@ -232,10 +245,10 @@ pfi_attach_ifnet(struct ifnet *ifp)
 	kif->pfik_ifp = ifp;
 	ifp->if_pf_kif = (caddr_t)kif;
 
-	if ((kif->pfik_ah_cookie = hook_establish(ifp->if_addrhooks, 1,
-	    pfi_kifaddr_update, kif)) == NULL)
-		panic("pfi_attach_ifnet: cannot allocate '%s' address hook",
-		    ifp->if_xname);
+	t = malloc(sizeof(*t), PFI_MTYPE, M_WAITOK);
+	task_set(t, pfi_kifaddr_update, kif);
+	if_addrhook_add(ifp, t);
+	kif->pfik_ah_cookie = t;
 
 	pfi_kif_update(kif);
 }
@@ -244,12 +257,17 @@ void
 pfi_detach_ifnet(struct ifnet *ifp)
 {
 	struct pfi_kif		*kif;
+	struct task		*t;
 
 	if ((kif = (struct pfi_kif *)ifp->if_pf_kif) == NULL)
 		return;
 
 	pfi_update++;
-	hook_disestablish(ifp->if_addrhooks, kif->pfik_ah_cookie);
+	t = kif->pfik_ah_cookie;
+	kif->pfik_ah_cookie = NULL;
+	if_addrhook_del(ifp, t);
+	free(t, PFI_MTYPE, sizeof(*t));
+
 	pfi_kif_update(kif);
 
 	kif->pfik_ifp = NULL;
@@ -632,7 +650,7 @@ pfi_update_status(const char *name, struct pf_status *pfs)
 		RB_FOREACH(p, pfi_ifhead, &pfi_ifs) {
 			memset(p->pfik_packets, 0, sizeof(p->pfik_packets));
 			memset(p->pfik_bytes, 0, sizeof(p->pfik_bytes));
-			p->pfik_tzero = time_second;
+			p->pfik_tzero = gettime();
 		}
 		return;
 	}
@@ -665,7 +683,7 @@ pfi_update_status(const char *name, struct pf_status *pfs)
 		if (pfs == NULL) {
 			memset(p->pfik_packets, 0, sizeof(p->pfik_packets));
 			memset(p->pfik_bytes, 0, sizeof(p->pfik_bytes));
-			p->pfik_tzero = time_second;
+			p->pfik_tzero = gettime();
 			continue;
 		}
 		for (i = 0; i < 2; i++)
@@ -691,7 +709,7 @@ pfi_get_ifaces(const char *name, struct pfi_kif *buf, int *size)
 			continue;
 		if (*size > n++) {
 			if (!p->pfik_tzero)
-				p->pfik_tzero = time_second;
+				p->pfik_tzero = gettime();
 			pfi_kif_ref(p, PFI_KIF_REF_RULE);
 			if (copyout(p, buf++, sizeof(*buf))) {
 				pfi_kif_unref(p, PFI_KIF_REF_RULE);

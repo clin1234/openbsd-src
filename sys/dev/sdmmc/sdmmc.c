@@ -1,4 +1,4 @@
-/*	$OpenBSD: sdmmc.c,v 1.53 2019/04/02 07:08:40 stsp Exp $	*/
+/*	$OpenBSD: sdmmc.c,v 1.55 2020/05/13 17:31:16 cheloha Exp $	*/
 
 /*
  * Copyright (c) 2006 Uwe Stuehler <uwe@openbsd.org>
@@ -29,6 +29,7 @@
 #include <sys/malloc.h>
 #include <sys/rwlock.h>
 #include <sys/systm.h>
+#include <sys/time.h>
 
 #include <scsi/scsi_all.h>
 #include <scsi/scsiconf.h>
@@ -162,7 +163,7 @@ sdmmc_detach(struct device *self, int flags)
 	sc->sc_dying = 1;
 	while (sc->sc_task_thread != NULL) {
 		wakeup(&sc->sc_tskq);
-		tsleep(sc, PWAIT, "mmcdie", 0);
+		tsleep_nsec(sc, PWAIT, "mmcdie", INFSLP);
 	}
 
 	if (sc->sc_dmap)
@@ -226,7 +227,7 @@ restart:
 			task->func(task->arg);
 			s = splsdmmc();
 		}
-		tsleep(&sc->sc_tskq, PWAIT, "mmctsk", 0);
+		tsleep_nsec(&sc->sc_tskq, PWAIT, "mmctsk", INFSLP);
 	}
 	splx(s);
 
@@ -577,10 +578,8 @@ sdmmc_init(struct sdmmc_softc *sc)
 void
 sdmmc_delay(u_int usecs)
 {
-	int nticks = usecs / (1000000 / hz);
-
-	if (!cold && nticks > 0)
-		tsleep(&sdmmc_delay, PWAIT, "mmcdly", nticks);
+	if (!cold && usecs > tick)
+		tsleep_nsec(&sdmmc_delay, PWAIT, "mmcdly", USEC_TO_NSEC(usecs));
 	else
 		delay(usecs);
 }

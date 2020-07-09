@@ -1,4 +1,4 @@
-/*	$OpenBSD: ospfe.c,v 1.55 2018/09/01 19:21:10 remi Exp $ */
+/*	$OpenBSD: ospfe.c,v 1.63 2020/05/16 15:54:12 denis Exp $ */
 
 /*
  * Copyright (c) 2005 Claudio Jeker <claudio@openbsd.org>
@@ -45,7 +45,6 @@
 void		 ospfe_sig_handler(int, short, void *);
 __dead void	 ospfe_shutdown(void);
 void		 orig_rtr_lsa_all(struct area *);
-void		 orig_rtr_lsa_area(struct area *);
 struct iface	*find_vlink(struct abr_rtr *);
 
 struct ospfd_conf	*oeconf = NULL, *nconf;
@@ -74,7 +73,6 @@ ospfe(struct ospfd_conf *xconf, int pipe_parent2ospfe[2], int pipe_ospfe2rde[2],
 {
 	struct area	*area;
 	struct iface	*iface;
-	struct redistribute *r;
 	struct passwd	*pw;
 	struct event	 ev_sigint, ev_sigterm;
 	pid_t		 pid;
@@ -100,7 +98,7 @@ ospfe(struct ospfd_conf *xconf, int pipe_parent2ospfe[2], int pipe_ospfe2rde[2],
 		fatal("if_set_ipv6_checksum");
 	if (if_set_ipv6_pktinfo(xconf->ospf_socket, 1) == -1)
 		fatal("if_set_ipv6_pktinfo");
-	if_set_recvbuf(xconf->ospf_socket);
+	if_set_sockbuf(xconf->ospf_socket);
 
 	oeconf = xconf;
 	if (oeconf->flags & OSPFD_FLAG_NO_FIB_UPDATE)
@@ -174,14 +172,7 @@ ospfe(struct ospfd_conf *xconf, int pipe_parent2ospfe[2], int pipe_ospfe2rde[2],
 	event_add(&oeconf->ev, NULL);
 
 	/* remove unneeded config stuff */
-	while ((r = SIMPLEQ_FIRST(&oeconf->redist_list)) != NULL) {
-		SIMPLEQ_REMOVE_HEAD(&oeconf->redist_list, entry);
-		free(r);
-	}
-
-	/* listen on ospfd control socket */
-	TAILQ_INIT(&ctl_conns);
-	control_listen();
+	conf_clear_redist_list(&oeconf->redist_list);
 
 	if ((pkt_ptr = calloc(1, READ_BUF_SIZE)) == NULL)
 		fatal("ospfe");
@@ -266,7 +257,6 @@ ospfe_dispatch_main(int fd, short event, void *bula)
 	struct imsgev		*iev = bula;
 	struct imsgbuf		*ibuf = &iev->ibuf;
 	int			 n, stub_changed, shut = 0, isvalid, wasvalid;
-	unsigned int		 ifindex;
 
 	if (event & EV_READ) {
 		if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
@@ -305,7 +295,7 @@ ospfe_dispatch_main(int fd, short event, void *bula)
 						i->depend_ok =
 						    ifstate_is_up(ifp);
 						if (ifstate_is_up(i))
-							orig_rtr_lsa(i);
+							orig_rtr_lsa(i->area);
 					}
 				}
 			}
@@ -335,31 +325,6 @@ ospfe_dispatch_main(int fd, short event, void *bula)
 				if_fsm(iface, IF_EVT_DOWN);
 				log_warnx("interface %s down", iface->name);
 			}
-			break;
-		case IMSG_IFADD:
-			if ((iface = malloc(sizeof(struct iface))) == NULL)
-				fatal(NULL);
-			memcpy(iface, imsg.data, sizeof(struct iface));
-
-			LIST_INIT(&iface->nbr_list);
-			TAILQ_INIT(&iface->ls_ack_list);
-			RB_INIT(&iface->lsa_tree);
-
-			area = area_find(oeconf, iface->area_id);
-			LIST_INSERT_HEAD(&area->iface_list, iface, entry);
-			break;
-		case IMSG_IFDELETE:
-			if (imsg.hdr.len != IMSG_HEADER_SIZE +
-			    sizeof(ifindex))
-				fatalx("IFDELETE imsg with wrong len");
-
-			memcpy(&ifindex, imsg.data, sizeof(ifindex));
-			iface = if_find(ifindex);
-			if (iface == NULL)
-				fatalx("interface lost in ospfe");
-
-			LIST_REMOVE(iface, entry);
-			if_del(iface);
 			break;
 		case IMSG_IFADDRNEW:
 			if (imsg.hdr.len != IMSG_HEADER_SIZE +
@@ -604,10 +569,8 @@ ospfe_dispatch_rde(int fd, short event, void *bula)
 				 * flood on all area interfaces on
 				 * area 0.0.0.0 include also virtual links.
 				 */
-				if ((area = area_find(oeconf,
-				    nbr->iface->area_id)) == NULL)
-					fatalx("interface lost area");
-				LIST_FOREACH(iface, &area->iface_list, entry) {
+				LIST_FOREACH(iface,
+				    &nbr->iface->area->iface_list, entry) {
 					noack += lsa_flood(iface, nbr,
 					    &lsa_hdr, imsg.data);
 				}
@@ -703,7 +666,7 @@ ospfe_dispatch_rde(int fd, short event, void *bula)
 				break;
 
 			/* send a direct acknowledgement */
-			send_ls_ack(nbr->iface, nbr->addr, imsg.data,
+			send_direct_ack(nbr->iface, nbr->addr, imsg.data,
 			    imsg.hdr.len - IMSG_HEADER_SIZE);
 
 			break;
@@ -781,11 +744,8 @@ find_vlink(struct abr_rtr *ar)
 		LIST_FOREACH(iface, &area->iface_list, entry)
 			if (iface->abr_id.s_addr == ar->abr_id.s_addr &&
 			    iface->type == IF_TYPE_VIRTUALLINK &&
-//XXX			    iface->area->id.s_addr == ar->area.s_addr) {
-			    iface->area_id.s_addr == ar->area.s_addr) {
-//XXX				iface->dst.s_addr = ar->dst_ip.s_addr;
+			    iface->area->id.s_addr == ar->area.s_addr) {
 				iface->dst = ar->dst_ip;
-//XXX				iface->addr.s_addr = ar->addr.s_addr;
 				iface->addr = ar->addr;
 				iface->metric = ar->metric;
 
@@ -806,21 +766,11 @@ orig_rtr_lsa_all(struct area *area)
 	 */
 	LIST_FOREACH(a, &oeconf->area_list, entry)
 		if (a != area)
-			orig_rtr_lsa_area(a);
+			orig_rtr_lsa(a);
 }
 
 void
-orig_rtr_lsa(struct iface *iface)
-{
-	struct area	*area;
-
-	if ((area = area_find(oeconf, iface->area_id)) == NULL)
-		fatalx("interface lost area");
-	orig_rtr_lsa_area(area);
-}
-
-void
-orig_rtr_lsa_area(struct area *area)
+orig_rtr_lsa(struct area *area)
 {
 	struct lsa_hdr		 lsa_hdr;
 	struct lsa_rtr		 lsa_rtr;
@@ -1159,7 +1109,7 @@ orig_link_lsa(struct iface *iface)
 
 	/* LSA link header (lladdr has already been filled in above) */
 	LSA_24_SETHI(lsa_link.opts, iface->priority);
-	options = area_ospf_options(area_find(oeconf, iface->area_id));
+	options = area_ospf_options(iface->area);
 	LSA_24_SETLO(lsa_link.opts, options);
 	lsa_link.opts = htonl(lsa_link.opts);
 	lsa_link.numprefix = htonl(num_prefix);

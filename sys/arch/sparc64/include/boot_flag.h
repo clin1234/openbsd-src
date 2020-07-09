@@ -1,4 +1,4 @@
-/*	$OpenBSD: boot_flag.h,v 1.5 2014/11/26 20:06:53 stsp Exp $	*/
+/*	$OpenBSD: boot_flag.h,v 1.7 2020/05/25 15:31:59 kettenis Exp $	*/
 /*	$NetBSD: boot_flag.h,v 1.3 2001/07/01 02:56:21 gmcgarry Exp $	*/
 
 /*-
@@ -30,39 +30,6 @@
 #ifndef _MACHINE_BOOT_FLAG_H_
 #define _MACHINE_BOOT_FLAG_H_
 
-#include <sys/reboot.h>
-
-/*
- * Recognize standard boot arguments. If the flag is known, appropriate
- * value is or'ed to retval, otherwise retval is left intact.
- * Note that not all ports use all flags recognized here. This list is mere
- * concatenation of all non-conflicting standard boot flags. Individual ports
- * might use also other flags (see e.g. alpha).
- */
-#define	BOOT_FLAG(arg, retval) do {				\
-	switch (arg) {						\
-	case 'a': /* ask for file name to boot from */		\
-		(retval) |= RB_ASKNAME;				\
-		break;						\
-	case 'b': /* always halt, never reboot */		\
-		(retval) |= RB_HALT;				\
-		break;						\
-	case 'c': /* userconf */				\
-		(retval) |= RB_CONFIG;			\
-		break;						\
-	case 'd': /* break into the kernel debugger ASAP (if compiled in) */ \
-		(retval) |= RB_KDB;				\
-		break;						\
-	case 's': /* boot to single user */			\
-		(retval) |= RB_SINGLE;				\
-		break;						\
-	default:  /* something else, do nothing */		\
-		break;						\
-	} /* switch */						\
-								\
-	} while (/* CONSTCOND */ 0)
-
-
 /* softraid boot information */
 #define BOOTSR_UUID_MAX 16
 #define BOOTSR_CRYPTO_MAXKEYBYTES 32
@@ -74,8 +41,11 @@ struct openbsd_bootdata {
 
 	u_int8_t	sr_uuid[BOOTSR_UUID_MAX];
 	u_int8_t	sr_maskkey[BOOTSR_CRYPTO_MAXKEYBYTES];
+	u_int32_t	boothowto;
 } __packed;
 
 #define BOOTDATA_VERSION	1
+#define BOOTDATA_LEN_SOFTRAID	64
+#define BOOTDATA_LEN_BOOTHOWTO	68
 
 #endif /* _MACHINE_BOOT_FLAG_H_ */

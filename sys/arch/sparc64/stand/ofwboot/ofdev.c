@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofdev.c,v 1.27 2018/12/31 11:44:57 claudio Exp $	*/
+/*	$OpenBSD: ofdev.c,v 1.30 2020/05/26 16:28:49 kettenis Exp $	*/
 /*	$NetBSD: ofdev.c,v 1.1 2000/08/20 14:58:41 mrg Exp $	*/
 
 /*
@@ -43,6 +43,7 @@
 #include <lib/libkern/funcs.h>
 #include <lib/libsa/stand.h>
 #include <lib/libsa/ufs.h>
+#include <lib/libsa/ufs2.h>
 #include <lib/libsa/cd9660.h>
 #ifdef NETBOOT
 #include <lib/libsa/nfs.h>
@@ -126,8 +127,6 @@ strategy(void *devdata, int rw, daddr32_t blk, size_t size, void *buf,
 	u_quad_t pos;
 	int n;
 
-	if (rw != F_READ)
-		return EPERM;
 #ifdef SOFTRAID
 	/* Intercept strategy for softraid volumes. */
 	if (dev->type == OFDEV_SOFTRAID)
@@ -149,12 +148,16 @@ strategy(void *devdata, int rw, daddr32_t blk, size_t size, void *buf,
 			break;
 		DNPRINTF(BOOT_D_OFDEV, "strategy: reading %lx at %p\n",
 		    (long)size, buf);
-		n = OF_read(dev->handle, buf, size);
+		if (rw == F_READ)
+			n = OF_read(dev->handle, buf, size);
+		else
+			n = OF_write(dev->handle, buf, size);
 		if (n == -2)
 			continue;
 		if (n < 0)
 			break;
-		*rsize = n;
+		if (rsize)
+			*rsize = n;
 		return 0;
 	}
 	return EIO;
@@ -191,22 +194,28 @@ int ndevs = sizeof devsw / sizeof devsw[0];
 
 #ifdef SPARC_BOOT_UFS
 static struct fs_ops file_system_ufs = {
-	ufs_open, ufs_close, ufs_read, ufs_write, ufs_seek, ufs_stat
+	ufs_open, ufs_close, ufs_read, ufs_write, ufs_seek,
+	ufs_stat, ufs_readdir, ufs_fchmod
+};
+static struct fs_ops file_system_ufs2 = {
+	ufs2_open, ufs2_close, ufs2_read, ufs2_write, ufs2_seek,
+	ufs2_stat, ufs2_readdir, ufs2_fchmod
 };
 #endif
 #ifdef SPARC_BOOT_HSFS
 static struct fs_ops file_system_cd9660 = {
 	cd9660_open, cd9660_close, cd9660_read, cd9660_write, cd9660_seek,
-	    cd9660_stat
+	cd9660_stat, cd9660_readdir
 };
 #endif
 #ifdef NETBOOT
 static struct fs_ops file_system_nfs = {
-	nfs_open, nfs_close, nfs_read, nfs_write, nfs_seek, nfs_stat
+	nfs_open, nfs_close, nfs_read, nfs_write, nfs_seek,
+	nfs_stat, nfs_readdir
 };
 #endif
 
-struct fs_ops file_system[3];
+struct fs_ops file_system[4];
 int nfsys;
 
 static struct of_dev ofdev = {
@@ -517,10 +526,9 @@ devopen(struct open_file *of, const char *name, char **file)
 	char volno;
 #endif
 
+	nfsys = 0;
 	if (ofdev.handle != -1)
 		panic("devopen");
-	if (of->f_flags != F_READ)
-		return EPERM;
 	DNPRINTF(BOOT_D_OFDEV, "devopen: you want %s\n", name);
 	if (strlcpy(fname, name, sizeof fname) >= sizeof fname)
 		return ENAMETOOLONG;
@@ -632,6 +640,7 @@ devopen(struct open_file *of, const char *name, char **file)
 
 #ifdef SPARC_BOOT_UFS
 		bcopy(&file_system_ufs, &file_system[nfsys++], sizeof file_system[0]);
+		bcopy(&file_system_ufs2, &file_system[nfsys++], sizeof file_system[0]);
 #else
 #error "-DSOFTRAID requires -DSPARC_BOOT_UFS"
 #endif
@@ -678,6 +687,7 @@ devopen(struct open_file *of, const char *name, char **file)
 		of->f_devdata = &ofdev;
 #ifdef SPARC_BOOT_UFS
 		bcopy(&file_system_ufs, &file_system[nfsys++], sizeof file_system[0]);
+		bcopy(&file_system_ufs2, &file_system[nfsys++], sizeof file_system[0]);
 #endif
 #ifdef SPARC_BOOT_HSFS
 		bcopy(&file_system_cd9660, &file_system[nfsys++],

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ntfs_vfsops.c,v 1.61 2018/05/27 06:02:15 visa Exp $	*/
+/*	$OpenBSD: ntfs_vfsops.c,v 1.64 2020/02/27 09:10:31 mpi Exp $	*/
 /*	$NetBSD: ntfs_vfsops.c,v 1.7 2003/04/24 07:50:19 christos Exp $	*/
 
 /*-
@@ -279,7 +279,7 @@ ntfs_mountfs(struct vnode *devvp, struct mount *mp, struct ntfs_args *argsp,
 	if (ncount > 1 && devvp != rootvp)
 		return (EBUSY);
 	vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
-	error = vinvalbuf(devvp, V_SAVE, p->p_ucred, p, 0, 0);
+	error = vinvalbuf(devvp, V_SAVE, p->p_ucred, p, 0, INFSLP);
 	VOP_UNLOCK(devvp);
 	if (error)
 		return (error);
@@ -503,7 +503,7 @@ ntfs_unmount(struct mount *mp, int mntflags, struct proc *p)
 
 	/* lock the device vnode before calling VOP_CLOSE() */
 	vn_lock(ntmp->ntm_devvp, LK_EXCLUSIVE | LK_RETRY);
-	vinvalbuf(ntmp->ntm_devvp, V_SAVE, NOCRED, p, 0, 0);
+	vinvalbuf(ntmp->ntm_devvp, V_SAVE, NOCRED, p, 0, INFSLP);
 	(void)VOP_CLOSE(ntmp->ntm_devvp, FREAD, NOCRED, p);
 	vput(ntmp->ntm_devvp);
 
@@ -628,7 +628,7 @@ ntfs_fhtovp(struct mount *mp, struct fid *fhp, struct vnode **vpp)
 	    mp->mnt_stat.f_mntonname, ntfhp->ntfid_ino);
 
 	error = ntfs_vgetex(mp, ntfhp->ntfid_ino, ntfhp->ntfid_attr, NULL,
-			LK_EXCLUSIVE | LK_RETRY, 0, curproc, vpp); /* XXX */
+			LK_EXCLUSIVE | LK_RETRY, 0, vpp); /* XXX */
 	if (error != 0) {
 		*vpp = NULLVP;
 		return (error);
@@ -663,7 +663,7 @@ ntfs_vptofh(struct vnode *vp, struct fid *fhp)
 
 int
 ntfs_vgetex(struct mount *mp, ntfsino_t ino, u_int32_t attrtype, char *attrname,
-    u_long lkflags, u_long flags, struct proc *p, struct vnode **vpp) 
+    u_long lkflags, u_long flags, struct vnode **vpp) 
 {
 	int error;
 	struct ntfsmount *ntmp;
@@ -679,7 +679,7 @@ ntfs_vgetex(struct mount *mp, ntfsino_t ino, u_int32_t attrtype, char *attrname,
 	*vpp = NULL;
 
 	/* Get ntnode */
-	error = ntfs_ntlookup(ntmp, ino, &ip, p);
+	error = ntfs_ntlookup(ntmp, ino, &ip);
 	if (error) {
 		printf("ntfs_vget: ntfs_ntget failed\n");
 		return (error);
@@ -691,7 +691,7 @@ ntfs_vgetex(struct mount *mp, ntfsino_t ino, u_int32_t attrtype, char *attrname,
 		if(error) {
 			printf("ntfs_vget: CAN'T LOAD ATTRIBUTES FOR INO: %d\n",
 			       ip->i_number);
-			ntfs_ntput(ip, p);
+			ntfs_ntput(ip);
 
 			return (error);
 		}
@@ -700,7 +700,7 @@ ntfs_vgetex(struct mount *mp, ntfsino_t ino, u_int32_t attrtype, char *attrname,
 	error = ntfs_fget(ntmp, ip, attrtype, attrname, &fp);
 	if (error) {
 		printf("ntfs_vget: ntfs_fget failed\n");
-		ntfs_ntput(ip, p);
+		ntfs_ntput(ip);
 
 		return (error);
 	}
@@ -718,7 +718,7 @@ ntfs_vgetex(struct mount *mp, ntfsino_t ino, u_int32_t attrtype, char *attrname,
 			error = ntfs_filesize(ntmp, fp, 
 					      &fp->f_size, &fp->f_allocated);
 			if (error) {
-				ntfs_ntput(ip, p);
+				ntfs_ntput(ip);
 
 				return (error);
 			}
@@ -734,7 +734,7 @@ ntfs_vgetex(struct mount *mp, ntfsino_t ino, u_int32_t attrtype, char *attrname,
 	 * ntfs_fget() bumped ntnode usecount, so ntnode won't be recycled
 	 * prematurely.
 	 */
-	ntfs_ntput(ip, p);
+	ntfs_ntput(ip);
 
 	if (FTOV(fp)) {
 		/* vget() returns error if the vnode has been recycled */
@@ -747,7 +747,7 @@ ntfs_vgetex(struct mount *mp, ntfsino_t ino, u_int32_t attrtype, char *attrname,
 	error = getnewvnode(VT_NTFS, ntmp->ntm_mountp, &ntfs_vops, &vp);
 	if(error) {
 		ntfs_frele(fp);
-		ntfs_ntput(ip, p);
+		ntfs_ntput(ip);
 
 		return (error);
 	}
@@ -778,21 +778,21 @@ ntfs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	if (ino > (ntfsino_t)-1)
 		panic("ntfs_vget: alien ino_t %llu", (unsigned long long)ino);
 	return ntfs_vgetex(mp, ino, NTFS_A_DATA, NULL,
-			LK_EXCLUSIVE | LK_RETRY, 0, curproc, vpp); /* XXX */
+			LK_EXCLUSIVE | LK_RETRY, 0, vpp); /* XXX */
 }
 
 const struct vfsops ntfs_vfsops = {
-	ntfs_mount,
-	ntfs_start,
-	ntfs_unmount,
-	ntfs_root,
-	ntfs_quotactl,
-	ntfs_statfs,
-	ntfs_sync,
-	ntfs_vget,
-	ntfs_fhtovp,
-	ntfs_vptofh,
-	ntfs_init,
-	ntfs_sysctl,
-	ntfs_checkexp,
+	.vfs_mount	= ntfs_mount,
+	.vfs_start	= ntfs_start,
+	.vfs_unmount	= ntfs_unmount,
+	.vfs_root	= ntfs_root,
+	.vfs_quotactl	= ntfs_quotactl,
+	.vfs_statfs	= ntfs_statfs,
+	.vfs_sync	= ntfs_sync,
+	.vfs_vget	= ntfs_vget,
+	.vfs_fhtovp	= ntfs_fhtovp,
+	.vfs_vptofh	= ntfs_vptofh,
+	.vfs_init	= ntfs_init,
+	.vfs_sysctl	= ntfs_sysctl,
+	.vfs_checkexp	= ntfs_checkexp,
 };

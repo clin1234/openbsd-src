@@ -1,4 +1,4 @@
-/*	$OpenBSD: setup.c,v 1.65 2018/09/24 21:26:02 deraadt Exp $	*/
+/*	$OpenBSD: setup.c,v 1.67 2020/06/20 07:49:04 otto Exp $	*/
 /*	$NetBSD: setup.c,v 1.27 1996/09/27 22:45:19 christos Exp $	*/
 
 /*
@@ -79,21 +79,22 @@ static const int altsbtry[] = { 32, 64, 128, 144, 160, 192, 256 };
 int
 setup(char *dev, int isfsdb)
 {
-	long cg, size, asked, i, j;
+	long size, asked, i, j;
 	size_t bmapsize;
 	struct disklabel *lp;
 	off_t sizepb;
 	struct stat statb;
 	struct fs proto;
 	int doskipclean;
-	int32_t maxsymlinklen, nindir, inopb;
+	int32_t maxsymlinklen, nindir;
+	uint32_t cg, inopb;
 	u_int64_t maxfilesize;
 	char *realdev;
 
 	havesb = 0;
 	fswritefd = fsreadfd = -1;
 	doskipclean = skipclean;
-	if ((fsreadfd = opendev(dev, O_RDONLY, 0, &realdev)) < 0) {
+	if ((fsreadfd = opendev(dev, O_RDONLY, 0, &realdev)) == -1) {
 		printf("Can't open %s: %s\n", dev, strerror(errno));
 		return (0);
 	}
@@ -111,7 +112,7 @@ setup(char *dev, int isfsdb)
 		}
 	}
 
-	if (fstat(fsreadfd, &statb) < 0) {
+	if (fstat(fsreadfd, &statb) == -1) {
 		printf("Can't stat %s: %s\n", realdev, strerror(errno));
 		close(fsreadfd);
 		return (0);
@@ -128,7 +129,7 @@ setup(char *dev, int isfsdb)
 		if (strncmp(dev, realdev, PATH_MAX) != 0)
 			printf(" (%s)", dev);
 	}
-	if (nflag || (fswritefd = opendev(dev, O_WRONLY, 0, NULL)) < 0) {
+	if (nflag || (fswritefd = opendev(dev, O_WRONLY, 0, NULL)) == -1) {
 		fswritefd = -1;
 		if (preen)
 			pfatal("NO WRITE ACCESS");
@@ -366,7 +367,7 @@ found:
 	else
 		inopb = sblock.fs_bsize / sizeof(struct ufs1_dinode);
 	if (INOPB(&sblock) != inopb) {
-		pwarn("INCONSISTENT INOPB=%d\n", INOPB(&sblock));
+		pwarn("INCONSISTENT INOPB=%u\n", INOPB(&sblock));
 		sblock.fs_inopb = inopb;
 		if (preen)
 			printf(" (FIXED)\n");
@@ -662,7 +663,7 @@ getdisklabel(char *s, int fd)
 {
 	static struct disklabel lab;
 
-	if (ioctl(fd, DIOCGDINFO, (char *)&lab) < 0) {
+	if (ioctl(fd, DIOCGDINFO, (char *)&lab) == -1) {
 		if (s == NULL)
 			return (NULL);
 		pwarn("ioctl (GCINFO): %s\n", strerror(errno));

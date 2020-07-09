@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.74 2019/02/03 01:45:57 guenther Exp $	*/
+/*	$OpenBSD: trap.c,v 1.79 2020/01/21 03:06:39 mlarkin Exp $	*/
 /*	$NetBSD: trap.c,v 1.2 2003/05/04 23:51:56 fvdl Exp $	*/
 
 /*-
@@ -77,6 +77,7 @@
 #include <sys/signal.h>
 #include <sys/syscall.h>
 #include <sys/syscall_mi.h>
+#include <sys/stdarg.h>
 
 #include <uvm/uvm_extern.h>
 
@@ -131,7 +132,23 @@ static inline void frame_dump(struct trapframe *_tf, struct proc *_p,
 static inline void verify_smap(const char *_func);
 static inline void debug_trap(struct trapframe *_frame, struct proc *_p,
     long _type);
-static inline void check_stack(struct proc *_p, long _type);
+
+static inline void
+fault(const char *format, ...)
+{
+	static char faultbuf[512];
+	va_list ap;
+
+	/*
+	 * Save the fault info for DDB.  Kernel lock protects
+	 * faultbuf from being overwritten by another CPU.
+	 */
+	va_start(ap, format);
+	vsnprintf(faultbuf, sizeof faultbuf, format, ap);
+	va_end(ap);
+	printf("%s\n", faultbuf);
+	faultstr = faultbuf;
+}
 
 /*
  * pageflttrap(frame, usermode): page fault handler
@@ -161,21 +178,25 @@ pageflttrap(struct trapframe *frame, int usermode)
 	KERNEL_LOCK();
 
 	if (!usermode) {
-		extern struct vm_map *kernel_map;
-
 		/* This will only trigger if SMEP is enabled */
-		if (cr2 <= VM_MAXUSER_ADDRESS && frame->tf_err & PGEX_I)
-			panic("attempt to execute user address %p "
+		if (cr2 <= VM_MAXUSER_ADDRESS && frame->tf_err & PGEX_I) {
+			fault("attempt to execute user address %p "
 			    "in supervisor mode", (void *)cr2);
+			/* retain kernel lock */
+			return 0;
+		}
 		/* This will only trigger if SMAP is enabled */
 		if (pcb->pcb_onfault == NULL && cr2 <= VM_MAXUSER_ADDRESS &&
-		    frame->tf_err & PGEX_P)
-			panic("attempt to access user address %p "
+		    frame->tf_err & PGEX_P) {
+			fault("attempt to access user address %p "
 			    "in supervisor mode", (void *)cr2);
+			/* retain kernel lock */
+			return 0;
+		}
 
 		/*
 		 * It is only a kernel address space fault iff:
-		 *	1. when running in ring0  and
+		 *	1. when running in ring 0 and
 		 *	2. pcb_onfault not set or
 		 *	3. pcb_onfault set but supervisor space fault
 		 * The last can occur during an exec() copyin where the
@@ -212,17 +233,10 @@ pageflttrap(struct trapframe *frame, int usermode)
 			frame->tf_rip = (u_int64_t)pcb->pcb_onfault;
 			return 1;
 		} else {
-			/*
-			 * Bad memory access in the kernel; save the fault
-			 * info for DDB and retain the kernel lock to keep
-			 * faultbuf from being overwritten by another CPU.
-			 */
-			static char faultbuf[512];
-			snprintf(faultbuf, sizeof faultbuf,
-			    "uvm_fault(%p, 0x%llx, 0, %d) -> %x",
+			/* bad memory access in the kernel */
+			fault("uvm_fault(%p, 0x%llx, 0, %d) -> %x",
 			    map, cr2, ftype, error);
-			printf("%s\n", faultbuf);
-			faultstr = faultbuf;
+			/* retain kernel lock */
 			return 0;
 		}
 	} else {
@@ -328,7 +342,11 @@ usertrap(struct trapframe *frame)
 
 	p->p_md.md_regs = frame;
 	refreshcreds(p);
-	check_stack(p, type);
+
+	if (!uvm_map_inentry(p, &p->p_spinentry, PROC_STACK(p),
+	    "[%s]%d/%d sp=%lx inside %lx-%lx: not MAP_STACK\n",
+	    uvm_map_inentry_sp, p->p_vmspace->vm_map.sserial))
+		goto out;
 
 	switch (type) {
 	case T_PROTFLT:			/* protection fault */
@@ -392,7 +410,7 @@ trap_print(struct trapframe *frame, int type)
 	printf(" in %s mode\n", KERNELMODE(frame->tf_cs, frame->tf_rflags) ?
 	    "supervisor" : "user");
 	printf("trap type %d code %llx rip %llx cs %llx rflags %llx cr2 "
-	       " %llx cpl %x rsp %llx\n",
+	       "%llx cpl %x rsp %llx\n",
 	    type, frame->tf_err, frame->tf_rip, frame->tf_cs,
 	    frame->tf_rflags, rcr2(), curcpu()->ci_ilevel, frame->tf_rsp);
 	printf("gsbase %p  kgsbase %p\n",
@@ -454,28 +472,6 @@ debug_trap(struct trapframe *frame, struct proc *p, long type)
 	}
 #endif
 }
-
-static inline void
-check_stack(struct proc *p, long type)
-{
-	vaddr_t sp = PROC_STACK(p);
-
-	if (p->p_vmspace->vm_map.serial != p->p_spserial ||
-	    p->p_spstart == 0 || sp < p->p_spstart || sp >= p->p_spend) {
-		KERNEL_LOCK();
-		if (!uvm_map_check_stack_range(p, sp)) {
-			union sigval sv;
-
-			printf("trap [%s]%d/%d type %ld: sp %lx not inside"
-			    " %lx-%lx\n", p->p_p->ps_comm, p->p_p->ps_pid,
-			    p->p_tid, type, sp, p->p_spstart, p->p_spend);
-			sv.sival_ptr = (void *)PROC_PC(p);
-			trapsignal(p, SIGSEGV, type, SEGV_ACCERR, sv);
-		}
-		KERNEL_UNLOCK();
-	}
-}
-
 
 /*
  * ast(frame):
@@ -552,7 +548,7 @@ syscall(struct trapframe *frame)
 			args[3] = frame->tf_r10;
 		case 3:
 			args[2] = frame->tf_rdx;
-		case 2:	
+		case 2:
 			args[1] = frame->tf_rsi;
 		case 1:
 			args[0] = frame->tf_rdi;

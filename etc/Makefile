@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.469 2019/05/11 07:18:15 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.478 2020/06/29 17:52:02 deraadt Exp $
 
 .include <bsd.own.mk>
 
@@ -48,7 +48,7 @@ MUTABLE=changelist daily etc.${MACHINE}/disktab \
 EXAMPLES=acme-client.conf chio.conf dhclient.conf dhcpd.conf exports \
 	httpd.conf ifstated.conf inetd.conf man.conf mixerctl.conf \
 	mrouted.conf ntpd.conf printcap rad.conf rbootd.conf \
-	remote unwind.conf sensorsd.conf wsconsctl.conf
+	remote sensorsd.conf wsconsctl.conf
 
 # -rw-------
 EXAMPLES_600=bgpd.conf doas.conf dvmrpd.conf eigrpd.conf hostapd.conf \
@@ -61,14 +61,14 @@ RCDAEMONS=amd apmd bgpd bootparamd cron dhcpd dhcrelay dhcrelay6 dvmrpd \
 	eigrpd ftpd ftpproxy ftpproxy6 hostapd hotplugd httpd identd ifstated \
 	iked inetd isakmpd iscsid ldapd ldattach ldomd ldpd lockd \
 	lpd mopd mountd mrouted nfsd npppd nsd ntpd ospf6d ospfd \
-	pflogd portmap rad radiusd rarpd rbootd rebound relayd ripd route6d \
+	pflogd portmap rad radiusd rarpd rbootd relayd ripd route6d \
 	sasyncd sensorsd slowcgi slaacd smtpd sndiod snmpd spamd \
 	spamlogd sshd statd switchd syslogd tftpd tftpproxy unbound \
 	unwind vmd watchdogd wsmoused xenodm ypbind ypldap ypserv
 
 MISETS=	base${OSrev}.tgz comp${OSrev}.tgz man${OSrev}.tgz game${OSrev}.tgz
 
-all clean cleandir depend etc install:
+all clean cleandir etc install:
 
 install-mtree:
 	${INSTALL} -c -o root -g wheel -m 600 mtree/special \
@@ -153,6 +153,10 @@ distribution-etc-root-var: distrib-dirs
 		    ${DESTDIR}/etc/ppp; \
 		${INSTALL} -c -o root -g wheel -m 600 pap-secrets \
 		    ${DESTDIR}/etc/ppp
+	cd rpki; \
+		${INSTALL} -c -o root -g wheel -m 644 \
+		    afrinic.tal apnic.tal lacnic.tal ripe.tal \
+		    ${DESTDIR}/etc/rpki
 	cd examples; \
 		${INSTALL} -c -o root -g wheel -m 644 ${EXAMPLES} \
 		    ${DESTDIR}/etc/examples; \
@@ -178,6 +182,8 @@ distribution-etc-root-var: distrib-dirs
 	    ${DESTDIR}/var/cron/log
 	${INSTALL} -c -o root -g wheel -m 444 /dev/null \
 	    ${DESTDIR}/var/db/locate.database
+	${INSTALL} -c -o _rpki-client -g wheel -m 644 /dev/null \
+	    ${DESTDIR}/var/db/rpki-client/openbgpd
 	${INSTALL} -c -o ${BINOWN} -g wheel -m 640 /dev/null \
 	    ${DESTDIR}/var/log/authlog
 	${INSTALL} -c -o ${BINOWN} -g wheel -m 640 /dev/null \
@@ -297,7 +303,7 @@ distrib:
 
 SUBDIR+= etc.alpha etc.amd64 etc.arm64 etc.armv7
 SUBDIR+= etc.hppa etc.i386 etc.landisk etc.loongson etc.luna88k
-SUBDIR+= etc.macppc etc.octeon
+SUBDIR+= etc.macppc etc.octeon etc.powerpc64
 SUBDIR+= etc.sgi etc.sparc64
 
 .include <bsd.subdir.mk>

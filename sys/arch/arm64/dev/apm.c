@@ -1,4 +1,4 @@
-/*	$OpenBSD: apm.c,v 1.1 2019/01/23 09:57:36 phessler Exp $	*/
+/*	$OpenBSD: apm.c,v 1.5 2020/05/29 04:42:23 deraadt Exp $	*/
 
 /*-
  * Copyright (c) 2001 Alexander Guy.  All rights reserved.
@@ -45,7 +45,6 @@
 #include <sys/event.h>
 #include <sys/reboot.h>
 #include <sys/hibernate.h>
-#include <dev/rndvar.h>
 
 #include <machine/conf.h>
 #include <machine/cpu.h>
@@ -87,8 +86,12 @@ int filt_apmread(struct knote *kn, long hint);
 int apmkqfilter(dev_t dev, struct knote *kn);
 int apm_getdefaultinfo(struct apm_power_info *);
 
-struct filterops apmread_filtops =
-	{ 1, NULL, filt_apmrdetach, filt_apmread};
+const struct filterops apmread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_apmrdetach,
+	.f_event	= filt_apmread,
+};
 
 int (*get_apminfo)(struct apm_power_info *) = apm_getdefaultinfo;
 
@@ -267,7 +270,7 @@ filt_apmrdetach(struct knote *kn)
 {
 	struct apm_softc *sc = (struct apm_softc *)kn->kn_hook;
 
-	SLIST_REMOVE(&sc->sc_note, kn, knote, kn_selnext);
+	klist_remove(&sc->sc_note, kn);
 }
 
 int
@@ -299,7 +302,7 @@ apmkqfilter(dev_t dev, struct knote *kn)
 	}
 
 	kn->kn_hook = (caddr_t)sc;
-	SLIST_INSERT_HEAD(&sc->sc_note, kn, kn_selnext);
+	klist_insert(&sc->sc_note, kn);
 
 	return (0);
 }

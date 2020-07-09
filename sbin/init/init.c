@@ -1,4 +1,4 @@
-/*	$OpenBSD: init.c,v 1.68 2018/08/24 18:36:56 cheloha Exp $	*/
+/*	$OpenBSD: init.c,v 1.70 2020/03/25 19:26:52 cheloha Exp $	*/
 /*	$NetBSD: init.c,v 1.22 1996/05/15 23:29:33 jtc Exp $	*/
 
 /*-
@@ -195,16 +195,12 @@ main(int argc, char *argv[])
 	sigset_t mask;
 
 	/* Dispose of random users. */
-	if (getuid() != 0) {
-		(void)fprintf(stderr, "init: %s\n", strerror(EPERM));
-		exit (1);
-	}
+	if (getuid() != 0)
+		errc(1, EPERM, NULL);
 
 	/* System V users like to reexec init. */
-	if (getpid() != 1) {
-		(void)fprintf(stderr, "init: already running\n");
-		exit (1);
-	}
+	if (getpid() != 1)
+		errx(1, "already running");
 
 	/*
 	 * Paranoia.
@@ -226,14 +222,14 @@ main(int argc, char *argv[])
 	/*
 	 * Create an initial session.
 	 */
-	if (setsid() < 0)
+	if (setsid() == -1)
 		warning("initial setsid() failed: %m");
 
 	/*
 	 * Establish an initial user so that programs running
 	 * single user do not freak out and die (like passwd).
 	 */
-	if (setlogin("root") < 0)
+	if (setlogin("root") == -1)
 		warning("setlogin() failed: %m");
 
 	/*
@@ -967,7 +963,7 @@ start_window_system(session_t *sp)
 	sigemptyset(&mask);
 	sigprocmask(SIG_SETMASK, &mask, NULL);
 
-	if (setsid() < 0)
+	if (setsid() == -1)
 		emergency("setsid failed (window) %m");
 
 	setprocresources(RESOURCE_WINDOW);

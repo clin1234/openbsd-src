@@ -1,4 +1,4 @@
-/*	$OpenBSD: vdsp.c,v 1.45 2018/05/02 02:24:55 visa Exp $	*/
+/*	$OpenBSD: vdsp.c,v 1.47 2020/01/16 13:03:28 mpi Exp $	*/
 /*
  * Copyright (c) 2009, 2011, 2014 Mark Kettenis
  *
@@ -894,7 +894,8 @@ vdsp_sendmsg(struct vdsp_softc *sc, void *msg, size_t len, int dowait)
 			 * we specify a timeout such that we don't
 			 * block forever.
 			 */
-			err = tsleep(lc->lc_txq, PWAIT, "vdsp", 1);
+			err = tsleep_nsec(lc->lc_txq, PWAIT, "vdsp",
+			    MSEC_TO_NSEC(10));
 		}
 	} while (dowait && err == EWOULDBLOCK);
 }
@@ -918,7 +919,7 @@ vdsp_open(void *arg1)
 		if (name == NULL)
 			return;
 
-		NDINIT(&nd, LOOKUP, FOLLOW, UIO_SYSSPACE, name, p);
+		NDINIT(&nd, 0, 0, UIO_SYSSPACE, name, p);
 		error = vn_open(&nd, FREAD | FWRITE, 0);
 		if (error) {
 			printf("VOP_OPEN: %s, %d\n", name, error);

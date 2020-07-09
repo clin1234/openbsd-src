@@ -1,4 +1,4 @@
-/*	$OpenBSD: ar9003.c,v 1.48 2019/02/19 10:17:09 stsp Exp $	*/
+/*	$OpenBSD: ar9003.c,v 1.50 2020/02/17 20:57:58 claudio Exp $	*/
 
 /*-
  * Copyright (c) 2010 Damien Bergamini <damien.bergamini@free.fr>
@@ -83,7 +83,7 @@ void	ar9003_reset_txsring(struct athn_softc *);
 void	ar9003_rx_enable(struct athn_softc *);
 void	ar9003_rx_radiotap(struct athn_softc *, struct mbuf *,
 	    struct ar_rx_status *);
-int	ar9003_rx_process(struct athn_softc *, int);
+int	ar9003_rx_process(struct athn_softc *, int, struct mbuf_list *);
 void	ar9003_rx_intr(struct athn_softc *, int);
 int	ar9003_tx_process(struct athn_softc *);
 void	ar9003_tx_intr(struct athn_softc *);
@@ -856,7 +856,6 @@ ar9003_rx_radiotap(struct athn_softc *sc, struct mbuf *m,
 
 	struct athn_rx_radiotap_header *tap = &sc->sc_rxtap;
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct mbuf mb;
 	uint64_t tsf;
 	uint32_t tstamp;
 	uint8_t rate;
@@ -905,18 +904,12 @@ ar9003_rx_radiotap(struct athn_softc *sc, struct mbuf *m,
 		case 0xc: tap->wr_rate = 108; break;
 		}
 	}
-	mb.m_data = (caddr_t)tap;
-	mb.m_len = sc->sc_rxtap_len;
-	mb.m_next = m;
-	mb.m_nextpkt = NULL;
-	mb.m_type = 0;
-	mb.m_flags = 0;
-	bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_IN);
+	bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_rxtap_len, m, BPF_DIRECTION_IN);
 }
 #endif
 
 int
-ar9003_rx_process(struct athn_softc *sc, int qid)
+ar9003_rx_process(struct athn_softc *sc, int qid, struct mbuf_list *ml)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ifnet *ifp = &ic->ic_if;
@@ -1036,7 +1029,7 @@ ar9003_rx_process(struct athn_softc *sc, int qid)
 	rxi.rxi_flags = 0;	/* XXX */
 	rxi.rxi_rssi = MS(ds->ds_status5, AR_RXS5_RSSI_COMBINED);
 	rxi.rxi_tstamp = ds->ds_status3;
-	ieee80211_input(ifp, m, ni, &rxi);
+	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 
 	/* Node is no longer needed. */
 	ieee80211_release_node(ic, ni);
@@ -1066,7 +1059,13 @@ ar9003_rx_process(struct athn_softc *sc, int qid)
 void
 ar9003_rx_intr(struct athn_softc *sc, int qid)
 {
-	while (ar9003_rx_process(sc, qid) == 0);
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ifnet *ifp = &ic->ic_if;
+
+	while (ar9003_rx_process(sc, qid, &ml) == 0);
+
+	if_input(ifp, &ml);
 }
 
 int
@@ -1478,7 +1477,6 @@ ar9003_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 #if NBPFILTER > 0
 	if (__predict_false(sc->sc_drvbpf != NULL)) {
 		struct athn_tx_radiotap_header *tap = &sc->sc_txtap;
-		struct mbuf mb;
 
 		tap->wt_flags = 0;
 		/* Use initial transmit rate. */
@@ -1490,13 +1488,8 @@ ar9003_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 		    ridx[0] != ATHN_RIDX_CCK1 &&
 		    (ic->ic_flags & IEEE80211_F_SHPREAMBLE))
 			tap->wt_flags |= IEEE80211_RADIOTAP_F_SHORTPRE;
-		mb.m_data = (caddr_t)tap;
-		mb.m_len = sc->sc_txtap_len;
-		mb.m_next = m;
-		mb.m_nextpkt = NULL;
-		mb.m_type = 0;
-		mb.m_flags = 0;
-		bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_OUT);
+		bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_txtap_len, m,
+		    BPF_DIRECTION_OUT);
 	}
 #endif
 

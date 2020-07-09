@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.68 2019/04/20 22:59:03 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.73 2020/06/14 16:00:11 deraadt Exp $
 
 COPTS?=
 MAN?=	boot.8
@@ -27,7 +27,7 @@ SRCS+=	boot.c bootarg.c cmd.c vars.c
 
 .PATH:	${SADIR}/libsa
 SRCS+=	debug_i386.S
-SRCS+=	gidt.S random_i386.S
+SRCS+=	gidt.S pslid.S mdrandom.c
 SRCS+=	apmprobe.c debug.c pciprobe.c ps2probe.c
 SRCS+=	cmd_i386.c dev_i386.c exec_i386.c gateA20.c machdep.c
 SRCS+=	bioscons.c biosdev.c diskprobe.c memprobe.c time.c
@@ -36,13 +36,18 @@ SRCS+=	softraid_i386.c
 .endif
 
 .PATH:	${S}/lib/libsa
-SRCS+=	alloc.c ctime.c exit.c getchar.c memcmp.c memcpy.c memmove.c memset.c printf.c \
+SRCS+=	alloc.c ctime.c exit.c getchar.c hexdump.c \
+	memcmp.c memcpy.c memmove.c memset.c printf.c \
 	putchar.c snprintf.c strcmp.c strerror.c strlen.c strncmp.c strncpy.c \
 	strtol.c strtoll.c
-SRCS+=	close.c closeall.c cons.c cread.c dev.c disklabel.c dkcksum.c fstat.c \
-	lseek.c open.c read.c readdir.c stat.c
-SRCS+=	elf32.c elf64.c loadfile.c
+SRCS+=	close.c closeall.c cons.c cread.c dev.c disklabel.c dkcksum.c fchmod.c \
+	fstat.c lseek.c open.c read.c readdir.c stat.c
+SRCS+=	elf32.c elf64.c loadfile.c arc4.c
 SRCS+=	ufs.c
+.if empty(COPTS:M-DFDBOOT)
+SRCS+=	ufs2.c
+.endif
+
 .if ${SOFTRAID:L} == "yes"
 SRCS+=	aes_xts.c bcrypt_pbkdf.c blowfish.c explicit_bzero.c hmac_sha1.c \
 	pkcs5_pbkdf2.c rijndael.c sha1.c sha2.c softraid.c

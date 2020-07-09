@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.66 2016/09/04 10:51:23 naddy Exp $	*/
+/*	$OpenBSD: conf.c,v 1.70 2020/07/06 04:32:25 dlg Exp $	*/
 
 /*-
  * Copyright (c) 1991 The Regents of the University of California.
@@ -91,6 +91,7 @@ int	nblkdev = nitems(bdevsw);
 #include "tun.h"
 
 #include "ksyms.h"
+#include "kstat.h"
 
 #include "lpt.h"
 cdev_decl(lpt);
@@ -98,6 +99,7 @@ cdev_decl(lpt);
 #include "com.h"
 cdev_decl(com);
 
+#include "dt.h"
 #include "pf.h"
 
 #include "hotplug.h"
@@ -111,6 +113,7 @@ cdev_decl(pci);
 
 #include "usb.h"
 #include "uhid.h"
+#include "fido.h"
 #include "ugen.h"
 #include "ulpt.h"
 #include "ucom.h"
@@ -157,7 +160,7 @@ struct cdevsw   cdevsw[] =
 #else
 	cdev_notdef(),			/* 31: */
 #endif
-	cdev_notdef(),			/* 32 */
+	cdev_dt_init(NDT,dt),		/* 32: dynamic tracer */
 	cdev_video_init(NVIDEO,video),	/* 33: generic video I/O */
 	cdev_notdef(),			/* 34 */
 	cdev_audio_init(NAUDIO,audio),	/* 35: /dev/audio */
@@ -176,7 +179,7 @@ struct cdevsw   cdevsw[] =
 	cdev_notdef(),			/* 48: */
 	cdev_notdef(),			/* 49: */
 	cdev_notdef(),			/* 50: */
-	cdev_notdef(),			/* 51: */
+	cdev_ksyms_init(NKSTAT,kstat),	/* 51: kernel statistics */
 	cdev_notdef(),			/* 52: */
 	cdev_notdef(),			/* 53: */
 	cdev_vscsi_init(NVSCSI,vscsi),	/* 54: vscsi */
@@ -186,6 +189,8 @@ struct cdevsw   cdevsw[] =
 	cdev_fuse_init(NFUSE,fuse),	/* 58: fuse */
 	cdev_tun_init(NTUN,tap),	/* 59: Ethernet network tunnel */
 	cdev_switch_init(NSWITCH,switch), /* 60: switch(4) control interface */
+	cdev_fido_init(NFIDO,fido),	/* 61: FIDO/U2F security key */
+	cdev_pppx_init(NPPPX,pppac),	/* 62: PPP Access Concentrator */
 };
 int nchrdev = nitems(cdevsw);
 

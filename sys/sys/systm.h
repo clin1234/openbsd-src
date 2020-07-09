@@ -1,4 +1,4 @@
-/*	$OpenBSD: systm.h,v 1.141 2019/04/23 13:35:12 visa Exp $	*/
+/*	$OpenBSD: systm.h,v 1.147 2020/05/29 04:42:25 deraadt Exp $	*/
 /*	$NetBSD: systm.h,v 1.50 1996/06/09 04:55:09 briggs Exp $	*/
 
 /*-
@@ -211,6 +211,11 @@ int	copyin(const void *, void *, size_t)
 int	copyout(const void *, void *, size_t);
 int	copyin32(const uint32_t *, uint32_t *);
 
+void	random_start(int);
+void	enqueue_randomness(unsigned int);
+void	suspend_randomness(void);
+void	resume_randomness(char *, size_t);
+
 struct arc4random_ctx;
 void	arc4random_buf(void *, size_t)
 		__attribute__ ((__bounded__(__buffer__,1,2)));
@@ -228,7 +233,6 @@ void	realitexpire(void *);
 
 struct clockframe;
 void	hardclock(struct clockframe *);
-void	softclock(void *);
 void	statclock(struct clockframe *);
 
 void	initclocks(void);
@@ -247,7 +251,7 @@ struct sleep_state;
 void	sleep_setup(struct sleep_state *, const volatile void *, int,
 	    const char *);
 void	sleep_setup_timeout(struct sleep_state *, int);
-void	sleep_setup_signal(struct sleep_state *, int);
+void	sleep_setup_signal(struct sleep_state *);
 void	sleep_finish(struct sleep_state *, int);
 int	sleep_finish_timeout(struct sleep_state *);
 int	sleep_finish_signal(struct sleep_state *);
@@ -259,14 +263,22 @@ void	cond_init(struct cond *);
 void	cond_wait(struct cond *, const char *);
 void	cond_signal(struct cond *);
 
+#define	INFSLP	UINT64_MAX
+#define	MAXTSLP	(UINT64_MAX - 1)
+
 struct mutex;
 struct rwlock;
 void    wakeup_n(const volatile void *, int);
 void    wakeup(const volatile void *);
 #define wakeup_one(c) wakeup_n((c), 1)
 int	tsleep(const volatile void *, int, const char *, int);
+int	tsleep_nsec(const volatile void *, int, const char *, uint64_t);
 int	msleep(const volatile void *, struct mutex *, int,  const char*, int);
+int	msleep_nsec(const volatile void *, struct mutex *, int,  const char*,
+	    uint64_t);
 int	rwsleep(const volatile void *, struct rwlock *, int, const char *, int);
+int	rwsleep_nsec(const volatile void *, struct rwlock *, int, const char *,
+	    uint64_t);
 void	yield(void);
 
 void	wdog_register(int (*)(void *, int), void *);
@@ -308,30 +320,39 @@ int	uiomove(void *, size_t, struct uio *);
 
 extern struct rwlock netlock;
 
-#define	NET_LOCK()		NET_WLOCK()
-#define	NET_UNLOCK()		NET_WUNLOCK()
-#define	NET_ASSERT_UNLOCKED()	NET_ASSERT_WUNLOCKED()
+/*
+ * Network stack data structures are, unless stated otherwise, protected
+ * by the NET_LOCK().  It's a single non-recursive lock for the whole
+ * subsystem.
+ */
+#define	NET_LOCK()	do { rw_enter_write(&netlock); } while (0)
+#define	NET_UNLOCK()	do { rw_exit_write(&netlock); } while (0)
 
+/*
+ * Reader version of NET_LOCK() to be used in "softnet" thread only.
 
-#define	NET_WLOCK()	do { rw_enter_write(&netlock); } while (0)
-#define	NET_WUNLOCK()	do { rw_exit_write(&netlock); } while (0)
+ * The "softnet" thread should be the only thread processing packets
+ * without holding an exclusive lock.  This is done to allow read-only
+ * ioctl(2) to not block.
+ */
+#define	NET_RLOCK_IN_SOFTNET()	do { rw_enter_read(&netlock); } while (0)
+#define	NET_RUNLOCK_IN_SOFTNET()do { rw_exit_read(&netlock); } while (0)
 
-#define	NET_ASSERT_WLOCKED()						\
-do {									\
-	int _s = rw_status(&netlock);					\
-	if ((splassert_ctl > 0) && (_s != RW_WRITE))			\
-		splassert_fail(RW_WRITE, _s, __func__);			\
-} while (0)
+/*
+ * Reader version of NET_LOCK() to be used in ioctl/sysctl path only.
+ *
+ * Can be grabbed instead of the exclusive version when no field
+ * protected by the NET_LOCK() is modified by the ioctl/sysctl.
+ */
+#define	NET_RLOCK_IN_IOCTL()	do { rw_enter_read(&netlock); } while (0)
+#define	NET_RUNLOCK_IN_IOCTL()	do { rw_exit_read(&netlock); } while (0)
 
-#define	NET_ASSERT_WUNLOCKED()						\
+#define	NET_ASSERT_UNLOCKED()						\
 do {									\
 	int _s = rw_status(&netlock);					\
 	if ((splassert_ctl > 0) && (_s == RW_WRITE))			\
 		splassert_fail(0, RW_WRITE, __func__);			\
 } while (0)
-
-#define	NET_RLOCK()	do { rw_enter_read(&netlock); } while (0)
-#define	NET_RUNLOCK()	do { rw_exit_read(&netlock); } while (0)
 
 #define	NET_ASSERT_LOCKED()						\
 do {									\

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_athn_usb.c,v 1.52 2018/12/06 07:50:38 stsp Exp $	*/
+/*	$OpenBSD: if_athn_usb.c,v 1.56 2020/04/27 08:21:35 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2011 Damien Bergamini <damien.bergamini@free.fr>
@@ -53,6 +53,7 @@
 #include <net80211/ieee80211_radiotap.h>
 
 #include <dev/ic/athnreg.h>
+#include <dev/ic/ar5008reg.h>
 #include <dev/ic/athnvar.h>
 
 #include <dev/usb/usb.h>
@@ -176,7 +177,8 @@ void		athn_usb_intr(struct usbd_xfer *, void *,
 		    usbd_status);
 void		athn_usb_rx_radiotap(struct athn_softc *, struct mbuf *,
 		    struct ar_rx_status *);
-void		athn_usb_rx_frame(struct athn_usb_softc *, struct mbuf *);
+void		athn_usb_rx_frame(struct athn_usb_softc *, struct mbuf *,
+		    struct mbuf_list *);
 void		athn_usb_rxeof(struct usbd_xfer *, void *,
 		    usbd_status);
 void		athn_usb_txeof(struct usbd_xfer *, void *,
@@ -189,6 +191,9 @@ int		athn_usb_ioctl(struct ifnet *, u_long, caddr_t);
 int		athn_usb_init(struct ifnet *);
 void		athn_usb_stop(struct ifnet *);
 void		ar9271_load_ani(struct athn_softc *);
+int		ar5008_ccmp_decap(struct athn_softc *, struct mbuf *,
+		    struct ieee80211_node *);
+int		ar5008_ccmp_encap(struct mbuf *, u_int, struct ieee80211_key *);
 
 /* Shortcut. */
 #define athn_usb_wmi_cmd(sc, cmd_id)	\
@@ -340,9 +345,9 @@ athn_usb_attachhook(struct device *self)
 #endif
 	ic->ic_updateslot = athn_usb_updateslot;
 	ic->ic_updateedca = athn_usb_updateedca;
-#ifdef notyet
 	ic->ic_set_key = athn_usb_set_key;
 	ic->ic_delete_key = athn_usb_delete_key;
+#ifdef notyet
 	ic->ic_ampdu_tx_start = athn_usb_ampdu_tx_start;
 	ic->ic_ampdu_tx_stop = athn_usb_ampdu_tx_stop;
 #endif
@@ -693,7 +698,8 @@ athn_usb_load_firmware(struct athn_usb_softc *usc)
 	error = usbd_do_request(usc->sc_udev, &req, NULL);
 	/* Wait at most 1 second for firmware to boot. */
 	if (error == 0 && usc->wait_msg_id != 0)
-		error = tsleep(&usc->wait_msg_id, 0, "athnfw", hz);
+		error = tsleep_nsec(&usc->wait_msg_id, 0, "athnfw",
+		    SEC_TO_NSEC(1));
 	usc->wait_msg_id = 0;
 	splx(s);
 	return (error);
@@ -778,7 +784,8 @@ athn_usb_htc_setup(struct athn_usb_softc *usc)
 	usc->wait_msg_id = AR_HTC_MSG_CONF_PIPE_RSP;
 	error = athn_usb_htc_msg(usc, AR_HTC_MSG_CONF_PIPE, &cfg, sizeof(cfg));
 	if (error == 0 && usc->wait_msg_id != 0)
-		error = tsleep(&usc->wait_msg_id, 0, "athnhtc", hz);
+		error = tsleep_nsec(&usc->wait_msg_id, 0, "athnhtc",
+		    SEC_TO_NSEC(1));
 	usc->wait_msg_id = 0;
 	splx(s);
 	if (error != 0) {
@@ -814,7 +821,8 @@ athn_usb_htc_connect_svc(struct athn_usb_softc *usc, uint16_t svc_id,
 	error = athn_usb_htc_msg(usc, AR_HTC_MSG_CONN_SVC, &msg, sizeof(msg));
 	/* Wait at most 1 second for response. */
 	if (error == 0 && usc->wait_msg_id != 0)
-		error = tsleep(&usc->wait_msg_id, 0, "athnhtc", hz);
+		error = tsleep_nsec(&usc->wait_msg_id, 0, "athnhtc",
+		    SEC_TO_NSEC(1));
 	usc->wait_msg_id = 0;
 	splx(s);
 	if (error != 0) {
@@ -849,12 +857,13 @@ athn_usb_wmi_xcmd(struct athn_usb_softc *usc, uint16_t cmd_id, void *ibuf,
 
 	s = splusb();
 	while (usc->wait_cmd_id) {
-		/* 
+		/*
 		 * The previous USB transfer is not done yet. We can't use
 		 * data->xfer until it is done or we'll cause major confusion
 		 * in the USB stack.
 		 */
-		tsleep(&usc->wait_cmd_id, 0, "athnwmx", ATHN_USB_CMD_TIMEOUT);
+		tsleep_nsec(&usc->wait_cmd_id, 0, "athnwmx",
+		    MSEC_TO_NSEC(ATHN_USB_CMD_TIMEOUT));
 		if (usbd_is_dying(usc->sc_udev)) {
 			splx(s);
 			return ENXIO;
@@ -890,7 +899,8 @@ athn_usb_wmi_xcmd(struct athn_usb_softc *usc, uint16_t cmd_id, void *ibuf,
 	 * Wait for WMI command complete interrupt. In case it does not fire
 	 * wait until the USB transfer times out to avoid racing the transfer.
 	 */
-	error = tsleep(&usc->wait_cmd_id, 0, "athnwmi", ATHN_USB_CMD_TIMEOUT);
+	error = tsleep_nsec(&usc->wait_cmd_id, 0, "athnwmi",
+	    MSEC_TO_NSEC(ATHN_USB_CMD_TIMEOUT));
 	if (error) {
 		if (error == EWOULDBLOCK) {
 			printf("%s: firmware command 0x%x timed out\n",
@@ -1647,6 +1657,7 @@ athn_usb_set_key_cb(struct athn_usb_softc *usc, void *arg)
 	int s;
 
 	s = splnet();
+	athn_usb_write_barrier(&usc->sc_sc);
 	athn_set_key(ic, cmd->ni, cmd->key);
 	if (cmd->ni != NULL)
 		ieee80211_release_node(ic, cmd->ni);
@@ -1994,7 +2005,8 @@ athn_usb_rx_radiotap(struct athn_softc *sc, struct mbuf *m,
 #endif
 
 void
-athn_usb_rx_frame(struct athn_usb_softc *usc, struct mbuf *m)
+athn_usb_rx_frame(struct athn_usb_softc *usc, struct mbuf *m,
+    struct mbuf_list *ml)
 {
 	struct athn_softc *sc = &usc->sc_sc;
 	struct ieee80211com *ic = &sc->sc_ic;
@@ -2033,6 +2045,12 @@ athn_usb_rx_frame(struct athn_usb_softc *usc, struct mbuf *m)
 	if (__predict_false(datalen < sizeof(*wh) + IEEE80211_CRC_LEN))
 		goto skip;
 
+	if (rs->rs_status != 0) {
+		if (rs->rs_status & AR_RXS_RXERR_DECRYPT)
+			ic->ic_stats.is_ccmp_dec_errs++;
+		ifp->if_ierrors++;
+		goto skip;
+	}
 	m_adj(m, sizeof(*rs));	/* Strip Rx status. */
 
 	s = splnet();
@@ -2048,6 +2066,7 @@ athn_usb_rx_frame(struct athn_usb_softc *usc, struct mbuf *m)
 			memmove((caddr_t)wh + 2, wh, hdrlen);
 			m_adj(m, 2);
 		}
+		wh = mtod(m, struct ieee80211_frame *);
 	}
 #if NBPFILTER > 0
 	if (__predict_false(sc->sc_drvbpf != NULL))
@@ -2060,7 +2079,22 @@ athn_usb_rx_frame(struct athn_usb_softc *usc, struct mbuf *m)
 	rxi.rxi_flags = 0;
 	rxi.rxi_rssi = rs->rs_rssi + AR_USB_DEFAULT_NF;
 	rxi.rxi_tstamp = betoh64(rs->rs_tstamp);
-	ieee80211_input(ifp, m, ni, &rxi);
+	if (!(wh->i_fc[0] & IEEE80211_FC0_TYPE_CTL) &&
+	    (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) &&
+	    (ic->ic_flags & IEEE80211_F_RSNON) &&
+	    (ni->ni_flags & IEEE80211_NODE_RXPROT) &&
+	    (ni->ni_rsncipher == IEEE80211_CIPHER_CCMP ||
+	    (IEEE80211_IS_MULTICAST(wh->i_addr1) &&
+	    ic->ic_rsngroupcipher == IEEE80211_CIPHER_CCMP))) {
+		if (ar5008_ccmp_decap(sc, m, ni) != 0) {
+			ifp->if_ierrors++;
+			ieee80211_release_node(ic, ni);
+			splx(s);
+			goto skip;
+		}
+		rxi.rxi_flags |= IEEE80211_RXI_HWDEC;
+	}
+	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 
 	/* Node is no longer needed. */
 	ieee80211_release_node(ic, ni);
@@ -2074,6 +2108,7 @@ void
 athn_usb_rxeof(struct usbd_xfer *xfer, void *priv,
     usbd_status status)
 {
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
 	struct athn_usb_rx_data *data = priv;
 	struct athn_usb_softc *usc = data->sc;
 	struct athn_softc *sc = &usc->sc_sc;
@@ -2101,7 +2136,7 @@ athn_usb_rxeof(struct usbd_xfer *xfer, void *priv,
 			if (__predict_true(stream->m != NULL)) {
 				memcpy(mtod(stream->m, uint8_t *) +
 				    stream->moff, buf, stream->left);
-				athn_usb_rx_frame(usc, stream->m);
+				athn_usb_rx_frame(usc, stream->m, &ml);
 				stream->m = NULL;
 			}
 			/* Next header is 32-bit aligned. */
@@ -2167,7 +2202,7 @@ athn_usb_rxeof(struct usbd_xfer *xfer, void *priv,
 		if (__predict_true(m != NULL)) {
 			/* We have all the pktlen bytes in this xfer. */
 			memcpy(mtod(m, uint8_t *), buf, pktlen);
-			athn_usb_rx_frame(usc, m);
+			athn_usb_rx_frame(usc, m, &ml);
 		}
 
 		/* Next header is 32-bit aligned. */
@@ -2175,6 +2210,7 @@ athn_usb_rxeof(struct usbd_xfer *xfer, void *priv,
 		buf += off;
 		len -= off;
 	}
+	if_input(ifp, &ml);
 
  resubmit:
 	/* Setup a new transfer. */
@@ -2238,8 +2274,15 @@ athn_usb_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	wh = mtod(m, struct ieee80211_frame *);
 	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
 		k = ieee80211_get_txkey(ic, wh, ni);
-		if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
-			return (ENOBUFS);
+		if (k->k_cipher == IEEE80211_CIPHER_CCMP) {
+			u_int hdrlen = ieee80211_get_hdrlen(wh);
+			if (ar5008_ccmp_encap(m, hdrlen, k) != 0)
+				return (ENOBUFS);
+		} else {
+			if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
+				return (ENOBUFS);
+			k = NULL; /* skip hardware crypto further below */
+		}
 		wh = mtod(m, struct ieee80211_frame *);
 	}
 	if ((hasqos = ieee80211_has_qos(wh))) {
@@ -2296,7 +2339,21 @@ athn_usb_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 			else if (ic->ic_protmode == IEEE80211_PROT_RTSCTS)
 				txf->flags |= htobe32(AR_HTC_TX_RTSCTS);
 		}
-		txf->key_idx = 0xff;
+
+		if (k != NULL) {
+			/* Map 802.11 cipher to hardware encryption type. */
+			if (k->k_cipher == IEEE80211_CIPHER_CCMP) {
+				txf->key_type = AR_ENCR_TYPE_AES;
+			} else
+				panic("unsupported cipher");
+			/*
+			 * NB: The key cache entry index is stored in the key
+			 * private field when the key is installed.
+			 */
+			txf->key_idx = (uintptr_t)k->k_priv;
+		} else
+			txf->key_idx = 0xff;
+
 		txf->cookie = an->sta_index;
 		frm = (uint8_t *)&txf[1];
 	} else {

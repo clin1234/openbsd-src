@@ -1,4 +1,4 @@
-.\"	$OpenBSD: pci.4,v 1.371 2019/05/04 15:57:20 jmc Exp $
+.\"	$OpenBSD: pci.4,v 1.381 2020/04/19 09:27:44 kettenis Exp $
 .\"	$NetBSD: pci.4,v 1.29 2000/04/01 00:32:23 tsarna Exp $
 .\"
 .\" Copyright (c) 2000 Theo de Raadt.  All rights reserved.
@@ -31,7 +31,7 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: May 4 2019 $
+.Dd $Mdocdate: April 19 2020 $
 .Dt PCI 4
 .Os
 .Sh NAME
@@ -51,6 +51,7 @@
 .Pp
 .Cd "# arm64"
 .Cd "pci* at acpipci?"
+.Cd "pci* at bcmpcie?"
 .Cd "pci* at dwpcie?"
 .Cd "pci* at pciecam?"
 .Cd "pci* at rkpcie?"
@@ -74,6 +75,9 @@
 .Cd "pci* at mpcpcibr?"
 .Cd "pci* at ht?"
 .Cd "pci* at hpb?"
+.Pp
+.Cd "# octeon"
+.Cd "pci* at octpcie?"
 .Pp
 .Cd "# sgi"
 .Cd "pci* at macepcibr?"
@@ -132,8 +136,6 @@ QLogic ISP2400/2500 Fibre Channel controller
 QLogic ISP1000/1020/1x40/1x80/1x160 SCSI controller
 .It Xr siop 4
 LSI/Symbios Logic/NCR 53c8xx SCSI interface
-.It Xr sli 4
-Emulex LightPulse Fibre Channel SCSI interface
 .It Xr trm 4
 TRM-S1040 based PCI SCSI interface
 .It Xr vmwpvs 4
@@ -162,8 +164,6 @@ Areca Technology Corporation SAS/SATA RAID controller
 Compaq Smart Array 2/3/4 SCSI RAID controller
 .It Xr ciss 4
 Compaq Smart Array SAS/SATA/SCSI RAID controller
-.It Xr dpt 4
-DPT EATA SCSI RAID controller
 .It Xr gdt 4
 ICP-Vortex and Intel GDT SATA/SCSI RAID controller
 .It Xr ips 4
@@ -214,6 +214,8 @@ Intel EtherExpress PRO/100 10/100 Ethernet device
 GEM 10/100/Gigabit Ethernet device
 .It Xr hme 4
 Sun Happy Meal 10/100 Ethernet device
+.It Xr iavf 4
+Intel Ethernet Adaptive Virtual Function device
 .It Xr ix 4
 Intel 82598/82599/X540/X550 PCI Express 10Gb Ethernet device
 .It Xr ixgb 4
@@ -248,6 +250,8 @@ Emulex OneConnect 10Gb Ethernet device
 AMD PCnet-PCI 10/100 Ethernet device
 .It Xr re 4
 Realtek 8139C+/8169/816xS/811xS/8168/810xE 10/100/Gigabit Ethernet device
+.It Xr rge 4
+Realtek 8125 PCI Express 2.5Gb Ethernet device
 .It Xr rl 4
 Realtek 8129/8139 10/100 Ethernet device
 .It Xr se 4
@@ -311,7 +315,9 @@ PRO/Wireless 2200BG/2225BG/2915ABG IEEE 802.11a/b/g wireless network device
 .It Xr iwn 4
 Intel WiFi Link and Centrino IEEE 802.11a/b/g/n wireless network devices
 .It Xr iwm 4
-Intel 7000/8000 IEEE 802.11a/ac/b/g/n wireless network devices
+Intel 7000/8000/9000 IEEE 802.11a/ac/b/g/n wireless network devices
+.It Xr iwx 4
+Intel AX200 IEEE 802.11a/ac/ax/b/g/n wireless network devices
 .It Xr malo 4
 Marvell Libertas IEEE 802.11b/g wireless network device
 .It Xr pgt 4
@@ -431,6 +437,8 @@ Intel 3400 temperature sensor
 AMD K8 temperature sensor
 .It Xr km 4
 AMD K10 temperature sensor
+.It Xr ksmn 4
+AMD K17 temperature sensor over SMN
 .It Xr pchtemp 4
 Intel PCH temperature sensor
 .It Xr pwdog 4
@@ -441,7 +449,7 @@ VIA SMBus controller and VIA VT82C686A/VT8231 hardware monitor
 ICS PCI-WDT500/501 watchdog timer device
 .El
 .Ss Miscellaneous devices
-.Bl -tag -width "piixpcib(4)" -offset ind -compact
+.Bl -tag -width "amdpcib(4)" -offset ind -compact
 .It Xr alipm 4
 Acer Labs M7101 SMBus controller
 .It Xr amas 4
@@ -483,8 +491,6 @@ PCI-ISA bridge
 .Tn PCI
 .Tn PCMCIA
 controllers, including the Cirrus Logic GD6729
-.It Xr piixpcib 4
-Intel PIIX4 ISA bridges
 .It Xr piixpm 4
 Intel PIIX SMBus controller
 .It Xr ppb 4

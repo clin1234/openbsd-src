@@ -1,4 +1,4 @@
-/*	$OpenBSD: aac.c,v 1.70 2017/04/11 14:43:49 dhill Exp $	*/
+/*	$OpenBSD: aac.c,v 1.80 2020/06/27 17:28:58 krw Exp $	*/
 
 /*-
  * Copyright (c) 2000 Michael Smith
@@ -53,6 +53,7 @@
 #include <sys/kthread.h>
 #include <sys/malloc.h>
 #include <sys/rwlock.h>
+#include <sys/selinfo.h>
 #include <sys/time.h>
 
 #include <machine/bus.h>
@@ -130,11 +131,7 @@ struct cfdriver aac_cd = {
 };
 
 struct scsi_adapter aac_switch = {
-	aac_scsi_cmd,
-	scsi_minphys,
-	NULL,		/* probe */
-	NULL,		/* free */
-	NULL		/* ioctl */
+	aac_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 /* Falcon/PPC interface */
@@ -275,10 +272,9 @@ aac_attach(struct aac_softc *sc)
 	sc->aac_link.openings = (sc->total_fibs - 8) /
 	    (sc->aac_container_count ? sc->aac_container_count : 1);
 	sc->aac_link.adapter_buswidth = AAC_MAX_CONTAINERS;
-	sc->aac_link.adapter_target = AAC_MAX_CONTAINERS;
+	sc->aac_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->aac_link.pool = &sc->aac_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->aac_link;
 
 	config_found(&sc->aac_dev, &saa, scsiprint);
@@ -479,13 +475,13 @@ aac_startio(struct aac_softc *sc)
 
 	for (;;) {
 		/*
-		 * Try to get a command that's been put off for lack of 
+		 * Try to get a command that's been put off for lack of
 		 * resources
 		 */
 		cm = aac_dequeue_ready(sc);
 
 		/*
-		 * Try to build a command off the bio queue (ignore error 
+		 * Try to build a command off the bio queue (ignore error
 		 * return)
 		 */
 		if (cm == NULL) {
@@ -573,8 +569,8 @@ aac_command_thread(void *arg)
 				    ("%s: command thread sleeping\n",
 				     sc->aac_dev.dv_xname));
 			AAC_LOCK_RELEASE(&sc->aac_io_lock);
-			retval = tsleep(sc->aifthread, PRIBIO, "aifthd",
-					AAC_PERIODIC_INTERVAL * hz);
+			retval = tsleep_nsec(sc->aifthread, PRIBIO, "aifthd",
+			    SEC_TO_NSEC(AAC_PERIODIC_INTERVAL));
 			AAC_LOCK_ACQUIRE(&sc->aac_io_lock);
 		}
 
@@ -598,9 +594,9 @@ aac_command_thread(void *arg)
 		/* Also check to see if the adapter has a command for us. */
 		while (aac_dequeue_fib(sc, AAC_HOST_NORM_CMD_QUEUE,
 				       &fib_size, &fib) == 0) {
-	
+
 			AAC_PRINT_FIB(sc, fib);
-	
+
 			switch (fib->Header.Command) {
 			case AifRequest:
 				//aac_handle_aif(sc, fib);
@@ -626,7 +622,7 @@ aac_command_thread(void *arg)
 					size = sizeof(struct aac_fib);
 					fib->Header.Size = size;
 				}
-		
+
 				/*
 				 * Since we did not generate this command, it
 				 * cannot go through the normal
@@ -713,14 +709,14 @@ aac_bio_command(struct aac_softc *sc, struct aac_command **cmp)
 	/* build the FIB */
 	fib = cm->cm_fib;
 	fib->Header.Size = sizeof(struct aac_fib_header);
-	fib->Header.XferState =  
-		AAC_FIBSTATE_HOSTOWNED   | 
-		AAC_FIBSTATE_INITIALISED | 
-		AAC_FIBSTATE_EMPTY	 | 
+	fib->Header.XferState =
+		AAC_FIBSTATE_HOSTOWNED   |
+		AAC_FIBSTATE_INITIALISED |
+		AAC_FIBSTATE_EMPTY	 |
 		AAC_FIBSTATE_FROMHOST	 |
 		AAC_FIBSTATE_REXPECTED   |
 		AAC_FIBSTATE_NORM	 |
-		AAC_FIBSTATE_ASYNC	 |
+	 	AAC_FIBSTATE_ASYNC	 |
 		AAC_FIBSTATE_FAST_RESPONSE;
 
 	switch(xs->cmd->opcode) {
@@ -734,7 +730,7 @@ aac_bio_command(struct aac_softc *sc, struct aac_command **cmp)
 		break;
 	default:
 		panic("%s: invalid opcode %#x", sc->aac_dev.dv_xname,
-		      xs->cmd->opcode);
+		    xs->cmd->opcode);
 	}
 
 	/* build the read/write request */
@@ -844,7 +840,7 @@ aac_bio_complete(struct aac_command *cm)
  *     spam the memory of a command that has been recycled.
  */
 int
-aac_wait_command(struct aac_command *cm, int timeout)
+aac_wait_command(struct aac_command *cm, int msecs)
 {
 	struct aac_softc *sc = cm->cm_sc;
 	int error = 0;
@@ -860,7 +856,7 @@ aac_wait_command(struct aac_command *cm, int timeout)
 		AAC_DPRINTF(AAC_D_MISC, ("%s: sleeping until command done\n",
 					 sc->aac_dev.dv_xname));
 		AAC_LOCK_RELEASE(&sc->aac_io_lock);
-		error = tsleep(cm, PRIBIO, "aacwait", timeout);
+		error = tsleep_nsec(cm, PRIBIO, "aacwait", MSEC_TO_NSEC(msecs));
 		AAC_LOCK_ACQUIRE(&sc->aac_io_lock);
 	}
 	return (error);
@@ -972,8 +968,8 @@ aac_alloc_commands(struct aac_softc *sc)
 			(i * sizeof(struct aac_fib));
 		cm->cm_index = sc->total_fibs;
 
-		if (bus_dmamap_create(sc->aac_dmat, MAXBSIZE, AAC_MAXSGENTRIES,
-		    MAXBSIZE, 0, BUS_DMA_NOWAIT, &cm->cm_datamap)) {
+		if (bus_dmamap_create(sc->aac_dmat, MAXPHYS, AAC_MAXSGENTRIES,
+		    MAXPHYS, 0, BUS_DMA_NOWAIT, &cm->cm_datamap)) {
 			break;
 		}
 		aac_release_command(sc, cm);
@@ -1205,7 +1201,7 @@ aac_init(struct aac_softc *sc)
 	/*
 	 * First wait for the adapter to come ready.
 	 */
-	then = time_uptime;
+	then = getuptime();
 	for (i = 0; i < AAC_BOOT_TIMEOUT * 1000; i++) {
 		code = AAC_GET_FWSTATUS(sc);
 		if (code & AAC_SELF_TEST_FAILED) {
@@ -1318,7 +1314,7 @@ aac_init(struct aac_softc *sc)
 		ip->HostPhysMemPages =
 		    (ip->HostPhysMemPages + AAC_PAGE_SIZE) / AAC_PAGE_SIZE;
 	}
-	ip->HostElapsedSeconds = time_uptime; /* reset later if invalid */
+	ip->HostElapsedSeconds = getuptime(); /* reset later if invalid */
 
 	/*
 	 * Initialise FIB queues.  Note that it appears that the layout of the
@@ -1790,7 +1786,7 @@ aac_command_timeout(struct aac_command *cm)
 
 	printf("%s: COMMAND %p (flags=%#x) TIMEOUT AFTER %d SECONDS\n",
 	       sc->aac_dev.dv_xname, cm, cm->cm_flags,
-	       (int)(time_uptime - cm->cm_timestamp));
+	       (int)(getuptime() - cm->cm_timestamp));
 
 	if (cm->cm_flags & AAC_CMD_TIMEDOUT)
 		return;
@@ -1821,7 +1817,7 @@ aac_timeout(struct aac_softc *sc)
 	 * Traverse the busy command list and timeout any commands
 	 * that are past their deadline.
 	 */
-	deadline = time_uptime - AAC_CMD_TIMEOUT;
+	deadline = getuptime() - AAC_CMD_TIMEOUT;
 	TAILQ_FOREACH(cm, &sc->aac_busy, cm_link) {
 		if (cm->cm_timestamp  < deadline)
 			aac_command_timeout(cm);
@@ -2129,7 +2125,7 @@ aac_internal_cache_cmd(struct scsi_xfer *xs)
 	struct scsi_read_cap_data rcd;
 	u_int8_t target = link->target;
 
-	AAC_DPRINTF(AAC_D_CMD, ("aac_internal_cache_cmd: ",
+	AAC_DPRINTF(AAC_D_CMD, ("%s: aac_internal_cache_cmd: ",
 				sc->aac_dev.dv_xname));
 
 	switch (xs->cmd->opcode) {
@@ -2277,7 +2273,7 @@ aac_scsi_cmd(struct scsi_xfer *xs)
 			blockcnt = _2btol(rwb->length);
 		}
 
-		AAC_DPRINTF(AAC_D_CMD, ("blkno=%d bcount=%d ",
+		AAC_DPRINTF(AAC_D_CMD, ("opcode=%d blkno=%d bcount=%d ",
 					xs->cmd->opcode, blockno, blockcnt));
 
 		if (blockno >= sc->aac_hdr[target].hd_size ||
@@ -2304,7 +2300,7 @@ aac_scsi_cmd(struct scsi_xfer *xs)
 		cm->cm_datalen = xs->datalen;
 		cm->cm_complete = aac_bio_complete;
 		cm->cm_private = xs;
-		cm->cm_timestamp = time_uptime;
+		cm->cm_timestamp = getuptime();
 		cm->cm_queue = AAC_ADAP_NORM_CMD_QUEUE;
 		cm->cm_blkno = blockno;
 		cm->cm_bcount = blockcnt;

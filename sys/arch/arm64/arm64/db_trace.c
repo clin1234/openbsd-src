@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_trace.c,v 1.6 2018/05/04 15:43:34 visa Exp $	*/
+/*	$OpenBSD: db_trace.c,v 1.11 2020/04/18 04:45:20 visa Exp $	*/
 /*	$NetBSD: db_trace.c,v 1.8 2003/01/17 22:28:48 thorpej Exp $	*/
 
 /*
@@ -33,6 +33,7 @@
 #include <sys/param.h>
 
 #include <sys/proc.h>
+#include <sys/stacktrace.h>
 #include <sys/user.h>
 #include <arm64/armreg.h>
 #include <machine/db_machdep.h>
@@ -68,15 +69,14 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 	db_expr_t	offset;
 	Elf_Sym *	sym;
 	char		*name;
-	boolean_t	kernel_only = TRUE;
-	boolean_t	trace_thread = FALSE;
-	//db_addr_t	scp = 0;
+	int		kernel_only = 1;
+	int		trace_thread = 0;
 
 	while ((c = *cp++) != 0) {
 		if (c == 'u')
-			kernel_only = FALSE;
+			kernel_only = 0;
 		if (c == 't')
-			trace_thread = TRUE;
+			trace_thread = 1;
 	}
 
 	if (!have_addr) {
@@ -97,9 +97,9 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 			lastlr =  p->p_addr->u_pcb.pcb_tf->tf_elr;
 		} else {
 			sp = addr;
-			db_read_bytes(sp+16, sizeof(db_addr_t),
+			db_read_bytes(sp+16, sizeof(vaddr_t),
 			    (char *)&frame);
-			db_read_bytes(sp + 8, sizeof(db_addr_t),
+			db_read_bytes(sp + 8, sizeof(vaddr_t),
 			    (char *)&lr);
 			lastlr = 0;
 		}
@@ -120,11 +120,11 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 		(*pr)("\n");
 
 		// can we detect traps ?
-		db_read_bytes(frame, sizeof(db_addr_t), (char *)&frame);
+		db_read_bytes(frame, sizeof(vaddr_t), (char *)&frame);
 		if (frame == 0)
 			break;
 		lastlr = lr;
-		db_read_bytes(frame + 8, sizeof(db_addr_t), (char *)&lr);
+		db_read_bytes(frame + 8, sizeof(vaddr_t), (char *)&lr);
 
 		if (name != NULL) {
 			if ((strcmp (name, "handle_el0_irq") == 0) ||
@@ -150,18 +150,34 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 }
 
 void
-db_save_stack_trace(struct db_stack_trace *st)
+stacktrace_save_at(struct stacktrace *st, unsigned int skip)
 {
-	struct callframe *frame;
+	struct callframe *frame, *lastframe, *limit;
+	struct proc *p = curproc;
+
+	st->st_count = 0;
+
+	if (p == NULL)
+		return;
 
 	frame = __builtin_frame_address(0);
-	st->st_count = 0;
-	while (st->st_count < DB_STACK_TRACE_MAX) {
-		st->st_pc[st->st_count++] = frame->f_lr;
+	KASSERT(INKERNEL(frame));
+	limit = (struct callframe *)STACKALIGN(p->p_addr + USPACE -
+	    sizeof(struct trapframe) - 0x10);
 
-		if (!INKERNEL(frame->f_frame) || frame->f_frame <= frame)
-			break;
+	while (st->st_count < STACKTRACE_MAX) {
+		if (skip == 0)
+			st->st_pc[st->st_count++] = frame->f_lr;
+		else
+			skip--;
+
+		lastframe = frame;
 		frame = frame->f_frame;
+
+		if (frame <= lastframe)
+			break;
+		if (frame >= limit)
+			break;
 		if (!INKERNEL(frame->f_lr))
 			break;
 	}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_kthread.c,v 1.42 2018/07/05 14:42:30 visa Exp $	*/
+/*	$OpenBSD: kern_kthread.c,v 1.44 2020/02/21 11:10:23 claudio Exp $	*/
 /*	$NetBSD: kern_kthread.c,v 1.3 1998/12/22 21:21:36 kleink Exp $	*/
 
 /*-
@@ -35,7 +35,6 @@
 #include <sys/systm.h>
 #include <sys/kthread.h>
 #include <sys/proc.h>
-#include <sys/wait.h>
 #include <sys/malloc.h>
 #include <sys/queue.h>
 
@@ -68,7 +67,7 @@ kthread_create(void (*func)(void *), void *arg,
 	 * parent to wait for.
 	 */
 	error = fork1(&proc0, FORK_SHAREVM|FORK_SHAREFILES|FORK_NOZOMBIE|
-	    FORK_SYSTEM|FORK_SIGHAND, func, arg, NULL, &p);
+	    FORK_SYSTEM, func, arg, NULL, &p);
 	if (error) {
 		KERNEL_UNLOCK();
 		return (error);
@@ -102,7 +101,7 @@ kthread_exit(int ecode)
 		printf("WARNING: thread `%s' (%d) exits with status %d\n",
 		    curproc->p_p->ps_comm, curproc->p_tid, ecode);
 
-	exit1(curproc, W_EXITCODE(ecode, 0), EXIT_NORMAL);
+	exit1(curproc, ecode, 0, EXIT_NORMAL);
 
 	/*
 	 * XXX Fool the compiler.  Making exit1() __dead is a can

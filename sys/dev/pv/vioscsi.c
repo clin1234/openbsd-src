@@ -1,4 +1,4 @@
-/*	$OpenBSD: vioscsi.c,v 1.12 2017/09/08 05:36:52 deraadt Exp $	*/
+/*	$OpenBSD: vioscsi.c,v 1.19 2020/06/27 17:28:58 krw Exp $	*/
 /*
  * Copyright (c) 2013 Google Inc.
  *
@@ -32,9 +32,8 @@
 enum { vioscsi_debug = 0 };
 #define DPRINTF(f...) do { if (vioscsi_debug) printf(f); } while (0)
 
-#define MAX_XFER	MAX(MAXPHYS,MAXBSIZE)
 /* Number of DMA segments for buffers that the device must support */
-#define SEG_MAX		(MAX_XFER/PAGE_SIZE + 1)
+#define SEG_MAX		(MAXPHYS/PAGE_SIZE + 1)
 /* In the virtqueue, we need space for header and footer, too */
 #define ALLOC_SEGS	(SEG_MAX + 2)
 
@@ -86,8 +85,7 @@ struct cfdriver vioscsi_cd = {
 };
 
 struct scsi_adapter vioscsi_switch = {
-	vioscsi_scsi_cmd,
-	scsi_minphys,
+	vioscsi_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 const char *const vioscsi_vq_names[] = {
@@ -126,7 +124,7 @@ vioscsi_attach(struct device *parent, struct device *self, void *aux)
 	vsc->sc_vqs = sc->sc_vqs;
 	vsc->sc_nvqs = nitems(sc->sc_vqs);
 
-	virtio_negotiate_features(vsc, 0, NULL);
+	virtio_negotiate_features(vsc, NULL);
 	uint32_t cmd_per_lun = virtio_read_device_config_4(vsc,
 	    VIRTIO_SCSI_CONFIG_CMD_PER_LUN);
 	uint32_t seg_max = virtio_read_device_config_4(vsc,
@@ -140,7 +138,7 @@ vioscsi_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	for (i = 0; i < nitems(sc->sc_vqs); i++) {
-		rv = virtio_alloc_vq(vsc, &sc->sc_vqs[i], i, MAX_XFER,
+		rv = virtio_alloc_vq(vsc, &sc->sc_vqs[i], i, MAXPHYS,
 		    ALLOC_SEGS, vioscsi_vq_names[i]);
 		if (rv) {
 			printf(": failed to allocate virtqueue %d\n", i);
@@ -165,11 +163,10 @@ vioscsi_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_link.adapter = &vioscsi_switch;
 	sc->sc_link.adapter_softc = sc;
-	sc->sc_link.adapter_target = max_target;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.adapter_buswidth = max_target;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	sc->sc_scsibus = (struct scsibus *)config_found(self, &saa, scsiprint);
@@ -331,7 +328,7 @@ vioscsi_req_done(struct vioscsi_softc *sc, struct virtio_softc *vsc,
 	xs->status = vr->vr_res.status;
 	xs->resid = vr->vr_res.residual;
 
-	DPRINTF("vioscsi_req_done: done %d, %d, %zd\n", 
+	DPRINTF("vioscsi_req_done: done %d, %d, %zd\n",
 	    xs->error, xs->status, xs->resid);
 
 done:
@@ -493,8 +490,8 @@ vioscsi_alloc_reqs(struct vioscsi_softc *sc, struct virtio_softc *vsc,
 			printf("bus_dmamap_create vr_control failed, error  %d\n", r);
 			return i;
 		}
-		r = bus_dmamap_create(vsc->sc_dmat, MAX_XFER, SEG_MAX,
-		    MAX_XFER, 0, BUS_DMA_NOWAIT|BUS_DMA_ALLOCNOW, &vr->vr_data);
+		r = bus_dmamap_create(vsc->sc_dmat, MAXPHYS, SEG_MAX,
+		    MAXPHYS, 0, BUS_DMA_NOWAIT|BUS_DMA_ALLOCNOW, &vr->vr_data);
 		if (r != 0) {
 			printf("bus_dmamap_create vr_data failed, error %d\n", r );
 			return i;

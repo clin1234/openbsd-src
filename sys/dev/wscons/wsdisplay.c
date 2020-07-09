@@ -1,4 +1,4 @@
-/* $OpenBSD: wsdisplay.c,v 1.132 2019/05/04 11:34:48 kettenis Exp $ */
+/* $OpenBSD: wsdisplay.c,v 1.141 2020/05/25 09:55:49 jsg Exp $ */
 /* $NetBSD: wsdisplay.c,v 1.82 2005/02/27 00:27:52 perry Exp $ */
 
 /*
@@ -133,7 +133,7 @@ struct wsscreen {
 };
 
 struct wsscreen *wsscreen_attach(struct wsdisplay_softc *, int, const char *,
-	    const struct wsscreen_descr *, void *, int, int, long);
+	    const struct wsscreen_descr *, void *, int, int, uint32_t);
 void	wsscreen_detach(struct wsscreen *);
 int	wsdisplay_addscreen(struct wsdisplay_softc *, int, const char *,
 	    const char *);
@@ -162,9 +162,9 @@ struct wsdisplay_softc {
 
 #ifdef HAVE_BURNER_SUPPORT
 	struct timeout sc_burner;
-	int	sc_burnoutintvl;	/* delay before blanking */
-	int	sc_burninintvl;		/* delay before unblanking */
-	int	sc_burnout;		/* current sc_burner delay */
+	int	sc_burnoutintvl;	/* delay before blanking (ms) */
+	int	sc_burninintvl;		/* delay before unblanking (ms) */
+	int	sc_burnout;		/* current sc_burner delay (ms) */
 	int	sc_burnman;		/* nonzero if screen blanked */
 	int	sc_burnflags;
 #endif
@@ -245,6 +245,14 @@ struct consdev wsdisplay_cons = {
 	    wsdisplay_pollc, NULL, NODEV, CN_LOWPRI
 };
 
+/*
+ * Function pointers for wsconsctl parameter handling.
+ * These are used for firmware-provided display brightness control.
+ */
+int	(*ws_get_param)(struct wsdisplay_param *);
+int	(*ws_set_param)(struct wsdisplay_param *);
+
+
 #ifndef WSDISPLAY_DEFAULTSCREENS
 #define WSDISPLAY_DEFAULTSCREENS	1
 #endif
@@ -259,7 +267,7 @@ int	wsdisplay_clearonclose;
 struct wsscreen *
 wsscreen_attach(struct wsdisplay_softc *sc, int console, const char *emul,
     const struct wsscreen_descr *type, void *cookie, int ccol, int crow,
-    long defattr)
+    uint32_t defattr)
 {
 	struct wsscreen_internal *dconf;
 	struct wsscreen *scr;
@@ -360,7 +368,7 @@ wsdisplay_addscreen(struct wsdisplay_softc *sc, int idx,
 	int error;
 	void *cookie;
 	int ccol, crow;
-	long defattr;
+	uint32_t defattr;
 	struct wsscreen *scr;
 	int s;
 
@@ -418,9 +426,9 @@ wsdisplay_getscreen(struct wsdisplay_softc *sc,
 	if (scr == NULL)
 		return (ENXIO);
 
-	strncpy(sd->screentype, scr->scr_dconf->scrdata->name,
+	strlcpy(sd->screentype, scr->scr_dconf->scrdata->name,
 	    WSSCREEN_NAME_SIZE);
-	strncpy(sd->emul, scr->scr_dconf->wsemul->name, WSEMUL_NAME_SIZE);
+	strlcpy(sd->emul, scr->scr_dconf->wsemul->name, WSEMUL_NAME_SIZE);
 
 	return (0);
 }
@@ -766,8 +774,8 @@ wsdisplay_common_attach(struct wsdisplay_softc *sc, int console, int kbdmux,
 		wsdisplay_addscreen_print(sc, start, i-start);
 
 #ifdef HAVE_BURNER_SUPPORT
-	sc->sc_burnoutintvl = (hz * WSDISPLAY_DEFBURNOUT) / 1000;
-	sc->sc_burninintvl = (hz * WSDISPLAY_DEFBURNIN) / 1000;
+	sc->sc_burnoutintvl = WSDISPLAY_DEFBURNOUT_MSEC;
+	sc->sc_burninintvl = WSDISPLAY_DEFBURNIN_MSEC;
 	sc->sc_burnflags = WSDISPLAY_BURN_OUTPUT | WSDISPLAY_BURN_KBD |
 	    WSDISPLAY_BURN_MOUSE;
 	timeout_set(&sc->sc_burner, wsdisplay_burner, sc);
@@ -795,7 +803,7 @@ wsdisplay_common_attach(struct wsdisplay_softc *sc, int console, int kbdmux,
 
 void
 wsdisplay_cnattach(const struct wsscreen_descr *type, void *cookie, int ccol,
-    int crow, long defattr)
+    int crow, uint32_t defattr)
 {
 	const struct wsemul_ops *wsemul;
 	const struct wsdisplay_emulops *emulops;
@@ -1196,8 +1204,8 @@ wsdisplay_internal_ioctl(struct wsdisplay_softc *sc, struct wsscreen *scr,
 
 	case WSDISPLAYIO_GBURNER:
 #define d ((struct wsdisplay_burner *)data)
-		d->on  = sc->sc_burninintvl  * 1000 / hz;
-		d->off = sc->sc_burnoutintvl * 1000 / hz;
+		d->on  = sc->sc_burninintvl;
+		d->off = sc->sc_burnoutintvl;
 		d->flags = sc->sc_burnflags;
 		return (0);
 
@@ -1223,7 +1231,7 @@ wsdisplay_internal_ioctl(struct wsdisplay_softc *sc, struct wsscreen *scr,
 			active = scr;
 
 		if (d->on) {
-			sc->sc_burninintvl = hz * d->on / 1000;
+			sc->sc_burninintvl = d->on;
 			if (sc->sc_burnman) {
 				sc->sc_burnout = sc->sc_burninintvl;
 				/* reinit timeout if changed */
@@ -1232,7 +1240,7 @@ wsdisplay_internal_ioctl(struct wsdisplay_softc *sc, struct wsscreen *scr,
 			}
 		}
 		if (d->off) {
-			sc->sc_burnoutintvl = hz * d->off / 1000;
+			sc->sc_burnoutintvl = d->off;
 			if (!sc->sc_burnman) {
 				sc->sc_burnout = sc->sc_burnoutintvl;
 				/* reinit timeout if changed */
@@ -1253,11 +1261,11 @@ wsdisplay_internal_ioctl(struct wsdisplay_softc *sc, struct wsscreen *scr,
 
 	case WSDISPLAYIO_GETSCREENTYPE:
 #define d ((struct wsdisplay_screentype *)data)
-		if (d->idx >= sc->sc_scrdata->nscreens)
+		if (d->idx < 0 || d->idx >= sc->sc_scrdata->nscreens)
 			return(EINVAL);
 
 		d->nidx = sc->sc_scrdata->nscreens;
-		strncpy(d->name, sc->sc_scrdata->screens[d->idx]->name,
+		strlcpy(d->name, sc->sc_scrdata->screens[d->idx]->name,
 			WSSCREEN_NAME_SIZE);
 		d->ncols = sc->sc_scrdata->screens[d->idx]->ncols;
 		d->nrows = sc->sc_scrdata->screens[d->idx]->nrows;
@@ -1269,7 +1277,7 @@ wsdisplay_internal_ioctl(struct wsdisplay_softc *sc, struct wsscreen *scr,
 #define d ((struct wsdisplay_emultype *)data)
 		if (wsemul_getname(d->idx) == NULL)
 			return(EINVAL);
-		strncpy(d->name, wsemul_getname(d->idx), WSEMUL_NAME_SIZE);
+		strlcpy(d->name, wsemul_getname(d->idx), WSEMUL_NAME_SIZE);
 		return (0);
 #undef d
         }
@@ -1830,7 +1838,8 @@ wsdisplay_switch(struct device *dev, int no, int waitok)
 	s = spltty();
 
 	while (sc->sc_resumescreen != WSDISPLAY_NULLSCREEN && res == 0)
-		res = tsleep(&sc->sc_resumescreen, PCATCH, "wsrestore", 0);
+		res = tsleep_nsec(&sc->sc_resumescreen, PCATCH, "wsrestore",
+		    INFSLP);
 	if (res) {
 		splx(s);
 		return (res);
@@ -1980,7 +1989,7 @@ wsscreen_switchwait(struct wsdisplay_softc *sc, int no)
 	if (no == WSDISPLAY_NULLSCREEN) {
 		s = spltty();
 		while (sc->sc_focus && res == 0) {
-			res = tsleep(sc, PCATCH, "wswait", 0);
+			res = tsleep_nsec(sc, PCATCH, "wswait", INFSLP);
 		}
 		splx(s);
 		return (res);
@@ -1995,7 +2004,7 @@ wsscreen_switchwait(struct wsdisplay_softc *sc, int no)
 	s = spltty();
 	if (scr != sc->sc_focus) {
 		scr->scr_flags |= SCR_WAITACTIVE;
-		res = tsleep(scr, PCATCH, "wswait2", 0);
+		res = tsleep_nsec(scr, PCATCH, "wswait2", INFSLP);
 		if (scr != sc->sc_scr[no])
 			res = ENXIO; /* disappeared in the meantime */
 		else
@@ -2195,7 +2204,7 @@ wsdisplay_suspend_device(struct device *dev)
 	struct wsdisplay_softc	*sc = (struct wsdisplay_softc *)dev;
 	struct wsscreen		*scr;
 	int			 active, idx, ret = 0, s;
-	
+
 	if ((active = wsdisplay_getactivescreen(sc)) == WSDISPLAY_NULLSCREEN)
 		return;
 
@@ -2332,7 +2341,7 @@ wsdisplay_burn(void *v, u_int flags)
 	    WSDISPLAY_BURN_KBD | WSDISPLAY_BURN_MOUSE)) &&
 	    sc->sc_accessops->burn_screen) {
 		if (sc->sc_burnout)
-			timeout_add(&sc->sc_burner, sc->sc_burnout);
+			timeout_add_msec(&sc->sc_burner, sc->sc_burnout);
 		if (sc->sc_burnman)
 			sc->sc_burnout = 0;
 	}
@@ -2350,7 +2359,7 @@ wsdisplay_burner(void *v)
 		s = spltty();
 		if (sc->sc_burnman) {
 			sc->sc_burnout = sc->sc_burnoutintvl;
-			timeout_add(&sc->sc_burner, sc->sc_burnout);
+			timeout_add_msec(&sc->sc_burner, sc->sc_burnout);
 		} else
 			sc->sc_burnout = sc->sc_burninintvl;
 		sc->sc_burnman = !sc->sc_burnman;
@@ -2358,6 +2367,118 @@ wsdisplay_burner(void *v)
 	}
 }
 #endif
+
+int
+wsdisplay_get_param(struct wsdisplay_softc *sc, struct wsdisplay_param *dp)
+{
+	int error = ENXIO;
+	int i;
+
+	if (sc != NULL)
+		return wsdisplay_param(&sc->sc_dv, WSDISPLAYIO_GETPARAM, dp);
+
+	for (i = 0; i < wsdisplay_cd.cd_ndevs; i++) {
+		sc = wsdisplay_cd.cd_devs[i];
+		if (sc == NULL)
+			continue;
+		error = wsdisplay_param(&sc->sc_dv, WSDISPLAYIO_GETPARAM, dp);
+		if (error == 0)
+			break;
+	}
+
+	if (error && ws_get_param)
+		error = ws_get_param(dp);
+
+	return error;
+}
+
+int
+wsdisplay_set_param(struct wsdisplay_softc *sc, struct wsdisplay_param *dp)
+{
+	int error = ENXIO;
+	int i;
+
+	if (sc != NULL)
+		return wsdisplay_param(&sc->sc_dv, WSDISPLAYIO_SETPARAM, dp);
+
+	for (i = 0; i < wsdisplay_cd.cd_ndevs; i++) {
+		sc = wsdisplay_cd.cd_devs[i];
+		if (sc == NULL)
+			continue;
+		error = wsdisplay_param(&sc->sc_dv, WSDISPLAYIO_SETPARAM, dp);
+		if (error == 0)
+			break;
+	}
+
+	if (error && ws_set_param)
+		error = ws_set_param(dp);
+
+	return error;
+}
+
+void
+wsdisplay_brightness_step(struct device *dev, int dir)
+{
+	struct wsdisplay_softc *sc = (struct wsdisplay_softc *)dev;
+	struct wsdisplay_param dp;
+	int delta, new;
+
+	dp.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
+	if (wsdisplay_get_param(sc, &dp))
+		return;
+
+	/* Use a step size of approximately 5%. */
+	delta = max(1, ((dp.max - dp.min) * 5) / 100);
+	new = dp.curval;
+
+	if (dir > 0) {
+		if (delta > dp.max - dp.curval)
+			new = dp.max;
+		else
+			new += delta;
+	} else if (dir < 0) {
+		if (delta > dp.curval - dp.min)
+			new = dp.min;
+		else
+			new -= delta;
+	}
+
+	if (dp.curval == new)
+		return;
+
+	dp.curval = new;
+	wsdisplay_set_param(sc, &dp);
+}
+
+void
+wsdisplay_brightness_zero(struct device *dev)
+{
+	struct wsdisplay_softc *sc = (struct wsdisplay_softc *)dev;
+	struct wsdisplay_param dp;
+
+	dp.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
+	if (wsdisplay_get_param(sc, &dp))
+		return;
+
+	dp.curval = dp.min;
+	wsdisplay_set_param(sc, &dp);
+}
+
+void
+wsdisplay_brightness_cycle(struct device *dev)
+{
+	struct wsdisplay_softc *sc = (struct wsdisplay_softc *)dev;
+	struct wsdisplay_param dp;
+
+	dp.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
+	if (wsdisplay_get_param(sc, &dp))
+		return;
+
+	if (dp.curval == dp.max)
+		wsdisplay_brightness_zero(dev);
+	else
+		wsdisplay_brightness_step(dev, 1);
+}
 
 #ifdef HAVE_WSMOUSED_SUPPORT
 /*
@@ -2550,7 +2671,7 @@ inverse_char(struct wsscreen *scr, u_int pos)
 	int fg, bg, ul;
 	int flags;
 	int tmp;
-	long attr;
+	uint32_t attr;
 
 	GETCHAR(scr, pos, &cell);
 
@@ -2571,7 +2692,7 @@ inverse_char(struct wsscreen *scr, u_int pos)
 	} else if (dconf->scrdata->capabilities & WSSCREEN_REVERSE) {
 		flags |= WSATTR_REVERSE;
 	}
-	if ((*dconf->emulops->alloc_attr)(dconf->emulcookie, fg, bg, flags |
+	if ((*dconf->emulops->pack_attr)(dconf->emulcookie, fg, bg, flags |
 	    (ul ? WSATTR_UNDERLINE : 0), &attr) == 0) {
 		cell.attr = attr;
 		PUTCHAR(dconf, pos, cell.uc, cell.attr);

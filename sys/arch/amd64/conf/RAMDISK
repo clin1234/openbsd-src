@@ -1,10 +1,8 @@
-#	$OpenBSD: RAMDISK,v 1.71 2018/03/27 21:11:16 kettenis Exp $
+#	$OpenBSD: RAMDISK,v 1.79 2020/05/15 12:13:35 deraadt Exp $
 
 machine		amd64
 maxusers	4
 
-option		TIMEZONE=0
-option		DST=0
 option		SMALL_KERNEL
 option		NO_PROPOLICE
 option		BOOT_CONFIG
@@ -16,6 +14,7 @@ option		PCIVERBOSE
 option		SCSITERSE
 
 option		FFS
+option		FFS2
 
 config		bsd root on rd0a swap on rd0b and wd0b and sd0b
 
@@ -31,6 +30,7 @@ acpi0		at bios?
 #acpicpu*	at acpi?
 acpicmos*	at acpi?
 acpiec*		at acpi?
+acpipci*	at acpi?
 acpiprt*	at acpi?
 acpimadt0	at acpi?
 #acpitz*	at acpi?
@@ -53,11 +53,11 @@ pci*		at pchb?
 xhci*		at pci?
 ehci*		at pci?
 uhci*		at pci?
-ohci*		at pci?
+#ohci*		at pci?
 usb*		at xhci?
 usb*		at ehci?
 usb*		at uhci?
-usb*		at ohci?
+#usb*		at ohci?
 
 uhub*		at usb?
 uhub*		at uhub?
@@ -81,13 +81,13 @@ mfi*		at pci?			# LSI MegaRAID SAS controllers
 
 scsibus*	at scsi?
 sd*		at scsibus?		# SCSI disk drives
-cd*		at scsibus?		# SCSI CD-ROM drives
+#cd*		at scsibus?		# SCSI CD-ROM drives
 
 pciide*		at pci? flags 0x0000
 wd*		at pciide? flags 0x0000
 atapiscsi*	at pciide?
 
-fxp*		at pci?			# EtherExpress 10/100B ethernet
+#fxp*		at pci?			# EtherExpress 10/100B ethernet
 rl*		at pci?			# Realtek 81[23]9 ethernet
 re*		at pci?			# Realtek 8169/8169S/8110S
 em*		at pci?			# Intel Pro/1000 ethernet

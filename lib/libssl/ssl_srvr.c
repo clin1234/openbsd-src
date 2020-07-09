@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_srvr.c,v 1.68 2019/04/22 15:12:20 jsing Exp $ */
+/* $OpenBSD: ssl_srvr.c,v 1.80 2020/07/03 04:12:50 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -801,7 +801,7 @@ ssl3_get_client_hello(SSL *s)
 	STACK_OF(SSL_CIPHER) *ciphers = NULL;
 	unsigned long alg_k;
 	const SSL_METHOD *method;
-	uint16_t shared_version;
+	uint16_t max_version, shared_version;
 
 	/*
 	 * We do this so that we will respond with our native type.
@@ -815,7 +815,7 @@ ssl3_get_client_hello(SSL *s)
 	}
 
 	s->internal->first_packet = 1;
-	n = s->method->internal->ssl_get_message(s, SSL3_ST_SR_CLNT_HELLO_B,
+	n = ssl3_get_message(s, SSL3_ST_SR_CLNT_HELLO_B,
 	    SSL3_ST_SR_CLNT_HELLO_C, SSL3_MT_CLIENT_HELLO,
 	    SSL3_RT_MAX_PLAIN_LENGTH, &ok);
 	if (!ok)
@@ -834,6 +834,11 @@ ssl3_get_client_hello(SSL *s)
 		goto truncated;
 	if (!CBS_get_u8_length_prefixed(&cbs, &session_id))
 		goto truncated;
+	if (CBS_len(&session_id) > SSL3_SESSION_ID_SIZE) {
+		al = SSL_AD_ILLEGAL_PARAMETER;
+		SSLerror(s, SSL_R_SSL3_SESSION_ID_TOO_LONG);
+		goto f_err;
+	}
 	if (SSL_IS_DTLS(s)) {
 		if (!CBS_get_u8_length_prefixed(&cbs, &cookie))
 			goto truncated;
@@ -847,6 +852,8 @@ ssl3_get_client_hello(SSL *s)
 	 * Use version from inside client hello, not from record header.
 	 * (may differ: see RFC 2246, Appendix E, second paragraph)
 	 */
+	if (!ssl_downgrade_max_version(s, &max_version))
+		goto err;
 	if (ssl_max_shared_version(s, client_version, &shared_version) != 1) {
 		SSLerror(s, SSL_R_WRONG_VERSION_NUMBER);
 		if ((s->client_version >> 8) == SSL3_VERSION_MAJOR &&
@@ -1018,7 +1025,7 @@ ssl3_get_client_hello(SSL *s)
 		goto f_err;
 	}
 
-	if (!tlsext_server_parse(s, &cbs, &al, SSL_TLSEXT_MSG_CH)) {
+	if (!tlsext_server_parse(s, SSL_TLSEXT_MSG_CH, &cbs, &al)) {
 		SSLerror(s, SSL_R_PARSE_TLSEXT);
 		goto f_err;
 	}
@@ -1041,6 +1048,27 @@ ssl3_get_client_hello(SSL *s)
 	 * SessionTicket processing to use it in key derivation.
 	 */
 	arc4random_buf(s->s3->server_random, SSL3_RANDOM_SIZE);
+
+	if (!SSL_IS_DTLS(s) && max_version >= TLS1_2_VERSION &&
+	    s->version < max_version) {
+		/*
+		 * RFC 8446 section 4.1.3. If we are downgrading from TLS 1.3
+		 * we must set the last 8 bytes of the server random to magical
+		 * values to indicate we meant to downgrade.  For TLS 1.2 it is
+		 * recommended that we do the same.
+		 */
+		size_t index = SSL3_RANDOM_SIZE - sizeof(tls13_downgrade_12);
+		uint8_t *magic = &s->s3->server_random[index];
+		if (s->version == TLS1_2_VERSION) {
+			/* Indicate we chose to downgrade to 1.2. */
+			memcpy(magic, tls13_downgrade_12,
+			    sizeof(tls13_downgrade_12));
+		} else {
+			/* Indicate we chose to downgrade to 1.1 or lower */
+			memcpy(magic, tls13_downgrade_11,
+			    sizeof(tls13_downgrade_11));
+		}
+	}
 
 	if (!s->internal->hit && s->internal->tls_session_secret_cb) {
 		SSL_CIPHER *pref_cipher = NULL;
@@ -1205,7 +1233,7 @@ ssl3_send_server_hello(SSL *s)
 			goto err;
 
 		/* TLS extensions */
-		if (!tlsext_server_build(s, &server_hello, SSL_TLSEXT_MSG_SH)) {
+		if (!tlsext_server_build(s, SSL_TLSEXT_MSG_SH, &server_hello)) {
 			SSLerror(s, ERR_R_INTERNAL_ERROR);
 			goto err;
 		}
@@ -1328,12 +1356,7 @@ ssl3_send_server_kex_dhe(SSL *s, CBB *cbb)
 static int
 ssl3_send_server_kex_ecdhe_ecp(SSL *s, int nid, CBB *cbb)
 {
-	const EC_GROUP *group;
-	const EC_POINT *pubkey;
-	unsigned char *data;
-	int encoded_len = 0;
 	int curve_id = 0;
-	BN_CTX *bn_ctx = NULL;
 	EC_KEY *ecdh;
 	CBB ecpoint;
 	int al;
@@ -1352,39 +1375,20 @@ ssl3_send_server_kex_ecdhe_ecp(SSL *s, int nid, CBB *cbb)
 		goto err;
 	}
 
-	if ((S3I(s)->tmp.ecdh = EC_KEY_new_by_curve_name(nid)) == NULL) {
+	if ((S3I(s)->tmp.ecdh = EC_KEY_new()) == NULL) {
 		al = SSL_AD_HANDSHAKE_FAILURE;
 		SSLerror(s, SSL_R_MISSING_TMP_ECDH_KEY);
 		goto f_err;
 	}
+	S3I(s)->tmp.ecdh_nid = nid;
 	ecdh = S3I(s)->tmp.ecdh;
 
-	if (!EC_KEY_generate_key(ecdh)) {
-		SSLerror(s, ERR_R_ECDH_LIB);
+	if (!ssl_kex_generate_ecdhe_ecp(ecdh, nid))
 		goto err;
-	}
-	if ((group = EC_KEY_get0_group(ecdh)) == NULL ||
-	    (pubkey = EC_KEY_get0_public_key(ecdh)) == NULL ||
-	    EC_KEY_get0_private_key(ecdh) == NULL) {
-		SSLerror(s, ERR_R_ECDH_LIB);
-		goto err;
-	}
 
 	/*
 	 * Encode the public key.
-	 */
-	encoded_len = EC_POINT_point2oct(group, pubkey,
-	    POINT_CONVERSION_UNCOMPRESSED, NULL, 0, NULL);
-	if (encoded_len == 0) {
-		SSLerror(s, ERR_R_ECDH_LIB);
-		goto err;
-	}
-	if ((bn_ctx = BN_CTX_new()) == NULL) {
-		SSLerror(s, ERR_R_MALLOC_FAILURE);
-		goto err;
-	}
-
-	/*
+	 *
 	 * Only named curves are supported in ECDH ephemeral key exchanges.
 	 * In this case the ServerKeyExchange message has:
 	 * [1 byte CurveType], [2 byte CurveName]
@@ -1397,32 +1401,23 @@ ssl3_send_server_kex_ecdhe_ecp(SSL *s, int nid, CBB *cbb)
 		goto err;
 	if (!CBB_add_u8_length_prefixed(cbb, &ecpoint))
 		goto err;
-	if (!CBB_add_space(&ecpoint, &data, encoded_len))
+	if (!ssl_kex_public_ecdhe_ecp(ecdh, &ecpoint))
 		goto err;
-	if (EC_POINT_point2oct(group, pubkey, POINT_CONVERSION_UNCOMPRESSED,
-	    data, encoded_len, bn_ctx) == 0) {
-		SSLerror(s, ERR_R_ECDH_LIB);
-		goto err;
-	}
 	if (!CBB_flush(cbb))
 		goto err;
-
-	BN_CTX_free(bn_ctx);
 
 	return (1);
 
  f_err:
 	ssl3_send_alert(s, SSL3_AL_FATAL, al);
  err:
-	BN_CTX_free(bn_ctx);
-
 	return (-1);
 }
 
 static int
 ssl3_send_server_kex_ecdhe_ecx(SSL *s, int nid, CBB *cbb)
 {
-	uint8_t *public_key = NULL;
+	uint8_t *public_key = NULL, *private_key = NULL;
 	int curve_id;
 	CBB ecpoint;
 	int ret = -1;
@@ -1432,11 +1427,11 @@ ssl3_send_server_kex_ecdhe_ecx(SSL *s, int nid, CBB *cbb)
 		SSLerror(s, ERR_R_INTERNAL_ERROR);
 		goto err;
 	}
-	if ((S3I(s)->tmp.x25519 = malloc(X25519_KEY_LENGTH)) == NULL)
+	if ((private_key = malloc(X25519_KEY_LENGTH)) == NULL)
 		goto err;
 	if ((public_key = malloc(X25519_KEY_LENGTH)) == NULL)
 		goto err;
-	X25519_keypair(public_key, S3I(s)->tmp.x25519);
+	X25519_keypair(public_key, private_key);
 
 	/* Serialize public key. */
 	if ((curve_id = tls1_ec_nid2curve_id(nid)) == 0) {
@@ -1455,10 +1450,13 @@ ssl3_send_server_kex_ecdhe_ecx(SSL *s, int nid, CBB *cbb)
 	if (!CBB_flush(cbb))
 		goto err;
 
+	S3I(s)->tmp.x25519 = private_key;
+	private_key = NULL;
 	ret = 1;
 
  err:
 	free(public_key);
+	freezero(private_key, X25519_KEY_LENGTH);
 
 	return (ret);
 }
@@ -1695,7 +1693,7 @@ ssl3_get_client_kex_rsa(SSL *s, CBS *cbs)
 	fakekey[0] = s->client_version >> 8;
 	fakekey[1] = s->client_version & 0xff;
 
-	pkey = s->cert->pkeys[SSL_PKEY_RSA_ENC].privatekey;
+	pkey = s->cert->pkeys[SSL_PKEY_RSA].privatekey;
 	if ((pkey == NULL) || (pkey->type != EVP_PKEY_RSA) ||
 	    (pkey->pkey.rsa == NULL)) {
 		al = SSL_AD_HANDSHAKE_FAILURE;
@@ -1780,7 +1778,8 @@ ssl3_get_client_kex_rsa(SSL *s, CBS *cbs)
 static int
 ssl3_get_client_kex_dhe(SSL *s, CBS *cbs)
 {
-	int key_size = 0, key_len, al;
+	int key_size = 0;
+	int key_is_invalid, key_len, al;
 	unsigned char *key = NULL;
 	BIGNUM *bn = NULL;
 	CBS dh_Yc;
@@ -1811,9 +1810,20 @@ ssl3_get_client_kex_dhe(SSL *s, CBS *cbs)
 		SSLerror(s, ERR_R_MALLOC_FAILURE);
 		goto err;
 	}
-	if ((key_len = DH_compute_key(key, bn, dh)) <= 0) {
+	if (!DH_check_pub_key(dh, bn, &key_is_invalid)) {
+		al = SSL_AD_INTERNAL_ERROR;
 		SSLerror(s, ERR_R_DH_LIB);
-		goto err;
+		goto f_err;
+	}
+	if (key_is_invalid) {
+		al = SSL_AD_ILLEGAL_PARAMETER;
+		SSLerror(s, ERR_R_DH_LIB);
+		goto f_err;
+	}
+	if ((key_len = DH_compute_key(key, bn, dh)) <= 0) {
+		al = SSL_AD_INTERNAL_ERROR;
+		SSLerror(s, ERR_R_DH_LIB);
+		goto f_err;
 	}
 
 	s->session->master_key_length = tls1_generate_master_secret(s,
@@ -1842,19 +1852,12 @@ ssl3_get_client_kex_dhe(SSL *s, CBS *cbs)
 static int
 ssl3_get_client_kex_ecdhe_ecp(SSL *s, CBS *cbs)
 {
-	unsigned char *key = NULL;
-	int key_size = 0, key_len;
-	EC_POINT *point = NULL;
-	BN_CTX *bn_ctx = NULL;
-	const EC_GROUP *group;
+	uint8_t *key = NULL;
+	size_t key_len = 0;
+	EC_KEY *ecdh_peer = NULL;
 	EC_KEY *ecdh;
 	CBS public;
 	int ret = -1;
-
-	if (!CBS_get_u8_length_prefixed(cbs, &public))
-		goto err;
-	if (CBS_len(cbs) != 0)
-		goto err;
 
 	/*
 	 * Use the ephemeral values we saved when generating the
@@ -1864,54 +1867,38 @@ ssl3_get_client_kex_ecdhe_ecp(SSL *s, CBS *cbs)
 		SSLerror(s, ERR_R_INTERNAL_ERROR);
 		goto err;
 	}
-	group = EC_KEY_get0_group(ecdh);
 
 	/*
 	 * Get client's public key from encoded point in the ClientKeyExchange
 	 * message.
 	 */
-	if ((bn_ctx = BN_CTX_new()) == NULL) {
-		SSLerror(s, ERR_R_MALLOC_FAILURE);
+	if (!CBS_get_u8_length_prefixed(cbs, &public))
 		goto err;
-	}
-	if ((point = EC_POINT_new(group)) == NULL) {
-		SSLerror(s, ERR_R_MALLOC_FAILURE);
+	if (CBS_len(cbs) != 0)
 		goto err;
-	}
-	if (EC_POINT_oct2point(group, point, CBS_data(&public),
-	    CBS_len(&public), bn_ctx) == 0) {
-		SSLerror(s, ERR_R_EC_LIB);
-		goto err;
-	}
 
-	/* Compute the shared pre-master secret */
-	if ((key_size = ECDH_size(ecdh)) <= 0) {
-		SSLerror(s, ERR_R_ECDH_LIB);
+	if ((ecdh_peer = EC_KEY_new()) == NULL)
 		goto err;
-	}
-	if ((key = malloc(key_size)) == NULL) {
-		SSLerror(s, ERR_R_MALLOC_FAILURE);
-		goto err;
-	}
-	if ((key_len = ECDH_compute_key(key, key_size, point, ecdh,
-	    NULL)) <= 0) {
-		SSLerror(s, ERR_R_ECDH_LIB);
-		goto err;
-	}
 
-	/* Compute the master secret */
+	if (!ssl_kex_peer_public_ecdhe_ecp(ecdh_peer, S3I(s)->tmp.ecdh_nid,
+	    &public))
+		goto err;
+
+	/* Derive the shared secret and compute master secret. */
+	if (!ssl_kex_derive_ecdhe_ecp(ecdh, ecdh_peer, &key, &key_len))
+		goto err;
 	s->session->master_key_length = tls1_generate_master_secret(s,
 	    s->session->master_key, key, key_len);
 
 	EC_KEY_free(S3I(s)->tmp.ecdh);
 	S3I(s)->tmp.ecdh = NULL;
+	S3I(s)->tmp.ecdh_nid = NID_undef;
 
 	ret = 1;
 
  err:
-	freezero(key, key_size);
-	EC_POINT_free(point);
-	BN_CTX_free(bn_ctx);
+	freezero(key, key_len);
+	EC_KEY_free(ecdh_peer);
 
 	return (ret);
 }
@@ -2041,7 +2028,7 @@ ssl3_get_client_key_exchange(SSL *s)
 	long n;
 
 	/* 2048 maxlen is a guess.  How long a key does that permit? */
-	n = s->method->internal->ssl_get_message(s, SSL3_ST_SR_KEY_EXCH_A,
+	n = ssl3_get_message(s, SSL3_ST_SR_KEY_EXCH_A,
 	    SSL3_ST_SR_KEY_EXCH_B, SSL3_MT_CLIENT_KEY_EXCHANGE, 2048, &ok);
 	if (!ok)
 		return ((int)n);
@@ -2103,7 +2090,7 @@ ssl3_get_cert_verify(SSL *s)
 
 	EVP_MD_CTX_init(&mctx);
 
-	n = s->method->internal->ssl_get_message(s, SSL3_ST_SR_CERT_VRFY_A,
+	n = ssl3_get_message(s, SSL3_ST_SR_CERT_VRFY_A,
 	    SSL3_ST_SR_CERT_VRFY_B, -1, SSL3_RT_MAX_PLAIN_LENGTH, &ok);
 	if (!ok)
 		return ((int)n);
@@ -2209,6 +2196,13 @@ ssl3_get_cert_verify(SSL *s)
 		    (!EVP_PKEY_CTX_set_rsa_padding
 		    (pctx, RSA_PKCS1_PSS_PADDING) ||
 		    !EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, -1))) {
+			al = SSL_AD_INTERNAL_ERROR;
+			goto f_err;
+		}
+		if (sigalg->key_type == EVP_PKEY_GOSTR01 &&
+		    EVP_PKEY_CTX_ctrl(pctx, -1, EVP_PKEY_OP_VERIFY,
+		    EVP_PKEY_CTRL_GOST_SIG_FORMAT, GOST_SIG_FORMAT_RS_LE,
+		    NULL) <= 0) {
 			al = SSL_AD_INTERNAL_ERROR;
 			goto f_err;
 		}
@@ -2326,9 +2320,8 @@ ssl3_get_client_certificate(SSL *s)
 	const unsigned char *q;
 	STACK_OF(X509) *sk = NULL;
 
-	n = s->method->internal->ssl_get_message(s, SSL3_ST_SR_CERT_A, SSL3_ST_SR_CERT_B,
+	n = ssl3_get_message(s, SSL3_ST_SR_CERT_A, SSL3_ST_SR_CERT_B,
 	    -1, s->internal->max_cert_list, &ok);
-
 	if (!ok)
 		return ((int)n);
 
@@ -2650,7 +2643,7 @@ ssl3_send_cert_status(SSL *s)
 		if (!CBB_add_u24_length_prefixed(&certstatus, &ocspresp))
 			goto err;
 		if (!CBB_add_bytes(&ocspresp, s->internal->tlsext_ocsp_resp,
-		    s->internal->tlsext_ocsp_resplen))
+		    s->internal->tlsext_ocsp_resp_len))
 			goto err;
 		if (!ssl3_handshake_msg_finish(s, &cbb))
 			goto err;

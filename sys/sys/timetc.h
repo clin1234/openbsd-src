@@ -1,4 +1,4 @@
-/*	$OpenBSD: timetc.h,v 1.8 2019/03/25 23:32:00 cheloha Exp $ */
+/*	$OpenBSD: timetc.h,v 1.12 2020/07/06 13:33:09 pirofti Exp $ */
 
 /*
  * Copyright (c) 2000 Poul-Henning Kamp <phk@FreeBSD.org>
@@ -24,9 +24,12 @@
 #ifndef _SYS_TIMETC_H_
 #define	_SYS_TIMETC_H_
 
-#ifndef _KERNEL
+#if !defined(_KERNEL) && !defined(_LIBC)
 #error "no user-serviceable parts inside"
 #endif
+
+#include <machine/timetc.h>
+#include <sys/queue.h>
 
 /*-
  * `struct timecounter' is the interface between the hardware which implements
@@ -46,8 +49,8 @@ typedef void timecounter_pps_t(struct timecounter *);
 /*
  * Locks used to protect struct members in this file:
  *	I	immutable after initialization
- *	t	tc_lock
- *	w	windup_mtx
+ *	T	tc_lock
+ *	W	windup_mtx
  */
 
 struct timecounter {
@@ -78,18 +81,44 @@ struct timecounter {
 		 */
 	void			*tc_priv;		/* [I] */
 		/* Pointer to the timecounter's private parts. */
-	struct timecounter	*tc_next;		/* [I] */
+	int			tc_user;		/* [I] */
+		/* Expose this timecounter to userland. */
+	SLIST_ENTRY(timecounter) tc_next;		/* [I] */
 		/* Pointer to the next timecounter. */
-	int64_t			tc_freq_adj;		/* [tw] */
+	int64_t			tc_freq_adj;		/* [T,W] */
 		/* Current frequency adjustment. */
+	u_int64_t		tc_precision;		/* [I] */
+		/* Precision of the counter.  Computed in tc_init(). */
 };
+
+struct timekeep {
+	/* set at initialization */
+	uint32_t	tk_version;		/* version number */
+
+	/* timehands members */
+	uint64_t	tk_scale;
+	u_int		tk_offset_count;
+	struct bintime	tk_offset;
+	struct bintime	tk_naptime;
+	struct bintime	tk_boottime;
+	volatile u_int	tk_generation;
+
+	/* timecounter members */
+	int		tk_user;
+	u_int		tk_counter_mask;
+};
+#define TK_VERSION	0
 
 struct rwlock;
 extern struct rwlock tc_lock;
 
 extern struct timecounter *timecounter;
 
+extern struct uvm_object *timekeep_object;
+extern struct timekeep *timekeep;
+
 u_int64_t tc_getfrequency(void);
+u_int64_t tc_getprecision(void);
 void	tc_init(struct timecounter *tc);
 void	tc_setclock(const struct timespec *ts);
 void	tc_setrealtimeclock(const struct timespec *ts);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.167 2019/01/18 01:34:50 pd Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.170 2020/05/31 06:23:57 dlg Exp $	*/
 /*	$NetBSD: cpu.h,v 1.35 1996/05/05 19:29:26 christos Exp $	*/
 
 /*-
@@ -267,6 +267,8 @@ void cpu_unidle(struct cpu_info *);
 
 #define want_resched (curcpu()->ci_want_resched)
 
+unsigned int cpu_rnd_messybits(void);
+
 /*
  * Preempt the current process if in interrupt from user mode,
  * or after the current trap/syscall if in system mode.
@@ -364,6 +366,7 @@ extern int cpu_apmi_edx;
 extern u_int cpu_mwait_size;
 extern u_int cpu_mwait_states;
 extern void cpu_update_nmi_cr3(vaddr_t);
+extern void cpu_tsx_disable(struct cpu_info *);
 
 /* machdep.c */
 extern int cpu_apmhalt;
@@ -420,7 +423,7 @@ void	proc_trampoline(void);
 /* clock.c */
 extern void (*initclock_func)(void);
 void	startclocks(void);
-void	rtcdrain(void *);
+void	rtcinit(void);
 void	rtcstart(void);
 void	rtcstop(void);
 void	i8254_delay(int);

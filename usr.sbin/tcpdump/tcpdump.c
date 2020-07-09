@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcpdump.c,v 1.89 2019/03/18 00:09:22 dlg Exp $	*/
+/*	$OpenBSD: tcpdump.c,v 1.93 2020/06/21 05:00:18 dlg Exp $	*/
 
 /*
  * Copyright (c) 1988, 1989, 1990, 1991, 1992, 1993, 1994, 1995, 1996, 1997
@@ -188,7 +188,7 @@ pcap_list_linktypes(pcap_t *p)
 	if (fd < 0)
 		error("Invalid bpf descriptor");
 
-	if (ioctl(fd, BIOCGDLTLIST, &dl) < 0)
+	if (ioctl(fd, BIOCGDLTLIST, &dl) == -1)
 		err(1, "BIOCGDLTLIST");
 
 	if (dl.bfl_len > MAXDLT)
@@ -365,10 +365,14 @@ main(int argc, char **argv)
 				packettype = PT_GRE;
 			else if (strcasecmp(optarg, "vxlan") == 0)
 				packettype = PT_VXLAN;
+			else if (strcasecmp(optarg, "erspan") == 0)
+				packettype = PT_ERSPAN;
 			else if (strcasecmp(optarg, "mpls") == 0)
 				packettype = PT_MPLS;
 			else if (strcasecmp(optarg, "tftp") == 0)
 				packettype = PT_TFTP;
+			else if (strcasecmp(optarg, "wg") == 0)
+				packettype = PT_WIREGUARD;
 			else if (strcasecmp(optarg, "sack") == 0)
 				/*
 				 * kept for compatibility; DEFAULT_SNAPLEN
@@ -654,14 +658,14 @@ default_print_unaligned(const u_char *cp, u_int length)
 		i = 0;
 		while (--nshorts >= 0) {
 			if ((i++ % 8) == 0)
-				(void)printf("\n\t\t\t");
+				printf("\n\t\t\t");
 			s = *cp++;
-			(void)printf(" %02x%02x", s, *cp++);
+			printf(" %02x%02x", s, *cp++);
 		}
 		if (length & 1) {
 			if ((i % 8) == 0)
-				(void)printf("\n\t\t\t");
-			(void)printf(" %02x", *cp);
+				printf("\n\t\t\t");
+			printf(" %02x", *cp);
 		}
 	}
 }
@@ -690,13 +694,13 @@ default_print(const u_char *bp, u_int length)
 		i = 0;
 		while (--nshorts >= 0) {
 			if ((i++ % 8) == 0)
-				(void)printf("\n\t\t\t");
-			(void)printf(" %04x", ntohs(*sp++));
+				printf("\n\t\t\t");
+			printf(" %04x", ntohs(*sp++));
 		}
 		if (length & 1) {
 			if ((i % 8) == 0)
-				(void)printf("\n\t\t\t");
-			(void)printf(" %02x", *(u_char *)sp);
+				printf("\n\t\t\t");
+			printf(" %02x", *(u_char *)sp);
 		}
 	}
 }

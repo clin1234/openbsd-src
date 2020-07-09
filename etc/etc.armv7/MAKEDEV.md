@@ -1,6 +1,6 @@
 define(MACHINE,armv7)dnl
 vers(__file__,
-	{-$OpenBSD: MAKEDEV.md,v 1.14 2016/09/04 15:38:59 naddy Exp $-},
+	{-$OpenBSD: MAKEDEV.md,v 1.18 2020/07/06 06:11:26 dlg Exp $-},
 etc.MACHINE)dnl
 dnl
 dnl Copyright (c) 2001-2004 Todd T. Fries <todd@OpenBSD.org>
@@ -60,6 +60,7 @@ _DEV(ttyU, 68)
 _DEV(uall)
 _DEV(ugen, 70)
 _DEV(uhid, 65)
+_DEV(fido, 106)
 _DEV(ulpt, 66)
 _DEV(usb, 64)
 _TITLE(spec)
@@ -68,6 +69,7 @@ _DEV(au, 36)
 _DEV(bio, 52)
 _DEV(bktr, 75)
 _DEV(bpf, 22)
+_DEV(dt, 30)
 _DEV(diskmap, 102)
 _DEV(fdesc, 7)
 _DEV(fuse, 77)
@@ -76,6 +78,7 @@ _DEV(hotplug, 37)
 _DEV(pci, 88)
 _DEV(pf, 46)
 _DEV(pppx, 103)
+_DEV(pppac, 107)
 _DEV(radio, 97)
 _DEV(rnd, 40)
 _DEV(rmidi, 57)
@@ -86,6 +89,7 @@ _DEV(tuner, 75)
 _DEV(vi, 38)
 _DEV(vscsi, 100)
 _DEV(switch, 105)
+_DEV(kstat, 51)
 dnl
 divert(__mddivert)dnl
 dnl

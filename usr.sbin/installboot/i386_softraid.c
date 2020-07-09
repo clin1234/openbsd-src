@@ -1,6 +1,7 @@
-/*	$OpenBSD: i386_softraid.c,v 1.10 2016/04/28 16:48:18 krw Exp $	*/
+/*	$OpenBSD: i386_softraid.c,v 1.17 2020/06/27 15:35:29 deraadt Exp $	*/
 /*
  * Copyright (c) 2012 Joel Sing <jsing@openbsd.org>
+ * Copyright (c) 2010 Otto Moerbeek <otto@drijf.net>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -73,11 +74,11 @@ sr_install_bootblk(int devfd, int vol, int disk)
 
 	/* Open this device and check its disklabel. */
 	if ((diskfd = opendev(bd.bd_vendor, (nowrite? O_RDONLY:O_RDWR),
-	    OPENDEV_PART, &dev)) < 0)
+	    OPENDEV_PART, &dev)) == -1)
 		err(1, "open: %s", dev);
 
 	/* Get and check disklabel. */
-	if (ioctl(diskfd, DIOCGDINFO, &dl) != 0)
+	if (ioctl(diskfd, DIOCGDINFO, &dl) == -1)
 		err(1, "disklabel: %s", dev);
 	if (dl.d_magic != DISKMAGIC)
 		err(1, "bad disklabel magic=0x%08x", dl.d_magic);
@@ -88,7 +89,7 @@ sr_install_bootblk(int devfd, int vol, int disk)
 
 	efipart = findgptefisys(diskfd, &dl);
 	if (efipart != -1) {
-		write_efisystem(&dl, (char)efipart);
+		write_filesystem(&dl, (char)efipart);
 		return;
 	}
 
@@ -177,6 +178,7 @@ sr_install_bootldr(int devfd, char *dev)
 			    "softraid volume\n", dev);
 		if (ioctl(devfd, BIOCINSTALLBOOT, &bb) == -1)
 			errx(1, "softraid installboot failed");
+		sr_status(&bb.bb_bio.bio_status);
 	}
 
 	/*
@@ -189,6 +191,7 @@ sr_install_bootldr(int devfd, char *dev)
 	sym_set_value(pbr_symbols, "_inodeblk", inodeblk);
 	sym_set_value(pbr_symbols, "_inodedbl", inodedbl);
 	sym_set_value(pbr_symbols, "_nblocks", nblocks);
+	sym_set_value(pbr_symbols, "_blkincr", 0);
 
 	if (verbose)
 		fprintf(stderr, "%s is %d blocks x %d bytes\n",

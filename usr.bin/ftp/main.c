@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.129 2019/05/16 12:44:18 florian Exp $	*/
+/*	$OpenBSD: main.c,v 1.131 2020/02/11 18:41:39 deraadt Exp $	*/
 /*	$NetBSD: main.c,v 1.24 1997/08/18 10:20:26 lukem Exp $	*/
 
 /*
@@ -297,7 +297,7 @@ main(volatile int argc, char *argv[])
 	httpuseragent = NULL;
 
 	while ((ch = getopt(argc, argv,
-		    "46AaCc:dD:Eegik:Mmno:pP:r:S:s:tU:vVw:")) != -1) {
+		    "46AaCc:dD:EeN:gik:Mmno:pP:r:S:s:tU:vVw:")) != -1) {
 		switch (ch) {
 		case '4':
 			family = PF_INET;
@@ -310,6 +310,9 @@ main(volatile int argc, char *argv[])
 			passivemode = 0;
 			break;
 
+		case 'N':
+			setprogname(optarg);
+			break;
 		case 'a':
 			anonftp = 1;
 			break;
@@ -942,26 +945,26 @@ usage(void)
 #ifndef SMALL
 	    "ftp [-46AadEegiMmnptVv] [-D title] [-k seconds] [-P port] "
 	    "[-r seconds]\n"
-	    "           [-s srcaddr] [host [port]]\n"
-	    "       ftp [-C] [-o output] [-s srcaddr]\n"
+	    "           [-s sourceaddr] [host [port]]\n"
+	    "       ftp [-C] [-N name] [-o output] [-s sourceaddr]\n"
 	    "           ftp://[user:password@]host[:port]/file[/] ...\n"
-	    "       ftp [-C] [-c cookie] [-o output] [-S ssl_options] "
-	    "[-s srcaddr]\n"
+	    "       ftp [-C] [-c cookie] [-N name] [-o output] [-S ssl_options] "
+	    "[-s sourceaddr]\n"
 	    "           [-U useragent] [-w seconds] "
 	    "http[s]://[user:password@]host[:port]/file ...\n"
-	    "       ftp [-C] [-o output] [-s srcaddr] file:file ...\n"
-	    "       ftp [-C] [-o output] [-s srcaddr] host:/file[/] ...\n"
+	    "       ftp [-C] [-N name] [-o output] [-s sourceaddr] file:file ...\n"
+	    "       ftp [-C] [-N name] [-o output] [-s sourceaddr] host:/file[/] ...\n"
 #else /* !SMALL */
-	    "ftp [-o output] "
+	    "ftp [-N name] [-o output] "
 	    "ftp://[user:password@]host[:port]/file[/] ...\n"
 #ifndef NOSSL
-	    "       ftp [-o output] [-S ssl_options] [-w seconds] "
+	    "       ftp [-N name] [-o output] [-S ssl_options] [-w seconds] "
 	    "http[s]://[user:password@]host[:port]/file ...\n"
 #else
-	    "       ftp [-o output] [-w seconds] http://host[:port]/file ...\n"
+	    "       ftp [-N name] [-o output] [-w seconds] http://host[:port]/file ...\n"
 #endif /* NOSSL */
-	    "       ftp [-o output] file:file ...\n"
-	    "       ftp [-o output] host:/file[/] ...\n"
+	    "       ftp [-N name] [-o output] file:file ...\n"
+	    "       ftp [-N name] [-o output] host:/file[/] ...\n"
 #endif /* !SMALL */
 	    );
 	exit(1);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: clnt_udp.c,v 1.35 2018/01/06 15:37:36 cheloha Exp $ */
+/*	$OpenBSD: clnt_udp.c,v 1.37 2020/07/06 13:33:06 pirofti Exp $ */
 
 /*
  * Copyright (c) 2010, Oracle America, Inc.
@@ -158,7 +158,7 @@ clntudp_bufcreate(struct sockaddr_in *raddr, u_long program, u_long version,
 	if (*sockp < 0) {
 		*sockp = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK,
 		    IPPROTO_UDP);
-		if (*sockp < 0) {
+		if (*sockp == -1) {
 			rpc_createerr.cf_stat = RPC_SYSTEMERROR;
 			rpc_createerr.cf_error.re_errno = errno;
 			goto fooy;
@@ -265,7 +265,7 @@ send_again:
 	reply_msg.acpted_rply.ar_results.where = resultsp;
 	reply_msg.acpted_rply.ar_results.proc = xresults;
 
-	clock_gettime(CLOCK_MONOTONIC, &start);
+	WRAP(clock_gettime)(CLOCK_MONOTONIC, &start);
 	for (;;) {
 		switch (ppoll(pfd, 1, &wait, NULL)) {
 		case 0:
@@ -283,7 +283,7 @@ send_again:
 			/* FALLTHROUGH */
 		case -1:
 			if (errno == EINTR) {
-				clock_gettime(CLOCK_MONOTONIC, &after);
+				WRAP(clock_gettime)(CLOCK_MONOTONIC, &after);
 				timespecsub(&after, &start, &duration);
 				timespecadd(&time_waited, &duration, &time_waited);
 				if (timespeccmp(&time_waited, &timeout, <))
@@ -299,8 +299,8 @@ send_again:
 			inlen = recvfrom(cu->cu_sock, cu->cu_inbuf, 
 			    (int) cu->cu_recvsz, 0,
 			    (struct sockaddr *)&from, &fromlen);
-		} while (inlen < 0 && errno == EINTR);
-		if (inlen < 0) {
+		} while (inlen == -1 && errno == EINTR);
+		if (inlen == -1) {
 			if (errno == EWOULDBLOCK)
 				continue;
 			cu->cu_error.re_errno = errno;

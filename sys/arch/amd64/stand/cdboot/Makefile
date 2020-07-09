@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.36 2019/05/15 06:52:33 mlarkin Exp $
+#	$OpenBSD: Makefile,v 1.41 2020/06/14 16:00:11 deraadt Exp $
 
 MAN=	cdboot.8
 
@@ -17,7 +17,7 @@ BINMODE=644
 
 .PATH:	${SADIR}/libsa
 SRCS+=	machdep.c dev_i386.c exec_i386.c cmd_i386.c
-SRCS+=	gidt.S random_i386.S biosdev.c bioscons.c gateA20.c \
+SRCS+=	gidt.S mdrandom.c biosdev.c bioscons.c gateA20.c \
 	memprobe.c diskprobe.c time.c run_amd64.S
 SRCS+=	softraid_amd64.c
 
@@ -25,13 +25,13 @@ SRCS+=	softraid_amd64.c
 SRCS+=	cmd.c vars.c bootarg.c
 
 .PATH:	${S}/lib/libsa
-SRCS+=	alloc.c exit.c getchar.c putchar.c strcmp.c strlen.c \
+SRCS+=	alloc.c exit.c getchar.c hexdump.c putchar.c strcmp.c strlen.c \
 	strncmp.c memcmp.c memcpy.c memmove.c memset.c printf.c snprintf.c \
 	strerror.c strncpy.c strtol.c strtoll.c ctime.c strlcpy.c
-SRCS+=	close.c closeall.c dev.c disklabel.c dkcksum.c fstat.c lseek.c \
-	open.c read.c stat.c cread.c readdir.c cons.c loadfile.c \
-	elf32.c elf64.c
-SRCS+=	ufs.c cd9660.c
+SRCS+=	close.c closeall.c dev.c disklabel.c dkcksum.c fchmod.c fstat.c \
+	lseek.c open.c read.c stat.c cread.c readdir.c cons.c \
+	loadfile.c arc4.c elf32.c elf64.c
+SRCS+=	ufs.c ufs2.c cd9660.c
 SRCS+=	aes_xts.c bcrypt_pbkdf.c blowfish.c explicit_bzero.c hmac_sha1.c \
 	pkcs5_pbkdf2.c rijndael.c sha1.c sha2.c softraid.c
 

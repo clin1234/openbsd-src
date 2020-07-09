@@ -101,7 +101,7 @@ static unsigned char client_hello_tls11[] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x2e, 0xc0, 0x14,
 	0xc0, 0x0a, 0x00, 0x39, 0xff, 0x85, 0x00, 0x88,
 	0x00, 0x81, 0x00, 0x35, 0x00, 0x84, 0xc0, 0x13,
-	0xc0, 0x09, 0x00, 0x33, 0x00, 0x45, 0x00, 0x2f,    
+	0xc0, 0x09, 0x00, 0x33, 0x00, 0x45, 0x00, 0x2f,
 	0x00, 0x41, 0xc0, 0x11, 0xc0, 0x07, 0x00, 0x05,
 	0x00, 0x04, 0xc0, 0x12, 0xc0, 0x08, 0x00, 0x16,
 	0x00, 0x0a, 0x00, 0xff, 0x01, 0x00, 0x00, 0x16,
@@ -142,11 +142,11 @@ static unsigned char cipher_list_tls12_chacha[] = {
 
 static unsigned char client_hello_tls12[] = {
 	0x16, 0x03, 0x01, 0x00, 0xbb, 0x01, 0x00, 0x00,
-	0xb7, 0x03, 0x03, 0x2b, 0x39, 0xcc, 0x56, 0xfc,
-	0xc4, 0x98, 0x8e, 0xfc, 0x22, 0x89, 0xc5, 0x1e,
-	0xa9, 0x88, 0xbd, 0x6e, 0xd8, 0xd1, 0xd6, 0xc1,
-	0xc3, 0x12, 0xe8, 0xe0, 0x1e, 0xfa, 0xa8, 0x21,
-	0xd9, 0x2d, 0x4d, 0x00, 0x00, 0x5c, 0xc0, 0x30,
+	0xb7, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x5c, 0xc0, 0x30,
 	0xc0, 0x2c, 0xc0, 0x28, 0xc0, 0x24, 0xc0, 0x14,
 	0xc0, 0x0a, 0x00, 0x9f, 0x00, 0x6b, 0x00, 0x39,
 	0xcc, 0xa9, 0xcc, 0xa8, 0xcc, 0xaa, 0xff, 0x85,
@@ -200,12 +200,21 @@ static struct client_hello_test client_hello_tests[] = {
 		.random_start = SSL3_RANDOM_OFFSET,
 		.ssl_method = TLSv1_2_client_method,
 	},
+#if 0
 	{
 		.desc = "SSLv23 default",
-		.protocol = TLS1_2_VERSION,
+		.protocol = TLS1_3_VERSION,
 		.random_start = SSL3_RANDOM_OFFSET,
 		.ssl_method = SSLv23_client_method,
 		.ssl_options = 0,
+	},
+#endif
+	{
+		.desc = "SSLv23 default (no TLSv1.3)",
+		.protocol = TLS1_2_VERSION,
+		.random_start = SSL3_RANDOM_OFFSET,
+		.ssl_method = SSLv23_client_method,
+		.ssl_options = SSL_OP_NO_TLSv1_3,
 	},
 	{
 		.desc = "SSLv23 (no TLSv1.2)",
@@ -221,12 +230,21 @@ static struct client_hello_test client_hello_tests[] = {
 		.ssl_method = SSLv23_client_method,
 		.ssl_options = SSL_OP_NO_TLSv1_1,
 	},
+#if 0
 	{
 		.desc = "TLS default",
-		.protocol = TLS1_2_VERSION,
+		.protocol = TLS1_3_VERSION,
 		.random_start = SSL3_RANDOM_OFFSET,
 		.ssl_method = TLS_client_method,
 		.ssl_options = 0,
+	},
+#endif
+	{
+		.desc = "TLS (no TLSv1.3)",
+		.protocol = TLS1_2_VERSION,
+		.random_start = SSL3_RANDOM_OFFSET,
+		.ssl_method = TLS_client_method,
+		.ssl_options = SSL_OP_NO_TLSv1_3,
 	},
 	{
 		.desc = "TLS (no TLSv1.2)",
@@ -242,13 +260,24 @@ static struct client_hello_test client_hello_tests[] = {
 		.ssl_method = TLS_client_method,
 		.ssl_options = SSL_OP_NO_TLSv1_1,
 	},
+#if 0
 	{
 		.desc = "TLS (no TLSv1.0, no TLSv1.1)",
-		.protocol = TLS1_2_VERSION,
+		.protocol = TLS1_3_VERSION,
 		.random_start = SSL3_RANDOM_OFFSET,
 		.ssl_method = TLS_client_method,
 		.ssl_options = SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1,
 	},
+#endif
+#if 0
+	{
+		.desc = "TLS (no TLSv1.0, no TLSv1.1, no TLSv1.2)",
+		.protocol = TLS1_3_VERSION,
+		.random_start = SSL3_RANDOM_OFFSET,
+		.ssl_method = TLS_client_method,
+		.ssl_options = SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2,
+	},
+#endif
 };
 
 #define N_CLIENT_HELLO_TESTS \
@@ -260,7 +289,7 @@ hexdump(const unsigned char *buf, size_t len)
 	size_t i;
 
 	for (i = 1; i <= len; i++)
-		fprintf(stderr, " 0x%02hhx,%s", buf[i - 1], i % 8 ? "" : "\n");
+		fprintf(stderr, " 0x%02hhx,%s", buf[i - 1], i % 8 && i != len ? "" : "\n");
 
 	fprintf(stderr, "\n");
 }
@@ -281,7 +310,7 @@ make_client_hello(int protocol, char **out, size_t *outlen)
 	size_t client_hello_len, cipher_list_len, cipher_list_offset;
 	const char *client_hello, *cipher_list;
 	char *p;
-	
+
 	*out = NULL;
 	*outlen = 0;
 
@@ -293,7 +322,7 @@ make_client_hello(int protocol, char **out, size_t *outlen)
 		cipher_list_len = sizeof(cipher_list_dtls1);
 		cipher_list_offset = DTLS_CIPHER_OFFSET;
 		break;
-	
+
 	case TLS1_VERSION:
 		client_hello = client_hello_tls10;
 		client_hello_len = sizeof(client_hello_tls10);
@@ -313,14 +342,14 @@ make_client_hello(int protocol, char **out, size_t *outlen)
 	case TLS1_2_VERSION:
 		client_hello = client_hello_tls12;
 		client_hello_len = sizeof(client_hello_tls12);
-		if (ssl_aes_is_accelerated() == 1)
+		if (ssl_aes_is_accelerated())
 			cipher_list = cipher_list_tls12_aes;
 		else
 			cipher_list = cipher_list_tls12_chacha;
 		cipher_list_len = sizeof(cipher_list_tls12_chacha);
 		cipher_list_offset = SSL3_CIPHER_OFFSET;
 		break;
-	
+
 	default:
 		return (-1);
 	}
@@ -347,7 +376,6 @@ client_hello_test(int testno, struct client_hello_test *cht)
 	size_t client_hello_len;
 	char *wbuf, rbuf[1];
 	int ret = 1;
-	size_t i;
 	long len;
 
 	fprintf(stderr, "Test %i - %s\n", testno, cht->desc);
@@ -378,7 +406,7 @@ client_hello_test(int testno, struct client_hello_test *cht)
 	wbio->references = 2;
 
 	SSL_set_bio(ssl, rbio, wbio);
-	
+
 	if (SSL_connect(ssl) != 0) {
 		fprintf(stderr, "SSL_connect() returned non-zero\n");
 		goto failure;
@@ -388,35 +416,41 @@ client_hello_test(int testno, struct client_hello_test *cht)
 
 	if (make_client_hello(cht->protocol, &client_hello,
 	    &client_hello_len) != 0)
-		goto failure;
+		errx(1, "failed to make client hello");
 
 	if ((size_t)len != client_hello_len) {
 		fprintf(stderr, "FAIL: test returned ClientHello length %li, "
 		    "want %zu\n", len, client_hello_len);
 		fprintf(stderr, "received:\n");
 		hexdump(wbuf, len);
+		fprintf(stderr, "test data:\n");
+		hexdump(client_hello, client_hello_len);
+		fprintf(stderr, "\n");
 		goto failure;
 	}
 
 	/* We expect the client random to differ. */
-	i = cht->random_start + SSL3_RANDOM_SIZE;
-	if (memcmp(client_hello, wbuf, cht->random_start) != 0 ||
-	    memcmp(&client_hello[cht->random_start],
-		&wbuf[cht->random_start], SSL3_RANDOM_SIZE) == 0 ||
-	    memcmp(&client_hello[i], &wbuf[i], len - i) != 0) {
+	if (memcmp(&client_hello[cht->random_start], &wbuf[cht->random_start],
+	    SSL3_RANDOM_SIZE) == 0) {
+		fprintf(stderr, "FAIL: ClientHello has zeroed random\n");
+		goto failure;
+	}
+
+	memset(&wbuf[cht->random_start], 0, SSL3_RANDOM_SIZE);
+
+	if (memcmp(client_hello, wbuf, client_hello_len) != 0) {
 		fprintf(stderr, "FAIL: ClientHello differs:\n");
 		fprintf(stderr, "received:\n");
-		memset(&wbuf[cht->random_start], 0, SSL3_RANDOM_SIZE);
 		hexdump(wbuf, len);
 		fprintf(stderr, "test data:\n");
 		hexdump(client_hello, client_hello_len);
 		fprintf(stderr, "\n");
 		goto failure;
 	}
-	
+
 	ret = 0;
 
-failure:
+ failure:
 	SSL_CTX_free(ssl_ctx);
 	SSL_free(ssl);
 

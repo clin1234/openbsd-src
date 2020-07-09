@@ -1,4 +1,4 @@
-/*	$OpenBSD: stand.h,v 1.66 2019/04/20 22:59:04 deraadt Exp $	*/
+/*	$OpenBSD: stand.h,v 1.69 2019/11/28 00:17:13 bluhm Exp $	*/
 /*	$NetBSD: stand.h,v 1.18 1996/11/30 04:35:51 gwr Exp $	*/
 
 /*-
@@ -67,6 +67,7 @@ struct fs_ops {
 	off_t	(*seek)(struct open_file *f, off_t offset, int where);
 	int	(*stat)(struct open_file *f, struct stat *sb);
 	int	(*readdir)(struct open_file *f, char *);
+	int	(*fchmod)(struct open_file *f, mode_t);
 };
 
 extern struct fs_ops file_system[];
@@ -131,7 +132,7 @@ char	*getdisklabel(const char *, struct disklabel *);
 u_int	dkcksum(const struct disklabel *);
 
 #define BOOTRANDOM	"/etc/random.seed"
-#define BOOTRANDOM_MAX	512
+#define BOOTRANDOM_MAX	256	/* no point being greater than RC4STATE */
 extern char rnddata[BOOTRANDOM_MAX];
 
 void	printf(const char *, ...);
@@ -145,6 +146,7 @@ __dead void	_rtt(void) __attribute__((noreturn));
 #define bcmp(s1,s2,n)	(memcmp((s2),(s1),(n)))
 #define	bcopy(s1,s2,n)	((void)memmove((s2),(s1),(n)))
 void	explicit_bzero(void *, size_t);
+void	hexdump(const void *, size_t);
 void	*memcpy(void *, const void *, size_t);
 void	*memmove(void *, const void *, size_t);
 int	memcmp(const void *, const void *, size_t);

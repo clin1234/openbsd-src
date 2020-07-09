@@ -1,4 +1,4 @@
-/*	$OpenBSD: constraint.c,v 1.42 2019/01/21 11:08:37 jsing Exp $	*/
+/*	$OpenBSD: constraint.c,v 1.50 2020/02/20 14:41:01 otto Exp $	*/
 
 /*
  * Copyright (c) 2015 Reyk Floeter <reyk@openbsd.org>
@@ -41,6 +41,7 @@
 #include <ctype.h>
 #include <tls.h>
 #include <pwd.h>
+#include <math.h>
 
 #include "ntpd.h"
 
@@ -48,6 +49,7 @@
 #define	X509_DATE	"%Y-%m-%d %T UTC"
 
 int	 constraint_addr_init(struct constraint *);
+void	 constraint_addr_head_clear(struct constraint *);
 struct constraint *
 	 constraint_byid(u_int32_t);
 struct constraint *
@@ -141,6 +143,14 @@ constraint_addr_init(struct constraint *cstr)
 	return (1);
 }
 
+void
+constraint_addr_head_clear(struct constraint *cstr)
+{
+	host_dns_free(cstr->addr_head.a);
+	cstr->addr_head.a = NULL;
+	cstr->addr = NULL;
+}
+
 int
 constraint_query(struct constraint *cstr)
 {
@@ -156,8 +166,13 @@ constraint_query(struct constraint *cstr)
 		/* Proceed and query the time */
 		break;
 	case STATE_DNS_TEMPFAIL:
-		/* Retry resolving the address */
-		constraint_init(cstr);
+		if (now > cstr->last + (cstr->dnstries >= TRIES_AUTO_DNSFAIL ?
+		    CONSTRAINT_RETRY_INTERVAL : INTERVAL_AUIO_DNSFAIL)) {
+			cstr->dnstries++;
+			/* Retry resolving the address */
+			constraint_init(cstr);
+			return 0;
+		}
 		return (-1);
 	case STATE_QUERY_SENT:
 		if (cstr->last + CONSTRAINT_SCAN_TIMEOUT > now) {
@@ -608,7 +623,10 @@ priv_constraint_dispatch(struct pollfd *pfd)
 		return (0);
 
 	if (((n = imsg_read(&cstr->ibuf)) == -1 && errno != EAGAIN) || n == 0) {
-		priv_constraint_close(pfd->fd, 1);
+		/* there's a race between SIGCHLD delivery and reading imsg
+		   but if we've seen the reply, we're good */
+		priv_constraint_close(pfd->fd, cstr->state !=
+		    STATE_REPLY_RECEIVED);
 		return (1);
 	}
 
@@ -625,6 +643,9 @@ priv_constraint_dispatch(struct pollfd *pfd)
 			 if (imsg.hdr.len != IMSG_HEADER_SIZE + sizeof(tv))
 				fatalx("invalid IMSG_CONSTRAINT received");
 
+			/* state is maintained by child, but we want to
+			   remember we've seen the result */
+			cstr->state = STATE_REPLY_RECEIVED;
 			/* forward imsg to ntp child, don't parse it here */
 			imsg_compose(ibuf, imsg.hdr.type,
 			    cstr->id, 0, -1, imsg.data, sizeof(tv));
@@ -674,8 +695,9 @@ constraint_msg_result(u_int32_t id, u_int8_t *data, size_t len)
 void
 constraint_msg_close(u_int32_t id, u_int8_t *data, size_t len)
 {
-	struct constraint	*cstr;
-	int			 fail;
+	struct constraint	*cstr, *tmp;
+	int			 fail, cnt;
+	static int		 total_fails;
 
 	if ((cstr = constraint_byid(id)) == NULL) {
 		log_warnx("IMSG_CONSTRAINT_CLOSE with invalid constraint id");
@@ -694,6 +716,15 @@ constraint_msg_close(u_int32_t id, u_int8_t *data, size_t len)
 		    " received in time, next query %ds",
 		    log_sockaddr((struct sockaddr *)
 		    &cstr->addr->ss), CONSTRAINT_SCAN_INTERVAL);
+		
+		cnt = 0;
+		TAILQ_FOREACH(tmp, &conf->constraints, entry)
+			cnt++;
+		if (cnt > 0 && ++total_fails >= cnt &&
+		    conf->constraint_median == 0) {
+			log_warnx("constraints configured but none available");
+			total_fails = 0;
+		}
 	}
 
 	if (fail || cstr->state < STATE_QUERY_SENT) {
@@ -710,7 +741,7 @@ constraint_msg_dns(u_int32_t id, u_int8_t *data, size_t len)
 	struct ntp_addr		*h;
 
 	if ((cstr = constraint_byid(id)) == NULL) {
-		log_warnx("IMSG_CONSTRAINT_DNS with invalid constraint id");
+		log_debug("IMSG_CONSTRAINT_DNS with invalid constraint id");
 		return;
 	}
 	if (cstr->addr != NULL) {
@@ -723,8 +754,18 @@ constraint_msg_dns(u_int32_t id, u_int8_t *data, size_t len)
 		return;
 	}
 
-	if ((len % sizeof(struct sockaddr_storage)) != 0)
+	if (len % (sizeof(struct sockaddr_storage) + sizeof(int)) != 0)
 		fatalx("IMSG_CONSTRAINT_DNS len");
+
+	if (cstr->addr_head.pool) {
+		struct constraint *n, *tmp;
+		TAILQ_FOREACH_SAFE(n, &conf->constraints, entry, tmp) {
+			if (cstr->id == n->id)
+				continue;
+			if (cstr->addr_head.pool == n->addr_head.pool)
+				constraint_remove(n);
+		}
+	}
 
 	p = data;
 	do {
@@ -733,6 +774,9 @@ constraint_msg_dns(u_int32_t id, u_int8_t *data, size_t len)
 		memcpy(&h->ss, p, sizeof(h->ss));
 		p += sizeof(h->ss);
 		len -= sizeof(h->ss);
+		memcpy(&h->notauth, p, sizeof(int));
+		p += sizeof(int);
+		len -= sizeof(int);
 
 		if (ncstr == NULL || cstr->addr_head.pool) {
 			ncstr = new_constraint();
@@ -770,7 +814,7 @@ constraint_update(void)
 {
 	struct constraint *cstr;
 	int	 cnt, i;
-	time_t	*sum;
+	time_t	*values;
 	time_t	 now;
 
 	now = getmonotime();
@@ -781,29 +825,31 @@ constraint_update(void)
 			continue;
 		cnt++;
 	}
+	if (cnt == 0)
+		return;
 
-	if ((sum = calloc(cnt, sizeof(time_t))) == NULL)
+	if ((values = calloc(cnt, sizeof(time_t))) == NULL)
 		fatal("calloc");
 
 	i = 0;
 	TAILQ_FOREACH(cstr, &conf->constraints, entry) {
 		if (cstr->state != STATE_REPLY_RECEIVED)
 			continue;
-		sum[i++] = cstr->constraint + (now - cstr->last);
+		values[i++] = cstr->constraint + (now - cstr->last);
 	}
 
-	qsort(sum, cnt, sizeof(time_t), constraint_cmp);
+	qsort(values, cnt, sizeof(time_t), constraint_cmp);
 
 	/* calculate median */
 	i = cnt / 2;
 	if (cnt % 2 == 0)
-		if (sum[i - 1] < sum[i])
-			i -= 1;
+		conf->constraint_median = (values[i - 1] + values[i]) / 2;
+	else
+		conf->constraint_median = values[i];
 
 	conf->constraint_last = now;
-	conf->constraint_median = sum[i];
 
-	free(sum);
+	free(values);
 }
 
 void
@@ -815,6 +861,8 @@ constraint_reset(void)
 		if (cstr->state == STATE_QUERY_SENT)
 			continue;
 		constraint_close(cstr->id);
+		constraint_addr_head_clear(cstr);
+		constraint_init(cstr);
 	}
 	conf->constraint_errors = 0;
 }
@@ -823,7 +871,7 @@ int
 constraint_check(double val)
 {
 	struct timeval	tv;
-	double		constraint;
+	double		diff;
 	time_t		now;
 
 	if (conf->constraint_median == 0)
@@ -833,11 +881,9 @@ constraint_check(double val)
 	now = getmonotime();
 	tv.tv_sec = conf->constraint_median + (now - conf->constraint_last);
 	tv.tv_usec = 0;
-	constraint = gettime_from_timeval(&tv);
+	diff = fabs(val - gettime_from_timeval(&tv));
 
-	if (((val - constraint) > CONSTRAINT_MARGIN) ||
-	    ((constraint - val) > CONSTRAINT_MARGIN)) {
-		/* XXX get new constraint if too many errors happened */
+	if (diff > CONSTRAINT_MARGIN) {
 		if (conf->constraint_errors++ >
 		    (CONSTRAINT_ERROR_MARGIN * peer_cnt)) {
 			constraint_reset();
@@ -945,7 +991,7 @@ httpsdate_request(struct httpsdate *httpsdate, struct timeval *when)
 		ret = tls_write(httpsdate->tls_ctx, buf, len);
 		if (ret == TLS_WANT_POLLIN || ret == TLS_WANT_POLLOUT)
 			continue;
-		if (ret < 0) {
+		if (ret == -1) {
 			log_warnx("tls write failed: %s (%s): %s",
 			    httpsdate->tls_addr, httpsdate->tls_hostname,
 			    tls_error(httpsdate->tls_ctx));
@@ -1081,7 +1127,7 @@ tls_readline(struct tls *tls, size_t *lenp, size_t *maxlength,
 		ret = tls_read(tls, &c, 1);
 		if (ret == TLS_WANT_POLLIN || ret == TLS_WANT_POLLOUT)
 			goto again;
-		if (ret < 0) {
+		if (ret == -1) {
 			/* SSL read error, ignore */
 			free(buf);
 			return (NULL);

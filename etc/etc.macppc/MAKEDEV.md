@@ -1,6 +1,6 @@
 define(MACHINE,macppc)dnl
 vers(__file__,
-	{-$OpenBSD: MAKEDEV.md,v 1.70 2016/09/11 19:59:53 deraadt Exp $-},
+	{-$OpenBSD: MAKEDEV.md,v 1.75 2020/07/06 06:11:27 dlg Exp $-},
 etc.MACHINE)dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
@@ -69,6 +69,7 @@ _DEV(uall)
 _DEV(ttyU, 66)
 _DEV(ugen, 63)
 _DEV(uhid, 62)
+_DEV(fido, 90)
 _DEV(ulpt, 64)
 _DEV(usb, 61)
 _TITLE(spec)
@@ -77,6 +78,7 @@ _DEV(au, 44)
 _DEV(bio, 80)
 _DEV(bktr, 75)
 _DEV(bpf, 22)
+_DEV(dt, 30)
 _DEV(diskmap, 84)
 _DEV(drm, 87)
 _DEV(fdesc, 21)
@@ -86,6 +88,7 @@ _DEV(hotplug, 78)
 _DEV(pci, 71)
 _DEV(pf, 39)
 _DEV(pppx, 85)
+_DEV(pppac, 91)
 _DEV(radio, 76)
 _DEV(rnd, 40)
 _DEV(rmidi, 52)
@@ -96,6 +99,7 @@ _DEV(uk, 41)
 _DEV(vi, 45)
 _DEV(vscsi, 83)
 _DEV(switch, 89)
+_DEV(kstat, 51)
 dnl
 divert(__mddivert)dnl
 dnl
@@ -107,7 +111,7 @@ _std(1, 2, 43, 6)
 dnl
 dnl *** macppc specific targets
 dnl
-twrget(all, au, audio, 0, 1, 2)dnl
+twrget(all, au, audio, 0, 1, 2, 3)dnl
 twrget(all, s64_tzs, tty, a, b)dnl
 twrget(all, s64_czs, cua, a, b)dnl
 target(all, ch, 0)dnl

@@ -1,4 +1,4 @@
-/*	$OpenBSD: midi.h,v 1.8 2016/01/09 13:36:11 ratchov Exp $	*/
+/*	$OpenBSD: midi.h,v 1.13 2020/06/12 15:40:18 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -68,6 +68,7 @@ struct midi {
 #define MIDI_MSGMAX	16		/* max size of MIDI msg */
 	unsigned char msg[MIDI_MSGMAX];	/* parsed input message */
 	unsigned int st;		/* input MIDI running status */
+	unsigned int last_st;		/* backup of st during sysex */
 	unsigned int used;		/* bytes used in ``msg'' */
 	unsigned int idx;		/* current ``msg'' size */
 	unsigned int len;		/* expected ``msg'' length */
@@ -88,8 +89,8 @@ struct port {
 #define PORT_DRAIN	2
 	unsigned int state;
 	unsigned int num;		/* port serial number */
-	char *path;			/* hold the port open ? */
-	int hold;
+	struct name *path_list;
+	int hold;			/* hold the port open ? */
 	struct midi *midi;
 };
 
@@ -109,6 +110,7 @@ void midi_out(struct midi *, unsigned char *, int);
 void midi_send(struct midi *, unsigned char *, int);
 void midi_fill(struct midi *);
 void midi_tag(struct midi *, unsigned int);
+unsigned int midi_tags(struct midi *);
 void midi_link(struct midi *, struct midi *);
 
 void port_log(struct port *);
@@ -121,5 +123,7 @@ int  port_init(struct port *);
 void port_done(struct port *);
 void port_drain(struct port *);
 int  port_close(struct port *);
+int  port_reopen(struct port *);
+void port_abort(struct port *);
 
 #endif /* !defined(MIDI_H) */

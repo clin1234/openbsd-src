@@ -67,8 +67,16 @@ true)
                             -compatibility_version \
 				${api_revision}.${api_version}.${api_subversion} \
 			     -current_version \
-				${revision}.${patchlevel}.${subversion} \
-			     -install_name \$(shrpdir)/\$@"
+				${revision}.${patchlevel}.${subversion}"
+		case "$osvers" in
+	        1[5-9]*|[2-9]*)
+			shrpldflags="$shrpldflags -install_name `pwd`/\$@ -Xlinker -headerpad_max_install_names"
+			exeldflags="-Xlinker -headerpad_max_install_names"
+			;;
+		*)
+			shrpldflags="$shrpldflags -install_name \$(shrpdir)/\$@"
+			;;
+		esac
 		;;
 	cygwin*)
 		shrpldflags="$shrpldflags -Wl,--out-implib=libperl.dll.a -Wl,--image-base,0x52000000"
@@ -176,15 +184,11 @@ esac
 
 : is Cwd static or dynamic
 static_cwd='define'
-storable_limit_dep=''
-storable_type=''
 list_util_dep='$(PERL_EXE)'
 for f in $dynamic_ext; do
    case $f in
        Cwd) static_cwd='undef' ;;
        List/Util) list_util_dep=lib/auto/List/Util/Util.$dlext ;;
-       Storable) storable_limit_dep=lib/auto/Storable/Storable.$dlext
-                 storable_type='dynamic' ;;
    esac
 done
 
@@ -194,6 +198,7 @@ dynamic_ext_re="lib/auto/re/re.$dlext"
 extra_dep='
 ext/Pod-Functions/pm_to_blib: cpan/Pod-Simple/pm_to_blib cpan/Pod-Escapes/pm_to_blib pod/perlfunc.pod
 cpan/IO-Compress/pm_to_blib: dist/lib/pm_to_blib
+lib/auto/Term/ReadKey/ReadKey.so: lib/auto/Cwd/Cwd.so
 '
 for f in $dynamic_ext; do
     : the dependency named here will never exist
@@ -221,7 +226,6 @@ for f in $static_ext; do
 $this_target: lib/auto/List/Util/Util\$(LIB_EXT)" ;;
 	Unicode/Normalize) extra_dep="$extra_dep
 $this_target: uni.data" ;;
-        Storable) storable_type='static' ;;
     esac
 done
 
@@ -276,6 +280,7 @@ LNS = $lns
 CPS = $cp
 RMS = rm -f
 ranlib = $ranlib
+ECHO = $echo
 
 # The following are mentioned only to make metaconfig include the
 # appropriate questions in Configure.  If you want to change these,
@@ -338,6 +343,14 @@ MINIPERL = \$(LDLIBPTH) ./miniperl\$(EXE_EXT) -Ilib
 MANIFEST_SRT = MANIFEST.srt
 
 !GROK!THIS!
+
+case "$useshrplib$osname" in
+truedarwin)
+	$spitshell >>$Makefile <<!GROK!THIS!
+PERL_EXE_LDFLAGS=$exeldflags
+!GROK!THIS!
+	;;
+esac
 
 case "$usecrosscompile$perl" in
 define?*)
@@ -575,7 +588,7 @@ esac
 
 $spitshell >>$Makefile <<'!NO!SUBS!'
 
-perltoc_pod_prereqs = extra.pods pod/perl5281delta.pod pod/perlapi.pod pod/perlintern.pod pod/perlmodlib.pod
+perltoc_pod_prereqs = extra.pods pod/perl5303delta.pod pod/perlapi.pod pod/perlintern.pod pod/perlmodlib.pod
 generated_pods = pod/perltoc.pod $(perltoc_pod_prereqs)
 generated_headers = uudmap.h bitcount.h mg_data.h
 
@@ -809,11 +822,11 @@ CCDLFLAGS		= `echo $ccdlflags|sed -e 's@-bE:.*/perl\.exp@-bE:perl.exp@'`
 LIBPERL_NONSHR		= libperl_nonshr$(LIB_EXT)
 MINIPERL_NONSHR		= miniperl_nonshr$(EXE_EXT)
 
-#$(LIBPERL_NONSHR): $(perllib_objs)
-#	$(RMS) $(LIBPERL_NONSHR)
-#	$(AR) rc $(LIBPERL_NONSHR) $(perllib_objs)
+$(LIBPERL_NONSHR): $(perllib_objs)
+	$(RMS) $(LIBPERL_NONSHR)
+	$(AR) rc $(LIBPERL_NONSHR) $(perllib_objs)
 
-$(MINIPERL_NONSHR): miniperlmain$(OBJ_EXT) opmini$(OBJ_EXT)  perlmini$(OBJ_EXT)
+$(MINIPERL_NONSHR): $(LIBPERL_NONSHR) miniperlmain$(OBJ_EXT) opmini$(OBJ_EXT)  perlmini$(OBJ_EXT)
 	$(CC) $(LDFLAGS) -o $(MINIPERL_NONSHR) miniperlmain$(OBJ_EXT) \
 	    opmini$(OBJ_EXT) perlmini$(OBJ_EXT) $(LIBPERL_NONSHR) $(LIBS)
 
@@ -912,33 +925,33 @@ $(DTRACE_MAIN_O): perldtrace.d perlmain$(OBJ_EXT)
 !NO!SUBS!
 		;;
     esac
-#	$spitshell >>$Makefile <<'!NO!SUBS!'
-#$(LIBPERL): $& $(perllib_dep) $(DYNALOADER) $(LIBPERLEXPORT)
-#!NO!SUBS!
-#	case "$useshrplib" in
-#	true)
-#		$spitshell >>$Makefile <<'!NO!SUBS!'
-#	rm -f $@
-#	$(LD) -o $@ $(SHRPLDFLAGS) $(perllib_objs) $(DYNALOADER) $(libs)
-#!NO!SUBS!
-#		case "$osname" in
-#		aix)
-#			$spitshell >>$Makefile <<'!NO!SUBS!'
-#	rm -f libperl$(OBJ_EXT)
-#	mv $@ libperl$(OBJ_EXT)
-#	$(AR) qv $(LIBPERL) libperl$(OBJ_EXT)
-#!NO!SUBS!
-#			;;
-#		esac
-#		;;
-#	*)
-#		$spitshell >>$Makefile <<'!NO!SUBS!'
-#	rm -f $(LIBPERL)
-#	$(AR) rc $(LIBPERL) $(perllib_objs) $(DYNALOADER)
-#	@$(ranlib) $(LIBPERL)
-#!NO!SUBS!
-#		;;
-#	esac
+	$spitshell >>$Makefile <<'!NO!SUBS!'
+$(LIBPERL): $& $(perllib_dep) $(DYNALOADER) $(LIBPERLEXPORT)
+!NO!SUBS!
+	case "$useshrplib" in
+	true)
+		$spitshell >>$Makefile <<'!NO!SUBS!'
+	rm -f $@
+	$(LD) -o $@ $(SHRPLDFLAGS) $(perllib_objs) $(DYNALOADER) $(libs)
+!NO!SUBS!
+		case "$osname" in
+		aix)
+			$spitshell >>$Makefile <<'!NO!SUBS!'
+	rm -f libperl$(OBJ_EXT)
+	mv $@ libperl$(OBJ_EXT)
+	$(AR) qv $(LIBPERL) libperl$(OBJ_EXT)
+!NO!SUBS!
+			;;
+		esac
+		;;
+	*)
+		$spitshell >>$Makefile <<'!NO!SUBS!'
+	rm -f $(LIBPERL)
+	$(AR) rc $(LIBPERL) $(perllib_objs) $(DYNALOADER)
+	@$(ranlib) $(LIBPERL)
+!NO!SUBS!
+		;;
+	esac
 	$spitshell >>$Makefile <<'!NO!SUBS!'
 
 # How to build executables.
@@ -1004,6 +1017,10 @@ NAMESPACEFLAGS = -force_flat_namespace
 		esac
 		$spitshell >>$Makefile <<'!NO!SUBS!'
 lib/buildcustomize.pl: $& $(miniperl_objs) write_buildcustomize.pl
+	-@rm -f miniperl.xok
+	$(CC) $(CLDFLAGS) $(NAMESPACEFLAGS) -o $(MINIPERL_EXE) \
+	    $(miniperl_objs) $(libs)
+	$(LDLIBPTH) ./miniperl$(HOST_EXE_EXT) -w -Ilib -Idist/Exporter/lib -MExporter -e '<?>' || sh -c 'echo >&2 Failed to build miniperl.  Please run make minitest; exit 1'
 	$(MINIPERL) -f write_buildcustomize.pl
 !NO!SUBS!
 		;;
@@ -1047,6 +1064,20 @@ $(PERL_EXE): $& $(perlmain_dep) $(LIBPERL) $(static_ext) ext.libs $(PERLEXPORT) 
 	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(LLIBPERL) $(static_ext) `cat ext.libs` $(libs)
 !NO!SUBS!
         ;;
+
+	darwin)
+	    case "$useshrplib$osvers" in
+	    true1[5-9]*|true[2-9]*) $spitshell >>$Makefile <<'!NO!SUBS!'
+	$(SHRPENV) $(CC) -o perl $(PERL_EXE_LDFLAGS) $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
+!NO!SUBS!
+	       ;;
+	    *) $spitshell >>$Makefile <<'!NO!SUBS!'
+	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
+!NO!SUBS!
+	       ;;
+	    esac
+        ;;
+
         *) $spitshell >>$Makefile <<'!NO!SUBS!'
 	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
 !NO!SUBS!
@@ -1119,9 +1150,9 @@ pod/perlintern.pod: $(MINIPERL_EXE) autodoc.pl embed.fnc
 pod/perlmodlib.pod: $(MINIPERL_EXE) pod/perlmodlib.PL MANIFEST
 	$(MINIPERL) pod/perlmodlib.PL -q
 
-pod/perl5281delta.pod: pod/perldelta.pod
-	$(RMS) pod/perl5281delta.pod
-	$(LNS) perldelta.pod pod/perl5281delta.pod
+pod/perl5303delta.pod: pod/perldelta.pod
+	$(RMS) pod/perl5303delta.pod
+	$(LNS) perldelta.pod pod/perl5303delta.pod
 
 extra.pods: $(MINIPERL_EXE)
 	-@test ! -f extra.pods || rm -f `cat extra.pods`
@@ -1151,26 +1182,6 @@ no_install no-install: install-notify
 
 install: install-all
 !NO!SUBS!
-
-if test "$storable_type" != "" ; then
-
-case "$static_cwd" in
-undef) storable_limit_dep="$storable_limit_dep lib/auto/Cwd/Cwd.$dlext" ;;
-esac
-
-$spitshell >>$Makefile <<EOT
-
-dist/Storable/lib/Storable/Limit.pm : \$(PERL_EXE) dist/Storable/stacksize $storable_limit_dep
-	cd dist/Storable ; \$(LDLIBPTH) \$(MAKE) lib/Storable/Limit.pm
-
-lib/Storable/Limit.pm : dist/Storable/lib/Storable/Limit.pm
-	test -d lib/Storable || mkdir lib/Storable
-	cp dist/Storable/lib/Storable/Limit.pm lib/Storable/Limit.pm
-EOT
-
-common_build_deps="$common_build_deps lib/Storable/Limit.pm"
-
-fi
 
 for name in all notify silent strip verbose; do
     flags="--$name";
@@ -1390,6 +1401,14 @@ _cleaner1:
 # run once if nothhing is passed in. It is such a great help.
 
 # Some systems do not support "?", so keep these files separate.
+
+# The Time::HiRes Makefile *should* remove dist/Time-HiRes/xdefine for 'clean',
+# but it's possible to get a rebuilt checkout into a state where it can't run
+# distclean, and can't recover until the file is gone.
+# There's no harm in adding it to the top level 'distclean' target - it should
+# anyway by then, and miniperl is long gone.
+# Add new rules before that line - the next line (rm -f so_locations ...) is
+# used as a placeholder by a regen script.
 _cleaner2:
 	-rm -f core.*perl.*.? t/core.perl.*.? .?*.c
 	rm -f core *perl.core t/core t/*perl.core core.* t/core.*
@@ -1407,6 +1426,7 @@ _cleaner2:
 	rm -f pod2htmd.tmp
 	rm -rf pod/perlfunc pod/perlipc
 	-rmdir ext/B/lib
+	-rm -f dist/Time-HiRes/xdefine
 	rm -f so_locations $(LIBPERL_NONSHR) $(MINIPERL_NONSHR)
 	-rmdir lib/version lib/threads lib/inc/ExtUtils lib/inc lib/encoding
 	-rmdir lib/autodie/exception lib/autodie/Scope lib/autodie lib/XS
@@ -1414,21 +1434,21 @@ _cleaner2:
 	-rmdir lib/Unicode/Collate/CJK lib/Unicode/Collate lib/Tie/Hash
 	-rmdir lib/Thread lib/Text lib/Test2/Util lib/Test2/Tools
 	-rmdir lib/Test2/IPC/Driver lib/Test2/IPC lib/Test2/Hub/Interceptor
-	-rmdir lib/Test2/Hub lib/Test2/Formatter lib/Test2/EventFacet
-	-rmdir lib/Test2/Event/TAP lib/Test2/Event lib/Test2/API lib/Test2
-	-rmdir lib/Test/use lib/Test/Tester lib/Test/Builder/Tester
-	-rmdir lib/Test/Builder/IO lib/Test/Builder lib/Test lib/Term
-	-rmdir lib/TAP/Parser/YAMLish lib/TAP/Parser/SourceHandler
-	-rmdir lib/TAP/Parser/Scheduler lib/TAP/Parser/Result
-	-rmdir lib/TAP/Parser/Iterator lib/TAP/Parser lib/TAP/Harness
-	-rmdir lib/TAP/Formatter/File lib/TAP/Formatter/Console
-	-rmdir lib/TAP/Formatter lib/TAP lib/Sys/Syslog lib/Sys lib/Sub
-	-rmdir lib/Search lib/Scalar lib/Pod/Text lib/Pod/Simple
-	-rmdir lib/Pod/Perldoc lib/PerlIO/via lib/PerlIO lib/Perl
-	-rmdir lib/Parse/CPAN lib/Parse lib/Params lib/OpenBSD lib/Net/FTP
-	-rmdir lib/Module/Load lib/Module/CoreList lib/Module lib/Memoize
-	-rmdir lib/Math/BigInt lib/Math/BigFloat lib/Math lib/MIME
-	-rmdir lib/Locale/Maketext lib/Locale/Codes lib/Locale lib/List/Util
+	-rmdir lib/Test2/Hub lib/Test2/Formatter lib/Test2/EventFacet/Info
+	-rmdir lib/Test2/EventFacet lib/Test2/Event/TAP lib/Test2/Event
+	-rmdir lib/Test2/API lib/Test2 lib/Test/use lib/Test/Tester
+	-rmdir lib/Test/Builder/Tester lib/Test/Builder/IO lib/Test/Builder
+	-rmdir lib/Test lib/Term lib/TAP/Parser/YAMLish
+	-rmdir lib/TAP/Parser/SourceHandler lib/TAP/Parser/Scheduler
+	-rmdir lib/TAP/Parser/Result lib/TAP/Parser/Iterator lib/TAP/Parser
+	-rmdir lib/TAP/Harness lib/TAP/Formatter/File
+	-rmdir lib/TAP/Formatter/Console lib/TAP/Formatter lib/TAP
+	-rmdir lib/Sys/Syslog lib/Sys lib/Sub lib/Search lib/Scalar
+	-rmdir lib/Pod/Text lib/Pod/Simple lib/Pod/Perldoc lib/PerlIO/via
+	-rmdir lib/PerlIO lib/Perl lib/Parse/CPAN lib/Parse lib/Params
+	-rmdir lib/OpenBSD lib/Net/FTP lib/Module/Load lib/Module/CoreList
+	-rmdir lib/Module lib/Memoize lib/Math/BigInt lib/Math/BigFloat
+	-rmdir lib/Math lib/MIME lib/Locale/Maketext lib/Locale lib/List/Util
 	-rmdir lib/List lib/JSON/PP lib/JSON lib/IPC lib/IO/Uncompress/Adapter
 	-rmdir lib/IO/Uncompress lib/IO/Socket lib/IO/Compress/Zlib
 	-rmdir lib/IO/Compress/Zip lib/IO/Compress/Gzip lib/IO/Compress/Base

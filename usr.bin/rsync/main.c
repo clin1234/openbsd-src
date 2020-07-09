@@ -1,4 +1,4 @@
-/*	$Id: main.c,v 1.45 2019/05/08 20:00:25 benno Exp $ */
+/*	$Id: main.c,v 1.49 2020/02/11 18:41:39 deraadt Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -271,7 +271,7 @@ main(int argc, char *argv[])
 {
 	struct opts	 opts;
 	pid_t		 child;
-	int		 fds[2], sd, rc, c, st, i;
+	int		 fds[2], sd = -1, rc, c, st, i;
 	struct sess	  sess;
 	struct fargs	*fargs;
 	char		**args;
@@ -307,6 +307,7 @@ main(int argc, char *argv[])
 		{ "no-times",	no_argument,	&opts.preserve_times,	0 },
 		{ "verbose",	no_argument,	&verbose,		1 },
 		{ "no-verbose",	no_argument,	&verbose,		0 },
+		{ "address",	required_argument, NULL,		4 },
 		{ NULL,		0,		NULL,			0 }};
 
 	/* Global pledge. */
@@ -380,6 +381,9 @@ main(int argc, char *argv[])
 		case 3:
 			opts.port = optarg;
 			break;
+		case 4:
+			opts.address = optarg;
+			break;
 		case 'h':
 		default:
 			goto usage;
@@ -428,8 +432,10 @@ main(int argc, char *argv[])
 
 	if (fargs->remote && opts.ssh_prog == NULL) {
 		assert(fargs->mode == FARGS_RECEIVER);
-		if ((rc = rsync_connect(&opts, &sd, fargs)) == 0)
+		if ((rc = rsync_connect(&opts, &sd, fargs)) == 0) {
 			rc = rsync_socket(&opts, sd, fargs);
+			close(sd);
+		}
 		exit(rc);
 	}
 
@@ -484,14 +490,7 @@ main(int argc, char *argv[])
 		break;
 	}
 
-	/*
-	 * If the client has an error and exits, the server may be
-	 * sitting around waiting to get data while we waitpid().
-	 * So close the connection here so that they don't hang.
-	 */
-
-	if (rc)
-		close(fds[0]);
+	close(fds[0]);
 
 	if (waitpid(child, &st, 0) == -1)
 		err(1, "waitpid");
@@ -510,9 +509,9 @@ main(int argc, char *argv[])
 	exit(rc);
 usage:
 	fprintf(stderr, "usage: %s"
-	    " [-aDglnoprtvx] [-e program] [--del] [--numeric-ids]\n"
-	    "\t[--port=portnumber] [--rsync-path=program] [--version]\n"
-	    "\tsource ... directory\n",
+	    " [-aDglnoprtvx] [-e program] [--address=sourceaddr] [--del]\n"
+	    "\t[--numeric-ids] [--port=portnumber] [--rsync-path=program]\n"
+	    "\t[--version] source ... directory\n",
 	    getprogname());
 	exit(1);
 }

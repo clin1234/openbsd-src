@@ -1,4 +1,4 @@
-/* $OpenBSD: ike_auth.c,v 1.116 2018/01/15 09:54:48 mpi Exp $	 */
+/* $OpenBSD: ike_auth.c,v 1.118 2020/07/07 17:33:40 tobhe Exp $	 */
 /* $EOM: ike_auth.c,v 1.59 2000/11/21 00:21:31 angelos Exp $	 */
 
 /*
@@ -201,7 +201,7 @@ ike_auth_get_key(int type, char *id, char *local_id, size_t *keylen)
 				goto ignorekeynote;
 			}
 
-			if (fstat(fd, &sb) < 0) {
+			if (fstat(fd, &sb) == -1) {
 				log_print("ike_auth_get_key: fstat failed");
 				free(keyfile);
 				close(fd);
@@ -276,7 +276,7 @@ ignorekeynote:
 			keyfile = privkeyfile;
 
 			fd = monitor_open(keyfile, O_RDONLY, 0);
-			if (fd < 0 && errno != ENOENT) {
+			if (fd == -1 && errno != ENOENT) {
 				log_print("ike_auth_get_key: failed opening "
 				    "\"%s\"", keyfile);
 				free(privkeyfile);
@@ -285,13 +285,13 @@ ignorekeynote:
 			}
 		}
 
-		if (fd < 0) {
+		if (fd == -1) {
 			/* No key found, try default key. */
 			keyfile = conf_get_str("X509-certificates",
 			    "Private-key");
 
 			fd = monitor_open(keyfile, O_RDONLY, 0);
-			if (fd < 0) {
+			if (fd == -1) {
 				log_print("ike_auth_get_key: failed opening "
 				    "\"%s\"", keyfile);
 				return 0;
@@ -467,7 +467,7 @@ sig_gen_skeyid(struct exchange *exchange, size_t *sz)
 		return 0;
 	}
 	LOG_DBG((LOG_NEGOTIATION, 80, "sig_gen_skeyid: g^xy length %lu",
-	    (unsigned long)ie->g_x_len));
+	    (unsigned long)ie->g_xy_len));
 	LOG_DBG_BUF((LOG_NEGOTIATION, 80,
 	    "sig_gen_skeyid: SKEYID fed with g^xy", ie->g_xy, ie->g_xy_len));
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-resize-window.c,v 1.1 2018/10/18 08:38:01 nicm Exp $ */
+/* $OpenBSD: cmd-resize-window.c,v 1.5 2020/04/13 10:59:58 nicm Exp $ */
 
 /*
  * Copyright (c) 2018 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -46,13 +46,15 @@ const struct cmd_entry cmd_resize_window_entry = {
 static enum cmd_retval
 cmd_resize_window_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = self->args;
-	struct winlink		*wl = item->target.wl;
+	struct args		*args = cmd_get_args(self);
+	struct cmd_find_state	*target = cmdq_get_target(item);
+	struct winlink		*wl = target->wl;
 	struct window		*w = wl->window;
-	struct session		*s = item->target.s;
+	struct session		*s = target->s;
 	const char	       	*errstr;
 	char			*cause;
 	u_int			 adjust, sx, sy;
+	int			 xpixel = -1, ypixel = -1;
 
 	if (args->argc == 0)
 		adjust = 1;
@@ -97,13 +99,16 @@ cmd_resize_window_exec(struct cmd *self, struct cmdq_item *item)
 	} else if (args_has(args, 'D'))
 		sy += adjust;
 
-	if (args_has(args, 'A'))
-		default_window_size(s, w, &sx, &sy, WINDOW_SIZE_LARGEST);
-	else if (args_has(args, 'a'))
-		default_window_size(s, w, &sx, &sy, WINDOW_SIZE_SMALLEST);
+	if (args_has(args, 'A')) {
+		default_window_size(NULL, s, w, &sx, &sy, &xpixel, &ypixel,
+		    WINDOW_SIZE_LARGEST);
+	} else if (args_has(args, 'a')) {
+		default_window_size(NULL, s, w, &sx, &sy, &xpixel, &ypixel,
+		    WINDOW_SIZE_SMALLEST);
+	}
 
 	options_set_number(w->options, "window-size", WINDOW_SIZE_MANUAL);
-	resize_window(w, sx, sy);
+	resize_window(w, sx, sy, xpixel, ypixel);
 
 	return (CMD_RETURN_NORMAL);
 }

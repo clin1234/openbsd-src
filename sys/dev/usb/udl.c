@@ -1,4 +1,4 @@
-/*	$OpenBSD: udl.c,v 1.88 2017/09/05 12:22:23 jsg Exp $ */
+/*	$OpenBSD: udl.c,v 1.93 2020/05/25 09:55:49 jsg Exp $ */
 
 /*
  * Copyright (c) 2009 Marcus Glocker <mglocker@openbsd.org>
@@ -79,7 +79,7 @@ int		udl_activate(struct device *, int);
 int		udl_ioctl(void *, u_long, caddr_t, int, struct proc *);
 paddr_t		udl_mmap(void *, off_t, int);
 int		udl_alloc_screen(void *, const struct wsscreen_descr *,
-		    void **, int *, int *, long *);
+		    void **, int *, int *, uint32_t *);
 void		udl_free_screen(void *, void *);
 int		udl_show_screen(void *, void *, int,
 		    void (*)(void *, int, int), void *);
@@ -89,9 +89,9 @@ void		udl_burner(void *, u_int, u_int);
 
 int		udl_copycols(void *, int, int, int, int);
 int		udl_copyrows(void *, int, int, int);
-int		udl_erasecols(void *, int, int, int, long);
-int		udl_eraserows(void *, int, int, long);
-int		udl_putchar(void *, int, int, u_int, long);
+int		udl_erasecols(void *, int, int, int, uint32_t);
+int		udl_eraserows(void *, int, int, uint32_t);
+int		udl_putchar(void *, int, int, u_int, uint32_t);
 int		udl_do_cursor(struct rasops_info *);
 int		udl_draw_char(struct udl_softc *, uint16_t, uint16_t, u_int,
 		    uint32_t, uint32_t);
@@ -499,8 +499,8 @@ udl_ioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 
 	sc = v;
 
-	DPRINTF(1, "%s: %s: ('%c', %d, %d)\n",
-	    DN(sc), FUNC, IOCGROUP(cmd), cmd & 0xff, IOCPARM_LEN(cmd));
+	DPRINTF(1, "%s: %s: ('%c', %zu, %zu)\n",
+	    DN(sc), FUNC, (int) IOCGROUP(cmd), cmd & 0xff, IOCPARM_LEN(cmd));
 
 	switch (cmd) {
 	case WSDISPLAYIO_GTYPE:
@@ -542,7 +542,7 @@ udl_ioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		d->status = UDLIO_STATUS_OK;
 		r = udl_damage(sc, sc->sc_fbmem, d->x1, d->x2, d->y1, d->y2);
 		if (r != 0) {
-			error = tsleep(sc, 0, "udlio", hz / 100);
+			error = tsleep_nsec(sc, 0, "udlio", MSEC_TO_NSEC(10));
 			if (error) {
 				d->status = UDLIO_STATUS_FAILED;
 			} else {
@@ -587,7 +587,7 @@ udl_mmap(void *v, off_t off, int prot)
 
 int
 udl_alloc_screen(void *v, const struct wsscreen_descr *type,
-    void **cookiep, int *curxp, int *curyp, long *attrp)
+    void **cookiep, int *curxp, int *curyp, uint32_t *attrp)
 {
 	struct udl_softc *sc = v;
 	struct wsdisplay_font *font;
@@ -627,7 +627,7 @@ udl_alloc_screen(void *v, const struct wsscreen_descr *type,
 	sc->sc_ri.ri_ops.putchar = udl_putchar;
 	sc->sc_ri.ri_do_cursor = udl_do_cursor;
 
-	sc->sc_ri.ri_ops.alloc_attr(&sc->sc_ri, 0, 0, 0, attrp);
+	sc->sc_ri.ri_ops.pack_attr(&sc->sc_ri, 0, 0, 0, attrp);
 
 	udl_stdscreen.nrows = sc->sc_ri.ri_rows;
 	udl_stdscreen.ncols = sc->sc_ri.ri_cols;
@@ -825,7 +825,7 @@ fail:
 }
 
 int
-udl_erasecols(void *cookie, int row, int col, int num, long attr)
+udl_erasecols(void *cookie, int row, int col, int num, uint32_t attr)
 {
 	struct rasops_info *ri = cookie;
 	struct udl_softc *sc = ri->ri_hw;
@@ -868,7 +868,7 @@ fail:
 }
 
 int
-udl_eraserows(void *cookie, int row, int num, long attr)
+udl_eraserows(void *cookie, int row, int num, uint32_t attr)
 {
 	struct rasops_info *ri = cookie;
 	struct udl_softc *sc;
@@ -910,7 +910,7 @@ fail:
 }
 
 int
-udl_putchar(void *cookie, int row, int col, u_int uc, long attr)
+udl_putchar(void *cookie, int row, int col, u_int uc, uint32_t attr)
 {
 	struct rasops_info *ri = cookie;
 	struct udl_softc *sc = ri->ri_hw;
@@ -1245,7 +1245,7 @@ fail:
 }
 
 uint8_t
-udl_lookup_mode(uint16_t hdisplay, uint16_t vdisplay, uint8_t hz,
+udl_lookup_mode(uint16_t hdisplay, uint16_t vdisplay, uint8_t freq,
     uint16_t chip, uint32_t clock)
 {
 	uint8_t	idx = 0;
@@ -1270,7 +1270,7 @@ udl_lookup_mode(uint16_t hdisplay, uint16_t vdisplay, uint8_t hz,
 	while (idx < MAX_DL_MODES) {
 		if ((udl_modes[idx].hdisplay == hdisplay) &&
 		    (udl_modes[idx].vdisplay == vdisplay) &&
-		    (udl_modes[idx].hz == hz) &&
+		    (udl_modes[idx].freq == freq) &&
 		    (udl_modes[idx].chip <= chip)) {
 			return(idx);
 		}
@@ -1945,7 +1945,7 @@ udl_init_chip(struct udl_softc *sc)
 	error = udl_write_1(sc, 0xc40b, 0x00);
 	if (error != USBD_NORMAL_COMPLETION)
 		return (error);
-	DPRINTF(1, "%s: %s: write 0x00 to 0xc40b\n", DN(sc), FUNC, ui8);
+	DPRINTF(1, "%s: %s: write 0x00 to 0xc40b\n", DN(sc), FUNC);
 
 	error = udl_set_decomp_table(sc, udl_decomp_table,
 	    sizeof(udl_decomp_table));
@@ -2031,7 +2031,7 @@ udl_select_mode(struct udl_softc *sc)
 	edid_print(&sc->sc_edid_info);
 #endif
 	if (sc->sc_edid_info.edid_preferred_mode != NULL) {
-		mode.hz = 
+		mode.freq =
 		    (sc->sc_edid_info.edid_preferred_mode->dot_clock * 1000) /
 		    (sc->sc_edid_info.edid_preferred_mode->htotal *
 		     sc->sc_edid_info.edid_preferred_mode->vtotal);
@@ -2041,7 +2041,7 @@ udl_select_mode(struct udl_softc *sc)
 		    sc->sc_edid_info.edid_preferred_mode->hdisplay;
 		mode.vdisplay =
 		    sc->sc_edid_info.edid_preferred_mode->vdisplay;
-		index = udl_lookup_mode(mode.hdisplay, mode.vdisplay, mode.hz,
+		index = udl_lookup_mode(mode.hdisplay, mode.vdisplay, mode.freq,
 		    sc->sc_chip, mode.clock);
 		sc->sc_cur_mode = index;
 	} else {
@@ -2050,11 +2050,11 @@ udl_select_mode(struct udl_softc *sc)
 
 	if (index == MAX_DL_MODES) {
 		DPRINTF(1, "%s: %s: no mode line found for %dx%d @ %dHz!\n",
-		    DN(sc), FUNC, mode.hdisplay, mode.vdisplay, mode.hz);
+		    DN(sc), FUNC, mode.hdisplay, mode.vdisplay, mode.freq);
 
 		i = 0;
 		while (i < sc->sc_edid_info.edid_nmodes) {
-			mode.hz = 
+			mode.freq =
 			    (sc->sc_edid_info.edid_modes[i].dot_clock * 1000) /
 			    (sc->sc_edid_info.edid_modes[i].htotal *
 			     sc->sc_edid_info.edid_modes[i].vtotal);
@@ -2065,7 +2065,7 @@ udl_select_mode(struct udl_softc *sc)
 			mode.vdisplay =
 			    sc->sc_edid_info.edid_modes[i].vdisplay;
 			index = udl_lookup_mode(mode.hdisplay, mode.vdisplay,
-			    mode.hz, sc->sc_chip, mode.clock);
+			    mode.freq, sc->sc_chip, mode.clock);
 			if (index < MAX_DL_MODES)
 				if ((sc->sc_cur_mode == MAX_DL_MODES) ||
 				    (index > sc->sc_cur_mode))
@@ -2090,7 +2090,7 @@ udl_select_mode(struct udl_softc *sc)
 	sc->sc_depth = 16;
 
 	DPRINTF(1, "%s: %s: %dx%d @ %dHz\n",
-	    DN(sc), FUNC, mode.hdisplay, mode.vdisplay, mode.hz);
+	    DN(sc), FUNC, mode.hdisplay, mode.vdisplay, mode.freq);
 }
 
 int

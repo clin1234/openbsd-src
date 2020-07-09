@@ -1,4 +1,4 @@
-/*	$OpenBSD: tmpfs_vnops.c,v 1.33 2018/10/22 17:31:25 krw Exp $	*/
+/*	$OpenBSD: tmpfs_vnops.c,v 1.42 2020/06/11 09:18:43 mpi Exp $	*/
 /*	$NetBSD: tmpfs_vnops.c,v 1.100 2012/11/05 17:27:39 dholland Exp $	*/
 
 /*
@@ -57,7 +57,7 @@ int tmpfs_kqfilter(void *v);
 /*
  * vnode operations vector used for files stored in a tmpfs file system.
  */
-struct vops tmpfs_vops = {
+const struct vops tmpfs_vops = {
 	.vop_lookup	= tmpfs_lookup,
 	.vop_create	= tmpfs_create,
 	.vop_mknod	= tmpfs_mknod,
@@ -2587,12 +2587,26 @@ int filt_tmpfsread(struct knote *kn, long hint);
 int filt_tmpfswrite(struct knote *kn, long hint);
 int filt_tmpfsvnode(struct knote *kn, long hint);
 
-struct filterops tmpfsread_filtops = 
-	{ 1, NULL, filt_tmpfsdetach, filt_tmpfsread };
-struct filterops tmpfswrite_filtops = 
-	{ 1, NULL, filt_tmpfsdetach, filt_tmpfswrite };
-struct filterops tmpfsvnode_filtops = 
-	{ 1, NULL, filt_tmpfsdetach, filt_tmpfsvnode };
+const struct filterops tmpfsread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_tmpfsdetach,
+	.f_event	= filt_tmpfsread,
+};
+
+const struct filterops tmpfswrite_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_tmpfsdetach,
+	.f_event	= filt_tmpfswrite,
+};
+
+const struct filterops tmpfsvnode_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_tmpfsdetach,
+	.f_event	= filt_tmpfsvnode,
+};
 
 int
 tmpfs_kqfilter(void *v)
@@ -2617,7 +2631,7 @@ tmpfs_kqfilter(void *v)
 
 	kn->kn_hook = (caddr_t)vp;
 
-	SLIST_INSERT_HEAD(&vp->v_selectinfo.si_note, kn, kn_selnext);
+	klist_insert(&vp->v_selectinfo.si_note, kn);
 
 	return (0);
 }
@@ -2627,7 +2641,7 @@ filt_tmpfsdetach(struct knote *kn)
 {
 	struct vnode *vp = (struct vnode *)kn->kn_hook;
 
-	SLIST_REMOVE(&vp->v_selectinfo.si_note, kn, knote, kn_selnext);
+	klist_remove(&vp->v_selectinfo.si_note, kn);
 }
 
 int
@@ -2645,11 +2659,14 @@ filt_tmpfsread(struct knote *kn, long hint)
 		return (1);
 	}
 
-	kn->kn_data = node->tn_size - kn->kn_fp->f_offset;
+	kn->kn_data = node->tn_size - foffset(kn->kn_fp);
 	if (kn->kn_data == 0 && kn->kn_sfflags & NOTE_EOF) {
 		kn->kn_fflags |= NOTE_EOF;
 		return (1);
 	}
+
+	if (kn->kn_flags & __EV_POLL)
+		return (1);
 
 	return (kn->kn_data != 0);
 }

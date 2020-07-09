@@ -1,4 +1,4 @@
-/*	$OpenBSD: envy.c,v 1.79 2019/05/09 05:17:45 ratchov Exp $	*/
+/*	$OpenBSD: envy.c,v 1.81 2020/01/05 01:07:58 jsg Exp $	*/
 /*
  * Copyright (c) 2007 Alexandre Ratchov <alex@caoua.org>
  *
@@ -217,7 +217,7 @@ struct midi_hw_if envy_midi_hw_if = {
 
 struct pci_matchid envy_matchids[] = {
 	{ PCI_VENDOR_ICENSEMBLE, PCI_PRODUCT_ICENSEMBLE_ICE1712 },
-	{ PCI_VENDOR_ICENSEMBLE, PCI_PRODUCT_ICENSEMBLE_VT172x }
+	{ PCI_VENDOR_ICENSEMBLE, PCI_PRODUCT_ICENSEMBLE_VT172X }
 };
 
 /*
@@ -1723,7 +1723,7 @@ envyattach(struct device *parent, struct device *self, void *aux)
 	sc->ibuf.addr = sc->obuf.addr = NULL;
 	sc->ccs_iosz = 0;
 	sc->mt_iosz = 0;
-	sc->isht = (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_ICENSEMBLE_VT172x);
+	sc->isht = (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_ICENSEMBLE_VT172X);
 
 	if (pci_mapreg_map(pa, ENVY_CTL_BAR, PCI_MAPREG_TYPE_IO, 0,
 		&sc->ccs_iot, &sc->ccs_ioh, NULL, &sc->ccs_iosz, 0)) {
@@ -2218,7 +2218,8 @@ envy_halt_output(void *self)
 	mtx_enter(&audio_lock);
 	sc->oactive = 0;
 	if (sc->obusy) {
-		err = msleep(&sc->obusy, &audio_lock, PWAIT, "envyobus", 4 * hz);
+		err = msleep_nsec(&sc->obusy, &audio_lock, PWAIT, "envyobus",
+		    SEC_TO_NSEC(4));
 		if (err)
 			printf("%s: output DMA halt timeout\n", DEVNAME(sc));
 	}
@@ -2239,7 +2240,8 @@ envy_halt_input(void *self)
 	mtx_enter(&audio_lock);
 	sc->iactive = 0;
 	if (sc->ibusy) {
-		err = msleep(&sc->ibusy, &audio_lock, PWAIT, "envyibus", 4 * hz); 
+		err = msleep_nsec(&sc->ibusy, &audio_lock, PWAIT, "envyibus",
+		    SEC_TO_NSEC(4));
 		if (err)
 			printf("%s: input DMA halt timeout\n", DEVNAME(sc));
 	}
@@ -2488,7 +2490,7 @@ envy_midi_close(void *self)
 	unsigned int reg;
 
 	/* wait for output fifo to drain */
-	tsleep(sc, PWAIT, "envymid", hz / 10);
+	tsleep_nsec(sc, PWAIT, "envymid", MSEC_TO_NSEC(100));
 
 	/* disable interrupts */
 	reg = envy_ccs_read(sc, ENVY_CCS_INTMASK);

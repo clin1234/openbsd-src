@@ -1,4 +1,4 @@
-vers(a, {-$OpenBSD: MAKEDEV.common,v 1.102 2019/04/14 10:23:36 jsg Exp $-})dnl
+vers(a, {-$OpenBSD: MAKEDEV.common,v 1.111 2020/07/06 06:11:26 dlg Exp $-})dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
 dnl
@@ -159,15 +159,17 @@ twrget(all, wsmouse, wscons)dnl
 target(all, par, 0)dnl
 target(all, apci, 0)dnl
 target(all, local)dnl
-target(all, gpr, 0)dnl
 target(all, ptm)dnl
 target(all, hotplug)dnl
 target(all, pppx)dnl
+target(all, pppac)dnl
 target(all, fuse)dnl
 target(all, vmm)dnl
 target(all, pvbus, 0, 1)dnl
 target(all, bpf)dnl
 target(all, kcov)dnl
+target(all, dt)dnl
+target(all, kstat)dnl
 dnl
 _mkdev(all, {-all-}, {-dnl
 show_target(all)dnl
@@ -178,6 +180,7 @@ __devitem(ramdisk, ramdisk, Ramdisk kernel devices,nothing)dnl
 dnl
 target(usb, usb, 0, 1, 2, 3, 4, 5, 6, 7)dnl
 target(usb, uhid, 0, 1, 2, 3, 4, 5, 6, 7)dnl
+twrget(usb, fido, fido)dnl
 target(usb, ulpt, 0, 1)dnl
 target(usb, ugen, 0, 1, 2, 3, 4, 5, 6, 7)dnl
 target(usb, ttyU, 0, 1, 2, 3)dnl
@@ -280,7 +283,7 @@ __devitem(wscons, wscons, Minimal wscons devices)dnl
 twrget(wscons, wscons, ttyC, cfg, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, a, b)dnl
 target(wscons, wsmux)dnl
 target(wscons, wskbd, 0, 1, 2, 3)dnl
-target(wscons, wsmouse, 0, 1, 2, 3)dnl
+target(wscons, wsmouse, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9)dnl
 _mkdev({-wscons-}, {-wscons-}, {-dnl
 show_target(wscons)dnl
 -})dnl
@@ -355,11 +358,15 @@ __devitem(lpa, lpa*, Polled printer port,lpt)dnl
 __devtitle({-usb-}, USB devices)dnl
 __devitem({-usb-}, usb*, Bus control devices used by usbd for attach/detach)dnl
 _mkdev({-usb-}, usb*, {-[ "$i" = "usb" ] && u= || u=$U
-	M usb$u c major_usb_c $U 660-})dnl
+	M usb$u c major_usb_c $U 640-})dnl
 __devitem(uhid, uhid*, Generic HID devices)dnl
-_mcdev({-uhid-}, uhid*, {-uhid-}, {-major_uhid_c-}, 660)dnl
+_mcdev({-uhid-}, uhid*, {-uhid-}, {-major_uhid_c-}, 600)dnl
+__devitem(fido, fido, fido/* nodes, fido)dnl
+_mkdev(fido, fido, {-RMlist[${#RMlist[*]}]=";mkdir -p fido;rm -f" n=0
+	while [ $n -lt 4 ];do M fido/$n c major_fido_c $n 666;n=Add($n, 1);done
+	MKlist[${#MKlist[*]}]=";chmod 555 fido"-})dnl
 __devitem(ulpt, ulpt*, Printer devices)dnl
-_mcdev({-ulpt-}, ulpt*, {-ulpt-}, {-major_ulpt_c-}, 660)dnl
+_mcdev({-ulpt-}, ulpt*, {-ulpt-}, {-major_ulpt_c-}, 600)dnl
 __devitem(ttyU, ttyU*, USB serial ports,ucom)dnl
 _mkdev({-ttyU-}, {-ttyU[0-9a-zA-Z]-}, {-U=${i#ttyU*}
 	o=$(alph2d $U)
@@ -369,7 +376,7 @@ __devitem(ugen, ugen*, Generic USB devices)dnl
 _mkdev(ugen, ugen*, {-n=Mult($U, 16)
 	for j in 0{0,1,2,3,4,5,6,7,8,9} 1{0,1,2,3,4,5}
 	do
-		M ugen$U.$j c major_ugen_c Add($n, 10#$j) 660
+		M ugen$U.$j c major_ugen_c Add($n, 10#$j) 600
 	done-})dnl
 __devtitle(call, Call units)dnl
 __devtitle(term, Terminal ports)dnl
@@ -418,10 +425,8 @@ _mkdev(acpi, acpi*, {-M acpi	c major_acpi_c 0 644-})dnl
 __devitem(pctr, pctr*, PC Performance Tuning Register access device)dnl
 _mkdev(pctr, pctr, {-M pctr c major_pctr_c 0 644-})dnl
 __devitem(au, audio*, Audio devices,audio)dnl
-_mkdev(au, audio*, {-M audio$U	c major_au_c $U
-	M mixer$U	c major_au_c Add($U, 16)
-	M audioctl$U	c major_au_c Add($U, 192)
-	MKlist[${#MKlist[*]}]=";[ -e mixer ] || ln -s mixer$U mixer"-})dnl
+_mkdev(au, audio*, {-M audio$U	c major_au_c $U 660 _sndiop
+	M audioctl$U	c major_au_c Add($U, 192) 660 _sndiop-})dnl
 __devitem(vi, video*, Video V4L2 devices,video)dnl
 _mkdev(vi, video*, {-M video$U  c major_vi_c $U 600
 	MKlist[${#MKlist[*]}]=";[ -e video ] || ln -s video$U video"-})dnl
@@ -497,11 +502,13 @@ _mkdev(bpp, {-bpp*-}, {-M bpp$U c major_bpp_c $U 600-}, 600)dnl
 __devitem(vscsi, vscsi*, Virtual SCSI controller, vscsi 4)dnl
 _mcdev(vscsi, vscsi*, vscsi, {-major_vscsi_c-}, 600)dnl
 __devitem(rmidi, rmidi*, Raw MIDI devices,midi)dnl
-_mcdev(rmidi, rmidi*, rmidi, {-major_rmidi_c-}, 666)dnl
+_mcdev(rmidi, rmidi*, rmidi, {-major_rmidi_c-}, 660 _sndiop)dnl
 __devitem(diskmap, diskmap, Disk mapper, diskmap)dnl
 _mkdev(diskmap, diskmap, {-M diskmap c major_diskmap_c 0 640 operator-})dnl
 __devitem(pppx, pppx*, PPP Multiplexer, pppx 4)dnl
 _mcdev(pppx, pppx*, pppx, {-major_pppx_c-}, 600)dnl
+__devitem(pppac, pppac*, PPP Access Concentrator, pppac 4)dnl
+_mcdev(pppac, pppac*, pppac, {-major_pppac_c-}, 600)dnl
 __devtitle(plat, Platform-specific devices)dnl
 __devitem(bktr, bktr*, Video frame grabbers)dnl
 _mcdev(bktr, bktr*, bktr, {-major_bktr_c-}, 644)dnl
@@ -511,8 +518,6 @@ __devitem(pci, pci*, PCI bus devices)dnl
 _mkdev(pci, pci*, {-M pci$U	c major_pci_c $U 600
 	MKlist[${#MKlist[*]}]=";[ -h pci ] || ln -sf pci0 pci"-})dnl
 __devitem(pdc, pdc, PDC device)dnl
-__devitem(gpr, gpr*, GPR400 smartcard reader)dnl
-_mcdev(gpr, gpr*, gpr, {-major_gpr_c-})dnl
 __devitem(hotplug, hotplug, devices hot plugging)dnl
 _mkdev(hotplug, hotplug, {-M hotplug c major_hotplug_c $U 400-})dnl
 __devitem(ipmi, ipmi*, IPMI BMC access)dnl
@@ -526,3 +531,7 @@ _mkdev(pvbus, {-pvbus*-}, {-M pvbus$U c major_pvbus_c $U 640-}, 640)dnl
 _mkdev(local, local, {-test -s $T.local && sh $T.local-})dnl
 __devitem(kcov, kcov, Kernel code coverage tracing)dnl
 _mkdev(kcov, kcov, {-M kcov c major_kcov_c 0 600-})dnl
+__devitem(dt, dt, Dynamic Tracer)dnl
+_mkdev(dt, dt, {-M dt c major_dt_c 0 600-})dnl
+__devitem(kstat, kstat, Kernel Statistics)dnl
+_mkdev(kstat, kstat, {-M kstat c major_kstat_c 0 640-})dnl

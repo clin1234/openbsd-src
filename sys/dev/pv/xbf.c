@@ -1,4 +1,4 @@
-/*	$OpenBSD: xbf.c,v 1.32 2017/07/17 10:30:03 mikeb Exp $	*/
+/*	$OpenBSD: xbf.c,v 1.39 2020/06/27 14:29:45 krw Exp $	*/
 
 /*
  * Copyright (c) 2016, 2017 Mike Belopuhov
@@ -201,7 +201,6 @@ struct xbf_softc {
 	struct mutex		 sc_ccb_sqlck;
 
 	struct scsi_iopool	 sc_iopool;
-	struct scsi_adapter	 sc_switch;
 	struct scsi_link         sc_link;
 	struct device		*sc_scsibus;
 };
@@ -228,7 +227,10 @@ void	xbf_scsi_cmd(struct scsi_xfer *);
 int	xbf_submit_cmd(struct scsi_xfer *);
 int	xbf_poll_cmd(struct scsi_xfer *);
 void	xbf_complete_cmd(struct xbf_softc *, struct xbf_ccb_queue *, int);
-int	xbf_dev_probe(struct scsi_link *);
+
+struct scsi_adapter xbf_switch = {
+	xbf_scsi_cmd, NULL, NULL, NULL, NULL
+};
 
 void	xbf_scsi_inq(struct scsi_xfer *);
 void	xbf_scsi_inquiry(struct scsi_xfer *);
@@ -298,19 +300,15 @@ xbf_attach(struct device *parent, struct device *self, void *aux)
 		goto error;
 	}
 
-	sc->sc_switch.scsi_cmd = xbf_scsi_cmd;
-	sc->sc_switch.scsi_minphys = scsi_minphys;
-	sc->sc_switch.dev_probe = xbf_dev_probe;
-
-	sc->sc_link.adapter = &sc->sc_switch;
+	sc->sc_link.adapter = &xbf_switch;
 	sc->sc_link.adapter_softc = self;
-	sc->sc_link.adapter_buswidth = 2;
+	/* Only valid target/lun is 0/0. */
+	sc->sc_link.adapter_buswidth = 1;
 	sc->sc_link.luns = 1;
-	sc->sc_link.adapter_target = 2;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.openings = sc->sc_nccb;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 	sc->sc_scsibus = config_found(self, &saa, scsiprint);
 
@@ -738,7 +736,7 @@ xbf_poll_cmd(struct scsi_xfer *xs)
 		if (ISSET(xs->flags, SCSI_NOSLEEP))
 			delay(10);
 		else
-			tsleep(xs, PRIBIO, "xbfpoll", 1);
+			tsleep_nsec(xs, PRIBIO, "xbfpoll", USEC_TO_NSEC(10));
 		xbf_intr(xs->sc_link->adapter_softc);
 	} while(--timo > 0);
 
@@ -898,15 +896,6 @@ xbf_scsi_done(struct scsi_xfer *xs, int error)
 	s = splbio();
 	scsi_done(xs);
 	splx(s);
-}
-
-int
-xbf_dev_probe(struct scsi_link *link)
-{
-	if (link->target == 0)
-		return (0);
-
-	return (ENODEV);
 }
 
 int

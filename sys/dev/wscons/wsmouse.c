@@ -1,4 +1,4 @@
-/* $OpenBSD: wsmouse.c,v 1.52 2019/03/24 18:04:02 bru Exp $ */
+/* $OpenBSD: wsmouse.c,v 1.65 2020/05/29 04:42:25 deraadt Exp $ */
 /* $NetBSD: wsmouse.c,v 1.35 2005/02/27 00:27:52 perry Exp $ */
 
 /*
@@ -111,7 +111,6 @@
 #include <dev/wscons/wsmousevar.h>
 #include <dev/wscons/wseventvar.h>
 #include <dev/wscons/wsmouseinput.h>
-#include <dev/rndvar.h>
 
 #include "wsmux.h"
 #include "wsdisplay.h"
@@ -121,11 +120,9 @@
 
 #if defined(WSMUX_DEBUG) && NWSMUX > 0
 #define	DPRINTF(x)	if (wsmuxdebug) printf x
-#define	DPRINTFN(n,x)	if (wsmuxdebug > (n)) printf x
 extern int wsmuxdebug;
 #else
 #define	DPRINTF(x)
-#define	DPRINTFN(n,x)
 #endif
 
 struct wsmouse_softc {
@@ -145,7 +142,7 @@ void	wsmouse_attach(struct device *, struct device *, void *);
 int	wsmouse_detach(struct device *, int);
 int	wsmouse_activate(struct device *, int);
 
-int	wsmouse_do_ioctl(struct wsmouse_softc *, u_long, caddr_t, 
+int	wsmouse_do_ioctl(struct wsmouse_softc *, u_long, caddr_t,
 			      int, struct proc *);
 
 #if NWSMUX > 0
@@ -153,7 +150,7 @@ int	wsmouse_mux_open(struct wsevsrc *, struct wseventvar *);
 int	wsmouse_mux_close(struct wsevsrc *);
 #endif
 
-int	wsmousedoioctl(struct device *, u_long, caddr_t, int, 
+int	wsmousedoioctl(struct device *, u_long, caddr_t, int,
 			    struct proc *);
 int	wsmousedoopen(struct wsmouse_softc *, struct wseventvar *);
 
@@ -258,7 +255,7 @@ wsmouse_detach(struct device *self, int flags)
 #if NWSMUX > 0
 	/* Tell parent mux we're leaving. */
 	if (sc->sc_base.me_parent != NULL) {
-		DPRINTF(("wsmouse_detach:\n"));
+		DPRINTF(("%s\n", __func__));
 		wsmux_detach_sc(&sc->sc_base);
 	}
 #endif
@@ -273,7 +270,7 @@ wsmouse_detach(struct device *self, int flags)
 				evar->put = 0;
 			WSEVENT_WAKEUP(evar);
 			/* Wait for processes to go away. */
-			if (tsleep(sc, PZERO, "wsmdet", hz * 60))
+			if (tsleep_nsec(sc, PZERO, "wsmdet", SEC_TO_NSEC(60)))
 				printf("wsmouse_detach: %s didn't detach\n",
 				       sc->sc_base.me_dv.dv_xname);
 		}
@@ -307,8 +304,8 @@ wsmouseopen(dev_t dev, int flags, int mode, struct proc *p)
 		return (ENXIO);
 
 #if NWSMUX > 0
-	DPRINTF(("wsmouseopen: %s mux=%p p=%p\n", sc->sc_base.me_dv.dv_xname,
-		 sc->sc_base.me_parent, p));
+	DPRINTF(("%s: %s mux=%p\n", __func__, sc->sc_base.me_dv.dv_xname,
+		 sc->sc_base.me_parent));
 #endif
 
 	if (sc->sc_dying)
@@ -321,7 +318,7 @@ wsmouseopen(dev_t dev, int flags, int mode, struct proc *p)
 #if NWSMUX > 0
 	if (sc->sc_base.me_parent != NULL) {
 		/* Grab the mouse out of the greedy hands of the mux. */
-		DPRINTF(("wsmouseopen: detach\n"));
+		DPRINTF(("%s: detach\n", __func__));
 		wsmux_detach_sc(&sc->sc_base);
 	}
 #endif
@@ -330,15 +327,12 @@ wsmouseopen(dev_t dev, int flags, int mode, struct proc *p)
 		return (EBUSY);
 
 	evar = &sc->sc_base.me_evar;
-	wsevent_init(evar);
+	if (wsevent_init(evar))
+		return (EBUSY);
 
 	error = wsmousedoopen(sc, evar);
-	if (error) {
-		DPRINTF(("wsmouseopen: %s open failed\n",
-			 sc->sc_base.me_dv.dv_xname));
-		sc->sc_base.me_evp = NULL;
+	if (error)
 		wsevent_fini(evar);
-	}
 	return (error);
 }
 
@@ -350,11 +344,9 @@ wsmouseclose(dev_t dev, int flags, int mode, struct proc *p)
 	struct wseventvar *evar = sc->sc_base.me_evp;
 
 	if ((flags & (FREAD | FWRITE)) == FWRITE)
-		return (0);			/* see wsmouseopen() */
-
-	if (evar == NULL)
-		/* not open for read */
+		/* Not open for read */
 		return (0);
+
 	sc->sc_base.me_evp = NULL;
 	(*sc->sc_accessops->disable)(sc->sc_accesscookie);
 	wsevent_fini(evar);
@@ -363,7 +355,7 @@ wsmouseclose(dev_t dev, int flags, int mode, struct proc *p)
 	if (sc->sc_base.me_parent == NULL) {
 		int mux, error;
 
-		DPRINTF(("wsmouseclose: attach\n"));
+		DPRINTF(("%s: attach\n", __func__));
 		mux = sc->sc_base.me_dv.dv_cfdata->wsmousedevcf_mux;
 		if (mux >= 0) {
 			error = wsmux_attach_sc(wsmux_getmux(mux), &sc->sc_base);
@@ -380,12 +372,20 @@ wsmouseclose(dev_t dev, int flags, int mode, struct proc *p)
 int
 wsmousedoopen(struct wsmouse_softc *sc, struct wseventvar *evp)
 {
+	int error;
+
+	/* The device could already be attached to a mux. */
+	if (sc->sc_base.me_evp != NULL)
+		return (EBUSY);
 	sc->sc_base.me_evp = evp;
 
 	wsmouse_input_reset(&sc->sc_input);
 
 	/* enable the device, and punt if that's not possible */
-	return (*sc->sc_accessops->enable)(sc->sc_accesscookie);
+	error = (*sc->sc_accessops->enable)(sc->sc_accesscookie);
+	if (error)
+		sc->sc_base.me_evp = NULL;
+	return (error);
 }
 
 int
@@ -486,6 +486,7 @@ wsmouse_do_ioctl(struct wsmouse_softc *sc, u_long cmd, caddr_t data, int flag,
 
 	switch (cmd) {
 	case FIOASYNC:
+	case FIOSETOWN:
 	case TIOCSPGRP:
 		if ((flag & FWRITE) == 0)
 			return (EACCES);
@@ -501,20 +502,20 @@ wsmouse_do_ioctl(struct wsmouse_softc *sc, u_long cmd, caddr_t data, int flag,
 		sc->sc_base.me_evp->async = *(int *)data != 0;
 		return (0);
 
+	case FIOGETOWN:
 	case TIOCGPGRP:
 		evar = sc->sc_base.me_evp;
 		if (evar == NULL)
 			return (EINVAL);
-		*(int *)data = -sigio_getown(&evar->sigio);
+		sigio_getown(&evar->sigio, cmd, data);
 		return (0);
 
+	case FIOSETOWN:
 	case TIOCSPGRP:
-		if (*(int *)data < 0)
-			return (EINVAL);
 		evar = sc->sc_base.me_evp;
 		if (evar == NULL)
 			return (EINVAL);
-		return (sigio_setown(&evar->sigio, -*(int *)data));
+		return (sigio_setown(&evar->sigio, cmd, data));
 
 	case WSMOUSEIO_GETPARAMS:
 	case WSMOUSEIO_SETPARAMS:
@@ -558,10 +559,7 @@ wsmouse_mux_open(struct wsevsrc *me, struct wseventvar *evp)
 {
 	struct wsmouse_softc *sc = (struct wsmouse_softc *)me;
 
-	if (sc->sc_base.me_evp != NULL)
-		return (EBUSY);
-
-	return wsmousedoopen(sc, evp);
+	return (wsmousedoopen(sc, evp));
 }
 
 int
@@ -772,7 +770,7 @@ wsmouse_set(struct device *sc, enum wsmouseval type, int value, int aux)
 		wsmouse_position(sc, value, input->motion.pos.y);
 		return;
 	case WSMOUSE_REL_Y:
-		value += input->motion.pos.y;
+		value += input->motion.pos.y; /* fall through */
 	case WSMOUSE_ABS_Y:
 		wsmouse_position(sc, input->motion.pos.x, value);
 		return;
@@ -798,7 +796,7 @@ wsmouse_set(struct device *sc, enum wsmouseval type, int value, int aux)
 		wsmouse_mtstate(sc, aux, value, mts->pos.y, mts->pressure);
 		return;
 	case WSMOUSE_MT_REL_Y:
-		value += mts->pos.y;
+		value += mts->pos.y; /* fall through */
 	case WSMOUSE_MT_ABS_Y:
 		wsmouse_mtstate(sc, aux, mts->pos.x, value, mts->pressure);
 		return;
@@ -1021,7 +1019,7 @@ wsmouse_motion_sync(struct wsmouseinput *input, struct evq_access *evq)
 	struct motion_state *motion = &input->motion;
 	struct axis_filter *h = &input->filter.h;
 	struct axis_filter *v = &input->filter.v;
-	int x, y, dx, dy;
+	int x, y, dx, dy, dz, dw;
 
 	if (motion->sync & SYNC_DELTAS) {
 		dx = h->inv ? -motion->dx : motion->dx;
@@ -1035,16 +1033,20 @@ wsmouse_motion_sync(struct wsmouseinput *input, struct evq_access *evq)
 		if (dy)
 			wsmouse_evq_put(evq, DELTA_Y_EV(input), dy);
 		if (motion->dz) {
+			dz = (input->flags & REVERSE_SCROLLING)
+			    ? -motion->dz : motion->dz;
 			if (IS_TOUCHPAD(input))
-				wsmouse_evq_put(evq, VSCROLL_EV, motion->dz);
+				wsmouse_evq_put(evq, VSCROLL_EV, dz);
 			else
-				wsmouse_evq_put(evq, DELTA_Z_EV, motion->dz);
+				wsmouse_evq_put(evq, DELTA_Z_EV, dz);
 		}
 		if (motion->dw) {
+			dw = (input->flags & REVERSE_SCROLLING)
+			    ? -motion->dw : motion->dw;
 			if (IS_TOUCHPAD(input))
-				wsmouse_evq_put(evq, HSCROLL_EV, motion->dw);
+				wsmouse_evq_put(evq, HSCROLL_EV, dw);
 			else
-				wsmouse_evq_put(evq, DELTA_W_EV, motion->dw);
+				wsmouse_evq_put(evq, DELTA_W_EV, dw);
 		}
 	}
 	if (motion->sync & SYNC_POSITION) {
@@ -1474,6 +1476,9 @@ wsmouse_get_params(struct device *sc,
 		case WSMOUSECFG_Y_INV:
 			params[i].value = input->filter.v.inv;
 			break;
+		case WSMOUSECFG_REVERSE_SCROLLING:
+			params[i].value = !!(input->flags & REVERSE_SCROLLING);
+			break;
 		case WSMOUSECFG_DX_MAX:
 			params[i].value = input->filter.h.dmax;
 			break;
@@ -1563,6 +1568,12 @@ wsmouse_set_params(struct device *sc,
 			break;
 		case WSMOUSECFG_Y_INV:
 			input->filter.v.inv = val;
+			break;
+		case WSMOUSECFG_REVERSE_SCROLLING:
+			if (val)
+				input->flags |= REVERSE_SCROLLING;
+			else
+				input->flags &= ~REVERSE_SCROLLING;
 			break;
 		case WSMOUSECFG_DX_MAX:
 			input->filter.h.dmax = val;

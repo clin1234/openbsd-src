@@ -1,10 +1,10 @@
-/*	$OpenBSD: miidevs.h,v 1.130 2018/04/09 21:34:35 kettenis Exp $	*/
+/*	$OpenBSD: miidevs.h,v 1.132 2020/04/14 20:58:12 kettenis Exp $	*/
 
 /*
  * THIS FILE AUTOMATICALLY GENERATED.  DO NOT EDIT.
  *
  * generated from:
- *	OpenBSD: miidevs,v 1.127 2018/04/09 21:33:27 kettenis Exp 
+ *	OpenBSD: miidevs,v 1.129 2020/04/14 20:57:22 kettenis Exp 
  */
 /* $NetBSD: miidevs,v 1.3 1998/11/05 03:43:43 thorpej Exp $ */
 
@@ -103,6 +103,7 @@
 /* Don't know what's going on here. */
 #define	MII_OUI_xxBROADCOM2	0x0050ef	/* Broadcom */
 #define	MII_OUI_xxBROADCOM3	0x00d897	/* Broadcom */
+#define	MII_OUI_xxBROADCOM4	0x180361	/* Broadcom */
 #define	MII_OUI_xxDAVICOM	0x006040	/* Davicom */
 
 /* This is the OUI of the gigE PHY in the Realtek 8169S/8110S chips */
@@ -218,6 +219,8 @@
 #define	MII_STR_xxBROADCOM3_BCM57765	"BCM57765 10/100/1000baseT PHY"
 #define	MII_MODEL_xxBROADCOM3_BCM5720C	0x0036
 #define	MII_STR_xxBROADCOM3_BCM5720C	"BCM5720C 10/100/1000baseT PHY"
+#define	MII_MODEL_xxBROADCOM4_BCM54210E	0x000a
+#define	MII_STR_xxBROADCOM4_BCM54210E	"BCM54210E 10/100/1000baseT PHY"
 #define	MII_MODEL_BROADCOM_BCM5400	0x0004
 #define	MII_STR_BROADCOM_BCM5400	"BCM5400 1000baseT PHY"
 #define	MII_MODEL_BROADCOM_BCM5401	0x0005
@@ -382,6 +385,8 @@
 #define	MII_STR_MARVELL_E3016	"88E3016 10/100 PHY"
 #define	MII_MODEL_MARVELL_PHYG65G	0x0027
 #define	MII_STR_MARVELL_PHYG65G	"PHYG65G Gigabit PHY"
+#define	MII_MODEL_MARVELL_E1545	0x002a
+#define	MII_STR_MARVELL_E1545	"88E1545 Quad 10/100/1000 PHY"
 
 /* Micrel PHYs */
 #define	MII_MODEL_MICREL_KSZ9021	0x0021

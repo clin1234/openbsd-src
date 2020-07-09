@@ -1,4 +1,4 @@
-/*	$OpenBSD: ar5008.c,v 1.49 2019/02/27 04:10:35 stsp Exp $	*/
+/*	$OpenBSD: ar5008.c,v 1.60 2020/07/06 11:28:51 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2009 Damien Bergamini <damien.bergamini@free.fr>
@@ -77,11 +77,14 @@ void	ar5008_rx_free(struct athn_softc *);
 void	ar5008_rx_enable(struct athn_softc *);
 void	ar5008_rx_radiotap(struct athn_softc *, struct mbuf *,
 	    struct ar_rx_desc *);
+int	ar5008_ccmp_decap(struct athn_softc *, struct mbuf *,
+	    struct ieee80211_node *);
 void	ar5008_rx_intr(struct athn_softc *);
 int	ar5008_tx_process(struct athn_softc *, int);
 void	ar5008_tx_intr(struct athn_softc *);
 int	ar5008_swba_intr(struct athn_softc *);
 int	ar5008_intr(struct athn_softc *);
+int	ar5008_ccmp_encap(struct mbuf *, u_int, struct ieee80211_key *);
 int	ar5008_tx(struct athn_softc *, struct mbuf *, struct ieee80211_node *,
 	    int);
 void	ar5008_set_rf_mode(struct athn_softc *, struct ieee80211_channel *);
@@ -254,6 +257,8 @@ ar5008_attach(struct athn_softc *sc)
 	kc_entries_log = MS(base->deviceCap, AR_EEP_DEVCAP_KC_ENTRIES);
 	sc->kc_entries = (kc_entries_log != 0) ?
 	    1 << kc_entries_log : AR_KEYTABLE_SIZE;
+	if (sc->kc_entries > AR_KEYTABLE_SIZE)
+		sc->kc_entries = AR_KEYTABLE_SIZE;
 
 	sc->txchainmask = base->txMask;
 	if (sc->mac_ver == AR_SREV_VERSION_5416_PCI &&
@@ -726,7 +731,6 @@ ar5008_rx_radiotap(struct athn_softc *sc, struct mbuf *m,
 
 	struct athn_rx_radiotap_header *tap = &sc->sc_rxtap;
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct mbuf mb;
 	uint64_t tsf;
 	uint32_t tstamp;
 	uint8_t rate;
@@ -778,18 +782,79 @@ ar5008_rx_radiotap(struct athn_softc *sc, struct mbuf *m,
 		case 0xc: tap->wr_rate = 108; break;
 		}
 	}
-	mb.m_data = (caddr_t)tap;
-	mb.m_len = sc->sc_rxtap_len;
-	mb.m_next = m;
-	mb.m_nextpkt = NULL;
-	mb.m_type = 0;
-	mb.m_flags = 0;
-	bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_IN);
+	bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_rxtap_len, m, BPF_DIRECTION_IN);
 }
 #endif
 
+int
+ar5008_ccmp_decap(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
+{
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_key *k;
+	struct ieee80211_frame *wh;
+	struct ieee80211_rx_ba *ba;
+	uint64_t pn, *prsc;
+	u_int8_t *ivp;
+	uint8_t tid;
+	int hdrlen, hasqos;
+	uintptr_t entry;
+
+	wh = mtod(m, struct ieee80211_frame *);
+	hdrlen = ieee80211_get_hdrlen(wh);
+	ivp = mtod(m, u_int8_t *) + hdrlen;
+
+	/* find key for decryption */
+	k = ieee80211_get_rxkey(ic, m, ni);
+	if (k == NULL || k->k_cipher != IEEE80211_CIPHER_CCMP)
+		return 1;
+
+	/* Sanity checks to ensure this is really a key we installed. */
+	entry = (uintptr_t)k->k_priv;
+	if (k->k_flags & IEEE80211_KEY_GROUP) {
+		if (k->k_id >= IEEE80211_WEP_NKID ||
+		    entry != k->k_id)
+			return 1;
+	} else {
+#ifndef IEEE80211_STA_ONLY
+		if (ic->ic_opmode == IEEE80211_M_HOSTAP) {
+			if (entry != IEEE80211_WEP_NKID +
+			    IEEE80211_AID(ni->ni_associd))
+				return 1;
+		} else
+#endif
+			if (entry != IEEE80211_WEP_NKID)
+				return 1;
+	}
+
+	/* Check that ExtIV bit is set. */
+	if (!(ivp[3] & IEEE80211_WEP_EXTIV))
+		return 1;
+
+	hasqos = ieee80211_has_qos(wh);
+	tid = hasqos ? ieee80211_get_qos(wh) & IEEE80211_QOS_TID : 0;
+	ba = hasqos ? &ni->ni_rx_ba[tid] : NULL;
+	prsc = &k->k_rsc[tid];
+
+	/* Extract the 48-bit PN from the CCMP header. */
+	pn = (uint64_t)ivp[0]       |
+	     (uint64_t)ivp[1] <<  8 |
+	     (uint64_t)ivp[4] << 16 |
+	     (uint64_t)ivp[5] << 24 |
+	     (uint64_t)ivp[6] << 32 |
+	     (uint64_t)ivp[7] << 40;
+	if (pn <= *prsc) {
+		ic->ic_stats.is_ccmp_replays++;
+		return 1;
+	}
+	/* Last seen packet number is updated in ieee80211_inputm(). */
+
+	/* Strip MIC. IV will be stripped by ieee80211_inputm(). */
+	m_adj(m, -IEEE80211_CCMP_MICLEN);
+	return 0;
+}
+
 static __inline int
-ar5008_rx_process(struct athn_softc *sc)
+ar5008_rx_process(struct athn_softc *sc, struct mbuf_list *ml)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ifnet *ifp = &ic->ic_if;
@@ -844,9 +909,11 @@ ar5008_rx_process(struct athn_softc *sc)
 		else if (ds->ds_status8 & AR_RXS8_PHY_ERR)
 			DPRINTFN(6, ("PHY error=0x%x\n",
 			    MS(ds->ds_status8, AR_RXS8_PHY_ERR_CODE)));
-		else if (ds->ds_status8 & AR_RXS8_DECRYPT_CRC_ERR)
+		else if (ds->ds_status8 & (AR_RXS8_DECRYPT_CRC_ERR |
+		    AR_RXS8_KEY_MISS | AR_RXS8_DECRYPT_BUSY_ERR)) {
 			DPRINTFN(6, ("Decryption CRC error\n"));
-		else if (ds->ds_status8 & AR_RXS8_MICHAEL_ERR) {
+			ic->ic_stats.is_ccmp_dec_errs++;
+		} else if (ds->ds_status8 & AR_RXS8_MICHAEL_ERR) {
 			DPRINTFN(2, ("Michael MIC failure\n"));
 			/* Report Michael MIC failures to net80211. */
 			ic->ic_stats.is_rx_locmicfail++;
@@ -918,6 +985,7 @@ ar5008_rx_process(struct athn_softc *sc)
 			memmove((caddr_t)wh + 2, wh, hdrlen);
 			m_adj(m, 2);
 		}
+		wh = mtod(m, struct ieee80211_frame *);
 	}
 #if NBPFILTER > 0
 	if (__predict_false(sc->sc_drvbpf != NULL))
@@ -931,7 +999,22 @@ ar5008_rx_process(struct athn_softc *sc)
 	rxi.rxi_rssi = MS(ds->ds_status4, AR_RXS4_RSSI_COMBINED);
 	rxi.rxi_rssi += AR_DEFAULT_NOISE_FLOOR;
 	rxi.rxi_tstamp = ds->ds_status2;
-	ieee80211_input(ifp, m, ni, &rxi);
+	if (!(wh->i_fc[0] & IEEE80211_FC0_TYPE_CTL) &&
+	    (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) &&
+	    (ic->ic_flags & IEEE80211_F_RSNON) &&
+	    (ni->ni_flags & IEEE80211_NODE_RXPROT) &&
+	    (ni->ni_rsncipher == IEEE80211_CIPHER_CCMP ||
+	    (IEEE80211_IS_MULTICAST(wh->i_addr1) &&
+	    ic->ic_rsngroupcipher == IEEE80211_CIPHER_CCMP))) {
+		if (ar5008_ccmp_decap(sc, m, ni) != 0) {
+			ifp->if_ierrors++;
+			ieee80211_release_node(ic, ni);
+			m_freem(m);
+			goto skip;
+		}
+		rxi.rxi_flags |= IEEE80211_RXI_HWDEC;
+	}
+	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 
 	/* Node is no longer needed. */
 	ieee80211_release_node(ic, ni);
@@ -960,7 +1043,13 @@ ar5008_rx_process(struct athn_softc *sc)
 void
 ar5008_rx_intr(struct athn_softc *sc)
 {
-	while (ar5008_rx_process(sc) == 0);
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ifnet *ifp = &ic->ic_if;
+
+	while (ar5008_rx_process(sc, &ml) == 0);
+
+	if_input(ifp, &ml);
 }
 
 int
@@ -1289,6 +1378,33 @@ ar5008_intr(struct athn_softc *sc)
 }
 
 int
+ar5008_ccmp_encap(struct mbuf *m, u_int hdrlen, struct ieee80211_key *k)
+{
+	struct mbuf *n;
+	uint8_t *ivp;
+	int off;
+
+	/* Insert IV for CCMP hardware encryption. */
+	n = m_makespace(m, hdrlen, IEEE80211_CCMP_HDRLEN, &off);
+	if (n == NULL) {
+		m_freem(m);
+		return (ENOBUFS);
+	}
+	ivp = mtod(n, uint8_t *) + off;
+	k->k_tsc++;
+	ivp[0] = k->k_tsc;
+	ivp[1] = k->k_tsc >> 8;
+	ivp[2] = 0;
+	ivp[3] = k->k_id << 6 | IEEE80211_WEP_EXTIV;
+	ivp[4] = k->k_tsc >> 16;
+	ivp[5] = k->k_tsc >> 24;
+	ivp[6] = k->k_tsc >> 32;
+	ivp[7] = k->k_tsc >> 40;
+
+	return 0;
+}
+
+int
 ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
     int txflags)
 {
@@ -1300,7 +1416,6 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 	struct athn_txq *txq;
 	struct athn_tx_buf *bf;
 	struct athn_node *an = (void *)ni;
-	struct mbuf *m1;
 	uintptr_t entry;
 	uint16_t qos;
 	uint8_t txpower, type, encrtype, tid, ridx[4];
@@ -1332,8 +1447,15 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 
 	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
 		k = ieee80211_get_txkey(ic, wh, ni);
-		if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
-			return (ENOBUFS);
+		if (k->k_cipher == IEEE80211_CIPHER_CCMP) {
+			u_int hdrlen = ieee80211_get_hdrlen(wh);
+			if (ar5008_ccmp_encap(m, hdrlen, k) != 0)
+				return (ENOBUFS);
+		} else {
+			if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
+				return (ENOBUFS);
+			k = NULL; /* skip hardware crypto further below */
+		}
 		wh = mtod(m, struct ieee80211_frame *);
 	}
 
@@ -1369,6 +1491,11 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 		/* Use same fixed rate for all tries. */
 		ridx[0] = ridx[1] = ridx[2] = ridx[3] =
 		    sc->fixed_ridx;
+	} else if ((ni->ni_flags & IEEE80211_NODE_HT) &&
+	    ieee80211_mira_is_probing(&an->mn)) {
+		/* Use same fixed rate for all tries. */
+		ridx[0] = ridx[1] = ridx[2] = ridx[3] =
+		    ATHN_RIDX_MCS0 + ni->ni_txmcs;
 	} else {
 		/* Use fallback table of the node. */
 		int txrate;
@@ -1386,7 +1513,6 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 #if NBPFILTER > 0
 	if (__predict_false(sc->sc_drvbpf != NULL)) {
 		struct athn_tx_radiotap_header *tap = &sc->sc_txtap;
-		struct mbuf mb;
 
 		tap->wt_flags = 0;
 		/* Use initial transmit rate. */
@@ -1401,13 +1527,8 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 		    ridx[0] != ATHN_RIDX_CCK1 &&
 		    (ic->ic_flags & IEEE80211_F_SHPREAMBLE))
 			tap->wt_flags |= IEEE80211_RADIOTAP_F_SHORTPRE;
-		mb.m_data = (caddr_t)tap;
-		mb.m_len = sc->sc_txtap_len;
-		mb.m_next = m;
-		mb.m_nextpkt = NULL;
-		mb.m_type = 0;
-		mb.m_flags = 0;
-		bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_OUT);
+		bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_txtap_len, m,
+		    BPF_DIRECTION_OUT);
 	}
 #endif
 
@@ -1425,23 +1546,10 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 		 * DMA mapping requires too many DMA segments; linearize
 		 * mbuf in kernel virtual address space and retry.
 		 */
-		MGETHDR(m1, M_DONTWAIT, MT_DATA);
-		if (m1 == NULL) {
+		if (m_defrag(m, M_DONTWAIT) != 0) {
 			m_freem(m);
 			return (ENOBUFS);
 		}
-		if (m->m_pkthdr.len > MHLEN) {
-			MCLGET(m1, M_DONTWAIT);
-			if (!(m1->m_flags & M_EXT)) {
-				m_freem(m);
-				m_freem(m1);
-				return (ENOBUFS);
-			}
-		}
-		m_copydata(m, 0, m->m_pkthdr.len, mtod(m1, caddr_t));
-		m1->m_pkthdr.len = m1->m_len = m->m_pkthdr.len;
-		m_freem(m);
-		m = m1;
 
 		error = bus_dmamap_load_mbuf(sc->sc_dmat, bf->bf_map, m,
 		    BUS_DMA_NOWAIT | BUS_DMA_WRITE);
@@ -1477,28 +1585,13 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 	     IEEE80211_QOS_ACK_POLICY_NOACK))
 		ds->ds_ctl1 |= AR_TXC1_NO_ACK;
 
-	if (0 && k != NULL) {
-		/*
-		 * Map 802.11 cipher to hardware encryption type and
-		 * compute MIC+ICV overhead.
-		 */
-		switch (k->k_cipher) {
-		case IEEE80211_CIPHER_WEP40:
-		case IEEE80211_CIPHER_WEP104:
-			encrtype = AR_ENCR_TYPE_WEP;
-			totlen += 4;
-			break;
-		case IEEE80211_CIPHER_TKIP:
-			encrtype = AR_ENCR_TYPE_TKIP;
-			totlen += 12;
-			break;
-		case IEEE80211_CIPHER_CCMP:
+	if (k != NULL) {
+		/* Map 802.11 cipher to hardware encryption type. */
+		if (k->k_cipher == IEEE80211_CIPHER_CCMP) {
 			encrtype = AR_ENCR_TYPE_AES;
-			totlen += 8;
-			break;
-		default:
+			totlen += IEEE80211_CCMP_MICLEN;
+		} else
 			panic("unsupported cipher");
-		}
 		/*
 		 * NB: The key cache entry index is stored in the key
 		 * private field when the key is installed.
@@ -1550,12 +1643,11 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 		    ridx[i] != ATHN_RIDX_CCK1 &&
 		    (ic->ic_flags & IEEE80211_F_SHPREAMBLE))
 			series[i].hwrate |= 0x04;
-		series[i].dur = 0;
-	}
-	if (!(ds->ds_ctl1 & AR_TXC1_NO_ACK)) {
 		/* Compute duration for each series. */
-		for (i = 0; i < 4; i++) {
-			series[i].dur = athn_txtime(sc, IEEE80211_ACK_LEN,
+		series[i].dur = athn_txtime(sc, totlen, ridx[i], ic->ic_flags);
+		if (!(ds->ds_ctl1 & AR_TXC1_NO_ACK)) {
+			/* Account for ACK duration. */
+			series[i].dur += athn_txtime(sc, IEEE80211_ACK_LEN,
 			    athn_rates[ridx[i]].rspridx, ic->ic_flags);
 		}
 	}
@@ -1600,6 +1692,11 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 	if (ic->ic_flags & IEEE80211_F_CBW40)
 		ds->ds_ctl7 |= AR_TXC7_2040_0123;
 #endif
+
+	/* Set Tx power for series 1 - 3 */
+	ds->ds_ctl9 = SM(AR_TXC9_XMIT_POWER1, txpower);
+	ds->ds_ctl10 = SM(AR_TXC10_XMIT_POWER2, txpower);
+	ds->ds_ctl11 = SM(AR_TXC11_XMIT_POWER3, txpower);
 
 	if (ds->ds_ctl0 & (AR_TXC0_RTS_ENABLE | AR_TXC0_CTS_ENABLE)) {
 		uint8_t protridx, hwrate;

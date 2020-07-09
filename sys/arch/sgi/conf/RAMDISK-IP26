@@ -1,12 +1,10 @@
-#	$OpenBSD: RAMDISK-IP26,v 1.4 2015/11/02 20:14:36 miod Exp $
+#	$OpenBSD: RAMDISK-IP26,v 1.6 2020/04/06 02:10:33 visa Exp $
 #
 # THIS KERNEL IS FOR POWER INDIGO2 R8000 (IP26) SYSTEMS ONLY.
 
 machine		sgi mips64
 maxusers	4
 
-option		TIMEZONE=0
-option		DST=0
 option		SMALL_KERNEL
 option		NO_PROPOLICE
 option		BOOT_CONFIG
@@ -18,6 +16,7 @@ option		EISAVERBOSE
 option		PCIVERBOSE
 
 option		FFS
+option		FFS2
 option		CD9660
 option		NFSCLIENT
 option		INET6

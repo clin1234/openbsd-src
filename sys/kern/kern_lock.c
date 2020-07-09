@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_lock.c,v 1.69 2019/04/23 13:35:12 visa Exp $	*/
+/*	$OpenBSD: kern_lock.c,v 1.71 2020/03/05 09:28:31 claudio Exp $	*/
 
 /*
  * Copyright (c) 2017 Visa Hankala
@@ -118,7 +118,7 @@ __mp_lock_spin(struct __mp_lock *mpl, u_int me)
 
 #ifdef MP_LOCKDEBUG
 		if (--nticks <= 0) {
-			db_printf("%s: %p lock spun out", __func__, mpl);
+			db_printf("%s: %p lock spun out\n", __func__, mpl);
 			db_enter();
 			nticks = __mp_lock_spinout;
 		}
@@ -268,7 +268,7 @@ mtx_enter(struct mutex *mtx)
 
 #ifdef MP_LOCKDEBUG
 		if (--nticks == 0) {
-			db_printf("%s: %p lock spun out", __func__, mtx);
+			db_printf("%s: %p lock spun out\n", __func__, mtx);
 			db_enter();
 			nticks = __mp_lock_spinout;
 		}
@@ -321,6 +321,9 @@ mtx_enter(struct mutex *mtx)
 	if (panicstr || db_active)
 		return;
 
+	WITNESS_CHECKORDER(MUTEX_LOCK_OBJECT(mtx),
+	    LOP_EXCLUSIVE | LOP_NEWORDER, NULL);
+
 #ifdef DIAGNOSTIC
 	if (__predict_false(mtx->mtx_owner == ci))
 		panic("mtx %p: locking against myself", mtx);
@@ -334,6 +337,7 @@ mtx_enter(struct mutex *mtx)
 #ifdef DIAGNOSTIC
 	ci->ci_mutex_level++;
 #endif
+	WITNESS_LOCK(MUTEX_LOCK_OBJECT(mtx), LOP_EXCLUSIVE);
 }
 
 int

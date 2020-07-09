@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_vfsops.c,v 1.122 2018/07/02 20:56:22 bluhm Exp $	*/
+/*	$OpenBSD: nfs_vfsops.c,v 1.125 2020/01/10 10:33:35 bluhm Exp $	*/
 /*	$NetBSD: nfs_vfsops.c,v 1.46.4.1 1996/05/25 22:40:35 fvdl Exp $	*/
 
 /*
@@ -96,19 +96,19 @@ int	nfs_fhtovp(struct mount *, struct fid *, struct vnode **);
  * nfs vfs operations.
  */
 const struct vfsops nfs_vfsops = {
-	nfs_mount,
-	nfs_start,
-	nfs_unmount,
-	nfs_root,
-	nfs_quotactl,
-	nfs_statfs,
-	nfs_sync,
-	nfs_vget,
-	nfs_fhtovp,
-	nfs_vptofh,
-	nfs_vfs_init,
-	nfs_sysctl,
-	nfs_checkexp
+	.vfs_mount	= nfs_mount,
+	.vfs_start	= nfs_start,
+	.vfs_unmount	= nfs_unmount,
+	.vfs_root	= nfs_root,
+	.vfs_quotactl	= nfs_quotactl,
+	.vfs_statfs	= nfs_statfs,
+	.vfs_sync	= nfs_sync,
+	.vfs_vget	= nfs_vget,
+	.vfs_fhtovp	= nfs_fhtovp,
+	.vfs_vptofh	= nfs_vptofh,
+	.vfs_init	= nfs_vfs_init,
+	.vfs_sysctl	= nfs_sysctl,
+	.vfs_checkexp	= nfs_checkexp,
 };
 
 /*
@@ -522,8 +522,7 @@ nfs_decode_args(struct nfsmount *nmp, struct nfs_args *argp,
 		if (nmp->nm_sotype == SOCK_DGRAM)
 			while (nfs_connect(nmp, NULL)) {
 				printf("nfs_args: retrying connect\n");
-				(void) tsleep(&lbolt,
-					      PSOCK, "nfscon", 0);
+				tsleep_nsec(&lbolt, PSOCK, "nfscon", INFSLP);
 			}
 	}
 
@@ -805,7 +804,7 @@ nfs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred, struct pr
 	 * Force stale buffer cache information to be flushed.
 	 */
 loop:
-	LIST_FOREACH(vp, &mp->mnt_vnodelist, v_mntvnodes) {
+	TAILQ_FOREACH(vp, &mp->mnt_vnodelist, v_mntvnodes) {
 		/*
 		 * If the vnode that we are about to sync is no longer
 		 * associated with this mount point, start over.

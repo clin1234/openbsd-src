@@ -1,4 +1,4 @@
-/*	$OpenBSD: kernel.h,v 1.19 2019/03/10 21:16:15 cheloha Exp $	*/
+/*	$OpenBSD: kernel.h,v 1.23 2020/05/20 17:24:17 cheloha Exp $	*/
 /*	$NetBSD: kernel.h,v 1.11 1995/03/03 01:24:16 cgd Exp $	*/
 
 /*-
@@ -47,9 +47,10 @@ extern char domainname[MAXHOSTNAMELEN];
 extern int domainnamelen;
 
 /* 1.2 */
-extern struct timezone tz;			/* XXX */
+extern int utc_offset;		/* seconds east of UTC */
 
 extern int tick;		/* usec per tick (1000000 / hz) */
+extern int tick_nsec;		/* nsec per tick */
 extern int tickfix;		/* periodic tick adj. tick not integral */
 extern int tickfixinterval;	/* interval at which to apply adjustment */
 extern int tickadj;		/* "standard" clock skew, us./tick */
@@ -60,5 +61,3 @@ extern int profhz;		/* profiling clock's frequency */
 extern int lbolt;		/* once a second sleep address */
 extern int tickdelta;
 extern long timedelta;
-
-extern struct bintime naptime;	/* time spent suspended */

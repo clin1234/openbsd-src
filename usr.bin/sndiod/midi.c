@@ -1,4 +1,4 @@
-/*	$OpenBSD: midi.c,v 1.19 2019/05/10 04:45:47 ratchov Exp $	*/
+/*	$OpenBSD: midi.c,v 1.25 2020/06/12 15:40:18 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -32,6 +32,7 @@ void port_imsg(void *, unsigned char *, int);
 void port_omsg(void *, unsigned char *, int);
 void port_fill(void *, int);
 void port_exit(void *);
+void port_exitall(struct port *);
 
 struct midiops port_midiops = {
 	port_imsg,
@@ -91,6 +92,7 @@ midi_new(struct midiops *ops, void *arg, int mode)
 	ep->len = 0;
 	ep->idx = 0;
 	ep->st = 0;
+	ep->last_st = 0;
 	ep->txmask = 0;
 	ep->self = 1 << i;
 	ep->tickets = 0;
@@ -185,6 +187,25 @@ midi_tag(struct midi *ep, unsigned int tag)
 		t->rxmask |= ep->self;
 	if (ep->mode & MODE_MIDIIN)
 		t->txmask |= ep->self;
+}
+
+/*
+ * return the list of tags
+ */
+unsigned int
+midi_tags(struct midi *ep)
+{
+	int i;
+	struct midithru *t;
+	unsigned int tags;
+
+	tags = 0;
+	for (i = 0; i < MIDITHRU_NMAX; i++) {
+		t = midithru + i;
+		if ((t->txmask | t->rxmask) & ep->self)
+			tags |= 1 << i;
+	}
+	return tags;
 }
 
 /*
@@ -304,7 +325,18 @@ midi_in(struct midi *iep, unsigned char *idata, int icount)
 				iep->msg[iep->idx++] = c;
 				iep->ops->imsg(iep->arg, iep->msg, iep->idx);
 			}
-			iep->st = 0;
+
+			/*
+			 * There are bogus MIDI sources that keep
+			 * state across sysex; Linux virmidi ports fed
+			 * by the sequencer is an example. We
+			 * workaround this by saving the current
+			 * status and restoring it at the end of the
+			 * sysex.
+			 */
+			iep->st = iep->last_st;
+			if (iep->st)
+				iep->len = voice_len[(iep->st >> 4) & 7];
 			iep->idx = 0;
 		} else if (c >= 0xf0) {
 			iep->msg[0] = c;
@@ -314,7 +346,7 @@ midi_in(struct midi *iep, unsigned char *idata, int icount)
 		} else if (c >= 0x80) {
 			iep->msg[0] = c;
 			iep->len = voice_len[(c >> 4) & 7];
-			iep->st = c;
+			iep->last_st = iep->st = c;
 			iep->idx = 1;
 		} else if (iep->st) {
 			if (iep->idx == 0 && iep->st != SYSEX_START)
@@ -437,7 +469,8 @@ port_new(char *path, unsigned int mode, int hold)
 	struct port *c;
 
 	c = xmalloc(sizeof(struct port));
-	c->path = xstrdup(path);
+	c->path_list = NULL;
+	namelist_add(&c->path_list, path);
 	c->state = PORT_CFG;
 	c->hold = hold;
 	c->midi = midi_new(&port_midiops, c, mode);
@@ -467,7 +500,7 @@ port_del(struct port *c)
 #endif
 	}
 	*p = c->next;
-	xfree(c->path);
+	namelist_clear(&c->path_list);
 	xfree(c);
 }
 
@@ -520,7 +553,7 @@ port_open(struct port *c)
 {
 	if (!port_mio_open(c)) {
 		if (log_level >= 1) {
-			log_puts(c->path);
+			port_log(c);
 			log_puts(": failed to open midi port\n");
 		}
 		return 0;
@@ -529,11 +562,26 @@ port_open(struct port *c)
 	return 1;
 }
 
-int
-port_close(struct port *c)
+void
+port_abort(struct port *c)
 {
 	int i;
 	struct midi *ep;
+
+	for (i = 0; i < MIDI_NEP; i++) {
+		ep = midi_ep + i;
+		if ((ep->txmask & c->midi->self) ||
+		    (c->midi->txmask & ep->self))
+			ep->ops->exit(ep->arg);
+	}
+
+	if (c->state != PORT_CFG)
+		port_close(c);
+}
+
+int
+port_close(struct port *c)
+{
 #ifdef DEBUG
 	if (c->state == PORT_CFG) {
 		port_log(c);
@@ -543,13 +591,6 @@ port_close(struct port *c)
 #endif
 	c->state = PORT_CFG;
 	port_mio_close(c);
-
-	for (i = 0; i < MIDI_NEP; i++) {
-		ep = midi_ep + i;
-		if ((ep->txmask & c->midi->self) ||
-		    (c->midi->txmask & ep->self))
-			ep->ops->exit(ep->arg);
-	}
 	return 1;
 }
 
@@ -584,4 +625,16 @@ port_done(struct port *c)
 {
 	if (c->state == PORT_INIT)
 		port_drain(c);
+}
+
+int
+port_reopen(struct port *p)
+{
+	if (p->state == PORT_CFG)
+		return 1;
+
+	if (!port_mio_reopen(p))
+		return 0;
+
+	return 1;
 }

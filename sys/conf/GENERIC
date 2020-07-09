@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.261 2019/04/22 02:04:12 dlg Exp $
+#	$OpenBSD: GENERIC,v 1.271 2020/06/23 23:35:39 dlg Exp $
 #
 #	Machine-independent option; used by all architectures for their
 #	GENERIC kernel
@@ -82,6 +82,7 @@ pseudo-device	msts	1	# MSTS line discipline
 pseudo-device	endrun	1	# EndRun line discipline
 pseudo-device	vnd	4	# vnode disk devices
 pseudo-device	ksyms	1	# kernel symbols device
+#pseudo-device	dt		# Dynamic Tracer
 
 # clonable devices
 pseudo-device	bpfilter	# packet filter
@@ -101,11 +102,14 @@ pseudo-device	pppoe		# PPP over Ethernet (RFC 2516)
 pseudo-device	pppx		# PPP multiplexer
 pseudo-device	sppp	1	# Sync PPP/HDLC
 pseudo-device	trunk		# Trunking support
+pseudo-device	aggr		# 802.1AX Link Aggregation
+pseudo-device	tpmr		# 802.1Q Two-Port MAC Relay (TPMR)
 pseudo-device	tun		# network tunneling over tty (tun & tap)
 pseudo-device	vether		# Virtual ethernet
 pseudo-device	vxlan		# Virtual extensible LAN
 pseudo-device	vlan		# IEEE 802.1Q VLAN
 pseudo-device	switch		# Switch
+pseudo-device	wg		# WireGuard
 
 pseudo-device	bio	1	# ioctl multiplexing device
 

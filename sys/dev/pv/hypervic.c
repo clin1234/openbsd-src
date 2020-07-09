@@ -56,14 +56,13 @@
 #include <sys/task.h>
 #include <sys/syslog.h>
 #include <sys/socket.h>
+#include <sys/sensors.h>
 
 #include <machine/bus.h>
 #include <machine/cpu.h>
 #include <machine/cpufunc.h>
 
 #include <machine/i82489var.h>
-
-#include <dev/rndvar.h>
 
 #include <net/if.h>
 #include <net/if_dl.h>

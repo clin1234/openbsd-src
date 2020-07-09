@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.11 2019/04/20 22:59:04 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.14 2020/05/25 16:27:05 deraadt Exp $
 
 LIB=	sa
 
@@ -21,11 +21,11 @@ SRCS=	alloc.c exit.c getfile.c getln.c globals.c \
 	memcmp.c memcpy.c memmove.c memset.c printf.c snprintf.c strerror.c strncpy.c
 
 # io routines
-SRCS+=	close.c closeall.c dev.c disklabel.c dkcksum.c fstat.c ioctl.c lseek.c \
-	open.c read.c stat.c write.c cread.c
+SRCS+=	close.c closeall.c dev.c disklabel.c dkcksum.c fchmod.c \
+	fstat.c fchmod.c ioctl.c lseek.c open.c read.c stat.c write.c cread.c
 
 # boot filesystems
-SRCS+=	ufs.c nfs.c cd9660.c
+SRCS+=	ufs.c ufs2.c nfs.c cd9660.c
 
 ${OBJS}:	${.CURDIR}/../Makefile.inc
 

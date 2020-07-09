@@ -1,6 +1,6 @@
 define(MACHINE,luna88k)dnl
 vers(__file__,
-	{-$OpenBSD: MAKEDEV.md,v 1.32 2016/12/31 00:50:01 aoyama Exp $-},
+	{-$OpenBSD: MAKEDEV.md,v 1.35 2020/07/06 06:11:27 dlg Exp $-},
 etc.MACHINE)dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
@@ -101,6 +101,7 @@ _TITLE(spec)
 _DEV(au, 26)
 _DEV(bio, 49)
 _DEV(bpf, 22)
+_DEV(dt, 30)
 _DEV(diskmap, 54)
 _DEV(fdesc, 21)
 _DEV(fuse, 45)
@@ -108,6 +109,7 @@ _DEV(lcd, 10)
 _DEV(pcex, 25)
 _DEV(pf, 39)
 _DEV(pppx, 55)
+_DEV(pppac, 58)
 _DEV(rnd, 40)
 _DEV(tun, 23)
 _DEV(tap, 56)
@@ -115,6 +117,7 @@ _DEV(uk, 41)
 _DEV(vscsi, 53)
 _DEV(switch, 57)
 _DEV(xp, 11)
+_DEV(kstat, 51)
 dnl
 divert(__mddivert)dnl
 dnl

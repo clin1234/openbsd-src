@@ -1,4 +1,4 @@
-/*	$OpenBSD: hotplug.c,v 1.16 2016/06/07 01:31:54 tedu Exp $	*/
+/*	$OpenBSD: hotplug.c,v 1.20 2020/04/07 13:27:51 visa Exp $	*/
 /*
  * Copyright (c) 2004 Alexander Yurchenko <grange@openbsd.org>
  *
@@ -38,8 +38,12 @@ static struct selinfo hotplug_sel;
 void filt_hotplugrdetach(struct knote *);
 int  filt_hotplugread(struct knote *, long);
 
-struct filterops hotplugread_filtops =
-	{ 1, NULL, filt_hotplugrdetach, filt_hotplugread};
+const struct filterops hotplugread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_hotplugrdetach,
+	.f_event	= filt_hotplugread,
+};
 
 #define EVQUEUE_NEXT(p) (p == HOTPLUG_MAXEVENTS - 1 ? 0 : p + 1)
 
@@ -154,7 +158,7 @@ again:
 	if (flags & IO_NDELAY)
 		return (EAGAIN);
 
-	error = tsleep(&evqueue, PRIBIO | PCATCH, "htplev", 0);
+	error = tsleep_nsec(&evqueue, PRIBIO | PCATCH, "htplev", INFSLP);
 	if (error)
 		return (error);
 	goto again;
@@ -207,7 +211,7 @@ hotplugkqfilter(dev_t dev, struct knote *kn)
 	}
 
 	s = splbio();
-	SLIST_INSERT_HEAD(klist, kn, kn_selnext);
+	klist_insert(klist, kn);
 	splx(s);
 	return (0);
 }
@@ -218,7 +222,7 @@ filt_hotplugrdetach(struct knote *kn)
 	int s;
 
 	s = splbio();
-	SLIST_REMOVE(&hotplug_sel.si_note, kn, knote, kn_selnext);
+	klist_remove(&hotplug_sel.si_note, kn);
 	splx(s);
 }
 

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.16 2019/04/20 22:59:04 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.20 2020/03/16 07:02:10 otto Exp $
 #	$NetBSD: Makefile,v 1.2 1997/04/17 07:46:24 thorpej Exp $
 
 S=	${.CURDIR}/../../../..
@@ -7,7 +7,7 @@ R=../
 PROG=		ofwboot
 CFLAGS+=	-D_STANDALONE
 SRCS=		Locore.c main.c ofdev.c net.c netif_of.c netudp.c
-SRCS+=		alloc.c cache.c hfs.c
+SRCS+=		alloc.c cache.c fchmod.c hfs.c arc4.c
 SRCS+=		boot.c conf.c cmd.c vars.c ctime.c strtol.c
 .PATH:		${S}/arch/macppc/stand
 SRCS+=		ofwmagic.S
@@ -22,6 +22,7 @@ BINDIR=         /usr/mdec
 
 .PATH:          ${S}/stand/boot
 .PATH:          ${S}/lib/libsa
+SRCS+=		hexdump.c strtoll.c ufs2.c
 
 .PATH:		${S}/lib/libkern/arch/powerpc ${S}/lib/libkern
 SRCS+=		getchar.c strlcpy.c memcpy.c memmove.c strlen.c strrchr.c \

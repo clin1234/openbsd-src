@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.89 2019/05/16 12:44:18 florian Exp $	*/
+/*	$OpenBSD: util.c,v 1.93 2020/07/06 17:11:29 deraadt Exp $	*/
 /*	$NetBSD: util.c,v 1.12 1997/08/18 10:20:27 lukem Exp $	*/
 
 /*-
@@ -282,8 +282,7 @@ tryagain:
 			tmp[strcspn(tmp, "\n")] = '\0';
 			if (tmp[0] != '\0')
 				user = tmp;
-		}
-		else
+		} else
 			exit(0);
 	}
 	n = command("USER %s", user);
@@ -404,7 +403,7 @@ remglob2(char *argv[], int doswitch, char **errbuf, FILE **ftemp, char *type)
 		if (temp[len-1] != '/')
 			temp[len++] = '/';
 		(void)strlcpy(&temp[len], TMPFILE, sizeof temp - len);
-		if ((fd = mkstemp(temp)) < 0) {
+		if ((fd = mkstemp(temp)) == -1) {
 			warn("unable to create temporary file: %s", temp);
 			return (NULL);
 		}
@@ -922,7 +921,7 @@ void
 ptransfer(int siginfo)
 {
 	struct timespec now, td;
-	double elapsed;
+	double elapsed, pace;
 	off_t bs;
 	int meg, remaining, hh;
 	char buf[100];
@@ -938,11 +937,13 @@ ptransfer(int siginfo)
 	if (bs > (1024 * 1024))
 		meg = 1;
 
-	/* XXX floating point printf in signal handler */
+	pace = bs / (1024.0 * (meg ? 1024.0 : 1.0));
 	(void)snprintf(buf, sizeof(buf),
-	    "%lld byte%s %s in %.2f seconds (%.2f %sB/s)\n",
-	    (long long)bytes, bytes == 1 ? "" : "s", direction, elapsed,
-	    bs / (1024.0 * (meg ? 1024.0 : 1.0)), meg ? "M" : "K");
+	    "%lld byte%s %s in %lld.%02d seconds (%lld.%02d %sB/s)\n",
+	    (long long)bytes, bytes == 1 ? "" : "s", direction,
+	    (long long)elapsed, (int)(elapsed * 100.0) % 100,
+	    (long long)pace, (int)(pace * 100.0) % 100,
+	    meg ? "M" : "K");
 
 	if (siginfo && bytes > 0 && elapsed > 0.0 && filesize >= 0 &&
 	    bytes + restart_point <= filesize) {
@@ -1089,7 +1090,7 @@ connect_wait(int s)
 
 	if (poll(pfd, 1, -1) == -1)
 		return -1;
-	if (getsockopt(s, SOL_SOCKET, SO_ERROR, &error, &len) < 0)
+	if (getsockopt(s, SOL_SOCKET, SO_ERROR, &error, &len) == -1)
 		return -1;
 	if (error != 0) {
 		errno = error;

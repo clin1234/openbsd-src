@@ -1,4 +1,4 @@
-.\" $OpenBSD: snmpd.8,v 1.21 2015/02/10 10:52:07 reyk Exp $
+.\" $OpenBSD: snmpd.8,v 1.23 2020/07/01 13:00:51 martijn Exp $
 .\"
 .\" Copyright (c) 2007, 2008 Reyk Floeter <reyk@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: February 10 2015 $
+.Dd $Mdocdate: July 1 2020 $
 .Dt SNMPD 8
 .Os
 .Sh NAME
@@ -62,17 +62,13 @@ Produce more verbose output.
 default
 .Nm
 configuration file
-.It Pa /var/run/snmpd.sock
-default
-.Nm
-control socket
 .It Pa /usr/share/snmp/mibs/*
 .Nm
 Management Information Base definitions
 .El
 .Sh SEE ALSO
-.Xr snmpd.conf 5 ,
-.Xr snmpctl 8
+.Xr snmp 1 ,
+.Xr snmpd.conf 5
 .Sh STANDARDS
 .Rs
 .%A U. Blumenthal

@@ -1,4 +1,4 @@
-/* $OpenBSD: ip_spd.c,v 1.99 2018/10/22 15:32:19 cheloha Exp $ */
+/* $OpenBSD: ip_spd.c,v 1.102 2020/06/24 22:03:43 cheloha Exp $ */
 /*
  * The author of this code is Angelos D. Keromytis (angelos@cis.upenn.edu)
  *
@@ -93,7 +93,8 @@ spd_table_add(unsigned int rtableid)
 
 		if (spd_tables != NULL) {
 			memcpy(p, spd_tables, sizeof(*rnh) * (spd_table_max+1));
-			free(spd_tables, M_RTABLE, 0);
+			free(spd_tables, M_RTABLE,
+			    sizeof(*rnh) * (spd_table_max+1));
 		}
 		spd_tables = p;
 		spd_table_max = rdomain;
@@ -437,7 +438,7 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 		if (ipo->ipo_last_searched <= ipsec_last_added)	{
 			/* "Touch" the entry. */
 			if (dignore == 0)
-				ipo->ipo_last_searched = time_uptime;
+				ipo->ipo_last_searched = getuptime();
 
 			/* Find an appropriate SA from the existing ones. */
 			ipo->ipo_tdb =
@@ -484,6 +485,24 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 		}
 	} else { /* IPSP_DIRECTION_IN */
 		if (tdbp != NULL) {
+			/*
+			 * Special case for bundled IPcomp/ESP SAs:
+			 * 1) only IPcomp flows are loaded into kernel
+			 * 2) input processing processes ESP SA first
+			 * 3) then optional IPcomp processing happens
+			 * 4) we only update m_tag for ESP
+			 * => 'tdbp' is always set to ESP SA
+			 * => flow has ipo_proto for IPcomp
+			 * So if 'tdbp' points to an ESP SA and this 'tdbp' is
+			 * bundled with an IPcomp SA, then we replace 'tdbp'
+			 * with the IPcomp SA at tdbp->tdb_inext.
+			 */
+			if (ipo->ipo_sproto == IPPROTO_IPCOMP &&
+			    tdbp->tdb_sproto == IPPROTO_ESP &&
+			    tdbp->tdb_inext != NULL &&
+			    tdbp->tdb_inext->tdb_sproto == IPPROTO_IPCOMP)
+				tdbp = tdbp->tdb_inext;
+
 			/* Direct match in the cache. */
 			if (ipo->ipo_tdb == tdbp) {
 				*error = 0;
@@ -541,7 +560,7 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 		/* Find whether there exists an appropriate SA. */
 		if (ipo->ipo_last_searched <= ipsec_last_added)	{
 			if (dignore == 0)
-				ipo->ipo_last_searched = time_uptime;
+				ipo->ipo_last_searched = getuptime();
 
 			ipo->ipo_tdb =
 			    gettdbbysrc(rdomain,

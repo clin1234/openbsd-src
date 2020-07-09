@@ -1,4 +1,4 @@
-/*	$OpenBSD: sched.h,v 1.1 2019/04/14 10:14:53 jsg Exp $	*/
+/*	$OpenBSD: sched.h,v 1.3 2020/06/08 04:48:15 jsg Exp $	*/
 /*
  * Copyright (c) 2013, 2014, 2015 Mark Kettenis
  *
@@ -23,9 +23,9 @@
 #include <sys/kernel.h>
 #include <sys/stdint.h>
 #include <sys/mutex.h>
-#include <sys/proc.h>
 #include <linux/wait.h>
 #include <linux/hrtimer.h>
+#include <linux/sem.h>
 
 #define TASK_NORMAL		1
 #define TASK_UNINTERRUPTIBLE	0
@@ -44,9 +44,11 @@ void set_current_state(int);
 void __set_current_state(int);
 void schedule(void);
 long schedule_timeout(long);
+long schedule_timeout_uninterruptible(long);
 
 #define io_schedule_timeout(x)	schedule_timeout(x)
 
+struct proc;
 int wake_up_process(struct proc *p);
 
 #endif

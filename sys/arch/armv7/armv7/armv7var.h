@@ -1,4 +1,4 @@
-/* $OpenBSD: armv7var.h,v 1.15 2016/10/23 19:05:09 kettenis Exp $ */
+/* $OpenBSD: armv7var.h,v 1.17 2020/04/07 10:11:01 kettenis Exp $ */
 /*
  * Copyright (c) 2005,2008 Dale Rahn <drahn@openbsd.com>
  * Copyright (c) 2012-2013 Patrick Wildt <patrick@blueri.se>
@@ -19,19 +19,15 @@
 #ifndef __ARMV7VAR_H__
 #define __ARMV7VAR_H__
 
+extern struct bus_space armv7_bs_tag;
+
 /* Boards device list */
 struct board_dev {
 	char	*name;
 	int	unit;
 };
 
-struct armv7_board {
-	uint32_t		board_id;
-	struct board_dev	*devs;
-	void			(*init)(void);
-};
-
-/* Needed by omap, sunxi */
+/* Needed by omap */
 struct armv7_softc {
 	struct device sc_dv;
 
@@ -71,16 +67,6 @@ void	armv7_set_devs(struct armv7_dev *);
 struct	armv7_dev *armv7_find_dev(const char *, int);
 void	armv7_attach(struct device *, struct device *, void *);
 int	armv7_submatch(struct device *, void *, void *);
-
-/* board identification - from uboot */
-#define BOARD_ID_OMAP3_BEAGLE 1546
-#define BOARD_ID_OMAP3_OVERO 1798
-#define BOARD_ID_OMAP4_PANDA 2791
-#define BOARD_ID_EXYNOS4_SMDKC210 2838
-#define BOARD_ID_EXYNOS4_NURI 3379
-#define BOARD_ID_AM335X_BEAGLEBONE 3589
-#define BOARD_ID_EXYNOS5_CHROMEBOOK 3774
-extern uint32_t board_id;
 
 #endif /* __ARMV7VAR_H__ */
 

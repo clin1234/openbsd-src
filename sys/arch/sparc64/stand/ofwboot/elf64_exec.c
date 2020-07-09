@@ -1,4 +1,4 @@
-/*	$OpenBSD: elf64_exec.c,v 1.9 2018/12/31 11:44:57 claudio Exp $	*/
+/*	$OpenBSD: elf64_exec.c,v 1.12 2020/06/13 12:25:09 kn Exp $	*/
 /*	$NetBSD: elfXX_exec.c,v 1.2 2001/08/15 20:08:15 eeh Exp $	*/
 
 /*
@@ -67,7 +67,11 @@
 #include "softraid_sparc64.h"
 #endif
 
+#include <lib/libsa/arc4.h>
+
 #include "openfirm.h"
+
+extern int boothowto;
 
 void syncicache(void *, int);
 
@@ -101,12 +105,19 @@ elf64_exec(int fd, Elf_Ehdr *elf, u_int64_t *entryp, void **ssymp, void **esymp)
 		if (phdr.p_type == PT_OPENBSD_BOOTDATA) {
 			memset((void *) (long)phdr.p_paddr, 0, phdr.p_filesz);
 
-			if (phdr.p_filesz < sizeof(struct openbsd_bootdata))
+			if (phdr.p_filesz < BOOTDATA_LEN_SOFTRAID)
 				continue;
 
+			/*
+			 * Kernels up to and including OpenBSD 6.7
+			 * check for an exact match if the length.
+			 * Lie here to make sure we can still boot
+			 * older kernels with softraid.
+			 */
 			obd = (struct openbsd_bootdata *)(long)phdr.p_paddr;
 			obd->version = BOOTDATA_VERSION;
-			obd->len = sizeof(struct openbsd_bootdata);
+			obd->len = BOOTDATA_LEN_SOFTRAID;
+
 #ifdef SOFTRAID
 			/* 
 			 * If booting from softraid we must pass additional
@@ -124,18 +135,19 @@ elf64_exec(int fd, Elf_Ehdr *elf, u_int64_t *entryp, void **ssymp, void **esymp)
 			}
 
 #endif
+
+			if (phdr.p_filesz < BOOTDATA_LEN_BOOTHOWTO)
+				continue;
+
+			obd->boothowto = boothowto;
 			continue;
 		}
 
 		if (phdr.p_type == PT_OPENBSD_RANDOMIZE) {
-			int m, pos;
+			extern struct rc4_ctx randomctx;
 
-			/* Fill segment. */
-			for (pos = 0; pos < phdr.p_filesz; pos += m) {
-				m = MIN(phdr.p_filesz - pos, sizeof(rnddata));
-				bcopy(rnddata, (void *)(long)phdr.p_paddr + pos, m);
-			}
-			continue;
+			rc4_getbytes(&randomctx, (void *)(long)phdr.p_paddr,
+			    phdr.p_filesz);
 		}
 
 		if (phdr.p_type != PT_LOAD ||
@@ -192,11 +204,24 @@ elf64_exec(int fd, Elf_Ehdr *elf, u_int64_t *entryp, void **ssymp, void **esymp)
 		printf("read section headers: %s\n", strerror(errno));
 		return (1);
 	}
+
+	size_t shstrsz = shp[elf->e_shstrndx].sh_size;
+	char *shstr = alloc(shstrsz);
+	if (lseek(fd, (off_t)shp[elf->e_shstrndx].sh_offset, SEEK_SET) == -1) {
+		printf("lseek section header string table: %s\n", strerror(errno));
+		return 1;
+	}
+	if (read(fd, shstr, shstrsz) != shstrsz) {
+		printf("read section header string table: %s\n", strerror(errno));
+		return 1;
+	}
+
 	for (i = 0; i < elf->e_shnum; i++, shp++) {
 		if (shp->sh_type == SHT_NULL)
 			continue;
 		if (shp->sh_type != SHT_SYMTAB
-		    && shp->sh_type != SHT_STRTAB) {
+		    && shp->sh_type != SHT_STRTAB
+		    && strcmp(shstr + shp->sh_name, ELF_CTF)) {
 			shp->sh_offset = 0; 
 			continue;
 		}
@@ -232,7 +257,8 @@ elf64_exec(int fd, Elf_Ehdr *elf, u_int64_t *entryp, void **ssymp, void **esymp)
 	off = size;
 	for (first = 1, i = 0; i < elf->e_shnum; i++, shp++) {
 		if (shp->sh_type == SHT_SYMTAB
-		    || shp->sh_type == SHT_STRTAB) {
+		    || shp->sh_type == SHT_STRTAB
+		    || !strcmp(shstr + shp->sh_name, ELF_CTF)) {
 			if (first)
 				printf("symbols @ 0x%lx ", (u_long)addr);
 			printf("%s%d", first ? "" : "+", (int)shp->sh_size);
@@ -243,6 +269,7 @@ elf64_exec(int fd, Elf_Ehdr *elf, u_int64_t *entryp, void **ssymp, void **esymp)
 			}
 			addr += ELF_ALIGN(shp->sh_size);
 			shp->sh_offset = off;
+			shp->sh_flags |= SHF_ALLOC;
 			off += ELF_ALIGN(shp->sh_size);
 			first = 0;
 		}

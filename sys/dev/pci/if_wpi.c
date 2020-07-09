@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_wpi.c,v 1.144 2018/04/28 16:05:56 phessler Exp $	*/
+/*	$OpenBSD: if_wpi.c,v 1.152 2020/06/03 11:37:39 jmatthew Exp $	*/
 
 /*-
  * Copyright (c) 2006-2008
@@ -103,7 +103,7 @@ void		wpi_calib_timeout(void *);
 int		wpi_ccmp_decap(struct wpi_softc *, struct mbuf *,
 		    struct ieee80211_key *);
 void		wpi_rx_done(struct wpi_softc *, struct wpi_rx_desc *,
-		    struct wpi_rx_data *);
+		    struct wpi_rx_data *, struct mbuf_list *);
 void		wpi_tx_done(struct wpi_softc *, struct wpi_rx_desc *);
 void		wpi_cmd_done(struct wpi_softc *, struct wpi_rx_desc *);
 void		wpi_notif_intr(struct wpi_softc *);
@@ -1058,7 +1058,7 @@ wpi_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 			    ieee80211_state_name[ic->ic_state],
 			    ieee80211_state_name[nstate]);
 		ieee80211_set_link_state(ic, LINK_STATE_DOWN);
-		ieee80211_free_allnodes(ic, 1);
+		ieee80211_node_cleanup(ic, ic->ic_bss);
 		ic->ic_state = nstate;
 		return 0;
 
@@ -1132,6 +1132,7 @@ wpi_calib_timeout(void *arg)
 int
 wpi_ccmp_decap(struct wpi_softc *sc, struct mbuf *m, struct ieee80211_key *k)
 {
+	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_frame *wh;
 	uint64_t pn, *prsc;
 	uint8_t *ivp;
@@ -1142,7 +1143,7 @@ wpi_ccmp_decap(struct wpi_softc *sc, struct mbuf *m, struct ieee80211_key *k)
 	hdrlen = ieee80211_get_hdrlen(wh);
 	ivp = (uint8_t *)wh + hdrlen;
 
-	/* Check that ExtIV bit is be set. */
+	/* Check that ExtIV bit is set. */
 	if (!(ivp[3] & IEEE80211_WEP_EXTIV)) {
 		DPRINTF(("CCMP decap ExtIV not set\n"));
 		return 1;
@@ -1159,28 +1160,20 @@ wpi_ccmp_decap(struct wpi_softc *sc, struct mbuf *m, struct ieee80211_key *k)
 	     (uint64_t)ivp[6] << 32 |
 	     (uint64_t)ivp[7] << 40;
 	if (pn <= *prsc) {
-		/*
-		 * Not necessarily a replayed frame since we did not check
-		 * the sequence number of the 802.11 header yet.
-		 */
 		DPRINTF(("CCMP replayed\n"));
+		ic->ic_stats.is_ccmp_replays++;
 		return 1;
 	}
-	/* Update last seen packet number. */
-	*prsc = pn;
+	/* Last seen packet number is updated in ieee80211_inputm(). */
 
-	/* Clear Protected bit and strip IV. */
-	wh->i_fc[1] &= ~IEEE80211_FC1_PROTECTED;
-	memmove(mtod(m, caddr_t) + IEEE80211_CCMP_HDRLEN, wh, hdrlen);
-	m_adj(m, IEEE80211_CCMP_HDRLEN);
-	/* Strip MIC. */
+	/* Strip MIC. IV will be stripped by ieee80211_inputm(). */
 	m_adj(m, -IEEE80211_CCMP_MICLEN);
 	return 0;
 }
 
 void
 wpi_rx_done(struct wpi_softc *sc, struct wpi_rx_desc *desc,
-    struct wpi_rx_data *data)
+    struct wpi_rx_data *data, struct mbuf_list *ml)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ifnet *ifp = &ic->ic_if;
@@ -1278,6 +1271,7 @@ wpi_rx_done(struct wpi_softc *sc, struct wpi_rx_desc *desc,
 			ic->ic_stats.is_ccmp_dec_errs++;
 			ifp->if_ierrors++;
 			m_freem(m);
+			ieee80211_release_node(ic, ni);
 			return;
 		}
 		/* Check whether decryption was successful or not. */
@@ -1286,11 +1280,13 @@ wpi_rx_done(struct wpi_softc *sc, struct wpi_rx_desc *desc,
 			ic->ic_stats.is_ccmp_dec_errs++;
 			ifp->if_ierrors++;
 			m_freem(m);
+			ieee80211_release_node(ic, ni);
 			return;
 		}
 		if (wpi_ccmp_decap(sc, m, &ni->ni_pairwise_key) != 0) {
 			ifp->if_ierrors++;
 			m_freem(m);
+			ieee80211_release_node(ic, ni);
 			return;
 		}
 		rxi.rxi_flags |= IEEE80211_RXI_HWDEC;
@@ -1298,7 +1294,6 @@ wpi_rx_done(struct wpi_softc *sc, struct wpi_rx_desc *desc,
 
 #if NBPFILTER > 0
 	if (sc->sc_drvbpf != NULL) {
-		struct mbuf mb;
 		struct wpi_rx_radiotap_header *tap = &sc->sc_rxtap;
 
 		tap->wr_flags = 0;
@@ -1331,20 +1326,15 @@ wpi_rx_done(struct wpi_softc *sc, struct wpi_rx_desc *desc,
 		default:  tap->wr_rate =   0;
 		}
 
-		mb.m_data = (caddr_t)tap;
-		mb.m_len = sc->sc_rxtap_len;
-		mb.m_next = m;
-		mb.m_nextpkt = NULL;
-		mb.m_type = 0;
-		mb.m_flags = 0;
-		bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_IN);
+		bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_rxtap_len,
+		    m, BPF_DIRECTION_IN);
 	}
 #endif
 
 	/* Send the frame to the 802.11 layer. */
 	rxi.rxi_rssi = stat->rssi;
 	rxi.rxi_tstamp = 0;	/* unused */
-	ieee80211_input(ifp, m, ni, &rxi);
+	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 
 	/* Node is no longer needed. */
 	ieee80211_release_node(ic, ni);
@@ -1412,6 +1402,7 @@ wpi_cmd_done(struct wpi_softc *sc, struct wpi_rx_desc *desc)
 void
 wpi_notif_intr(struct wpi_softc *sc)
 {
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ifnet *ifp = &ic->ic_if;
 	uint32_t hw;
@@ -1438,7 +1429,7 @@ wpi_notif_intr(struct wpi_softc *sc)
 		switch (desc->type) {
 		case WPI_RX_DONE:
 			/* An 802.11 frame has been received. */
-			wpi_rx_done(sc, desc, data);
+			wpi_rx_done(sc, desc, data, &ml);
 			break;
 
 		case WPI_TX_DONE:
@@ -1527,6 +1518,7 @@ wpi_notif_intr(struct wpi_softc *sc)
 
 		sc->rxq.cur = (sc->rxq.cur + 1) % WPI_RX_RING_COUNT;
 	}
+	if_input(&ic->ic_if, &ml);
 
 	/* Tell the firmware what we have processed. */
 	hw = (hw == 0) ? WPI_RX_RING_COUNT - 1 : hw - 1;
@@ -1703,7 +1695,6 @@ wpi_tx(struct wpi_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 
 #if NBPFILTER > 0
 	if (sc->sc_drvbpf != NULL) {
-		struct mbuf mb;
 		struct wpi_tx_radiotap_header *tap = &sc->sc_txtap;
 
 		tap->wt_flags = 0;
@@ -1715,13 +1706,8 @@ wpi_tx(struct wpi_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		    (wh->i_fc[1] & IEEE80211_FC1_PROTECTED))
 			tap->wt_flags |= IEEE80211_RADIOTAP_F_WEP;
 
-		mb.m_data = (caddr_t)tap;
-		mb.m_len = sc->sc_txtap_len;
-		mb.m_next = m;
-		mb.m_nextpkt = NULL;
-		mb.m_type = 0;
-		mb.m_flags = 0;
-		bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_OUT);
+		bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_txtap_len,
+		    m, BPF_DIRECTION_OUT);
 	}
 #endif
 
@@ -2100,7 +2086,7 @@ wpi_cmd(struct wpi_softc *sc, int code, const void *buf, int size, int async)
 	ring->cur = (ring->cur + 1) % WPI_TX_RING_COUNT;
 	WPI_WRITE(sc, WPI_HBUS_TARG_WRPTR, ring->qid << 8 | ring->cur);
 
-	return async ? 0 : tsleep(cmd, PCATCH, "wpicmd", hz);
+	return async ? 0 : tsleep_nsec(cmd, PCATCH, "wpicmd", SEC_TO_NSEC(1));
 }
 
 /*
@@ -2917,7 +2903,7 @@ wpi_load_firmware(struct wpi_softc *sc)
 	WPI_WRITE(sc, WPI_RESET, 0);
 
 	/* Wait at most one second for first alive notification. */
-	if ((error = tsleep(sc, PCATCH, "wpiinit", hz)) != 0) {
+	if ((error = tsleep_nsec(sc, PCATCH, "wpiinit", SEC_TO_NSEC(1))) != 0) {
 		printf("%s: timeout waiting for adapter to initialize\n",
 		    sc->sc_dev.dv_xname);
 		return error;
@@ -3199,7 +3185,7 @@ wpi_hw_init(struct wpi_softc *sc)
 		return error;
 	}
 	/* Wait at most one second for firmware alive notification. */
-	if ((error = tsleep(sc, PCATCH, "wpiinit", hz)) != 0) {
+	if ((error = tsleep_nsec(sc, PCATCH, "wpiinit", SEC_TO_NSEC(1))) != 0) {
 		printf("%s: timeout waiting for adapter to initialize\n",
 		    sc->sc_dev.dv_xname);
 		return error;

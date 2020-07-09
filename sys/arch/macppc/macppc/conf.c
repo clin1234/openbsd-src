@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.67 2016/09/04 10:51:24 naddy Exp $ */
+/*	$OpenBSD: conf.c,v 1.72 2020/07/06 04:32:25 dlg Exp $ */
 
 /*
  * Copyright (c) 1997 Per Fogelstrom
@@ -94,8 +94,10 @@ cdev_decl(com);
 #include "tun.h"
 
 #include "ksyms.h"
+#include "kstat.h"
 #include "usb.h"
 #include "uhid.h"
+#include "fido.h"
 #include "ugen.h"
 #include "ulpt.h"
 #include "ucom.h"
@@ -115,6 +117,7 @@ cdev_decl(pci);
 #include "video.h"
 #include "midi.h"
 
+#include "dt.h"
 #include "pf.h"
 
 #include "radio.h"
@@ -158,7 +161,7 @@ struct cdevsw cdevsw[] = {
 	cdev_notdef(),			/* 27 */
 	cdev_notdef(),			/* 28 */
 	cdev_notdef(),			/* 29 */
-	cdev_notdef(),			/* 30 */
+	cdev_dt_init(NDT,dt),		/* 30: dynamic tracer */
 	cdev_notdef(),			/* 31 */
 	cdev_notdef(),			/* 32 */
 	cdev_notdef(),			/* 33 */
@@ -179,7 +182,7 @@ struct cdevsw cdevsw[] = {
 	cdev_notdef(),			/* 48 */
 	cdev_notdef(),			/* 49 */
 	cdev_notdef(),			/* 50 */
-	cdev_notdef(),			/* 51 */
+	cdev_kstat_init(NKSTAT,kstat),	/* 51: kernel statistics */
 	cdev_midi_init(NMIDI,midi),	/* 52: MIDI I/O */
 	cdev_notdef(),			/* 53 was: sequencer I/O */
 	cdev_notdef(),			/* 54 was: RAIDframe disk driver */
@@ -226,6 +229,8 @@ struct cdevsw cdevsw[] = {
 	cdev_drm_init(NDRM,drm),	/* 87: drm */
 	cdev_fuse_init(NFUSE,fuse),	/* 88: fuse */
 	cdev_switch_init(NSWITCH,switch), /* 89: switch(4) control interface */
+	cdev_fido_init(NFIDO,fido),	/* 90: FIDO/U2F security key */
+	cdev_pppx_init(NPPPX,pppac),	/* 91: PPP Access Concentrator */
 };
 int nchrdev = nitems(cdevsw);
 
@@ -256,7 +261,7 @@ iszerodev(dev_t dev)
 }
 
 dev_t
-getnulldev()
+getnulldev(void)
 {
 	return makedev(mem_no, 2);
 }

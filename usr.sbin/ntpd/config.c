@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.29 2018/09/07 20:31:39 kn Exp $ */
+/*	$OpenBSD: config.c,v 1.33 2020/04/12 14:20:56 otto Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -25,14 +25,17 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <resolv.h>
 #include <unistd.h>
 
 #include "ntpd.h"
 
 struct ntp_addr	*host_ip(const char *);
+int		 host_dns1(const char *, struct ntp_addr **, int);
 
 static u_int32_t		 maxid = 0;
 static u_int32_t		 constraint_maxid = 0;
+int				 non_numeric;
 
 void
 host(const char *s, struct ntp_addr **hn)
@@ -43,8 +46,10 @@ host(const char *s, struct ntp_addr **hn)
 		if ((h = calloc(1, sizeof(*h))) == NULL)
 			fatal(NULL);
 	} else {
-		if ((h = host_ip(s)) == NULL)
+		if ((h = host_ip(s)) == NULL) {
+			non_numeric = 1;
 			return;
+		}
 	}
 
 	*hn = h;
@@ -85,7 +90,7 @@ host_dns_free(struct ntp_addr *hn)
 }
 
 int
-host_dns(const char *s, struct ntp_addr **hn)
+host_dns1(const char *s, struct ntp_addr **hn, int notauth)
 {
 	struct addrinfo		 hints, *res0, *res;
 	int			 error, cnt = 0;
@@ -94,7 +99,7 @@ host_dns(const char *s, struct ntp_addr **hn)
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_DGRAM; /* DUMMY */
-	/* ntpd MUST NOT use AI_ADDRCONFIG here */
+	hints.ai_flags = AI_ADDRCONFIG;
 	error = getaddrinfo(s, NULL, &hints, &res0);
 	if (error == EAI_AGAIN || error == EAI_NODATA || error == EAI_NONAME)
 			return (0);
@@ -111,6 +116,7 @@ host_dns(const char *s, struct ntp_addr **hn)
 		if ((h = calloc(1, sizeof(*h))) == NULL)
 			fatal(NULL);
 		memcpy(&h->ss, res->ai_addr, res->ai_addrlen);
+		h->notauth = notauth;
 
 		h->next = hh;
 		hh = h;
@@ -120,6 +126,24 @@ host_dns(const char *s, struct ntp_addr **hn)
 
 	*hn = hh;
 	return (cnt);
+}
+
+int
+host_dns(const char *s, int synced, struct ntp_addr **hn)
+{
+	int error, save_opts;
+	
+	log_debug("trying to resolve %s", s);
+	error = host_dns1(s, hn, 0);
+	if (!synced && error <= 0) {
+		log_debug("no luck, trying to resolve %s without checking", s);
+		save_opts = _res.options;
+		_res.options |= RES_USE_CD;
+		error = host_dns1(s, hn, 1);
+		_res.options = save_opts;
+	}
+	log_debug("resolve %s done: %d", s, error);
+	return error;
 }
 
 struct ntp_peer *

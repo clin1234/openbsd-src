@@ -1,4 +1,4 @@
-/*	$Id: http.c,v 1.11 2018/11/29 14:25:07 tedu Exp $ */
+/*	$Id: http.c,v 1.13 2020/01/11 17:37:19 sthen Exp $ */
 /*
  * Copyright (c) 2016 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -72,7 +72,7 @@ dosysread(char *buf, size_t sz, const struct http *http)
 	ssize_t	 rc;
 
 	rc = read(http->fd, buf, sz);
-	if (rc < 0)
+	if (rc == -1)
 		warn("%s: read", http->src.ip);
 	return rc;
 }
@@ -83,7 +83,7 @@ dosyswrite(const void *buf, size_t sz, const struct http *http)
 	ssize_t	 rc;
 
 	rc = write(http->fd, buf, sz);
-	if (rc < 0)
+	if (rc == -1)
 		warn("%s: write", http->src.ip);
 	return rc;
 }
@@ -97,7 +97,7 @@ dotlsread(char *buf, size_t sz, const struct http *http)
 		rc = tls_read(http->ctx, buf, sz);
 	} while (rc == TLS_WANT_POLLIN || rc == TLS_WANT_POLLOUT);
 
-	if (rc < 0)
+	if (rc == -1)
 		warnx("%s: tls_read: %s", http->src.ip,
 		    tls_error(http->ctx));
 	return rc;
@@ -112,7 +112,7 @@ dotlswrite(const void *buf, size_t sz, const struct http *http)
 		rc = tls_write(http->ctx, buf, sz);
 	} while (rc == TLS_WANT_POLLIN || rc == TLS_WANT_POLLOUT);
 
-	if (rc < 0)
+	if (rc == -1)
 		warnx("%s: tls_write: %s", http->src.ip,
 		    tls_error(http->ctx));
 	return rc;
@@ -349,6 +349,7 @@ http_open(const struct http *http, const void *p, size_t psz)
 		c = asprintf(&req,
 		    "POST %s HTTP/1.0\r\n"
 		    "Host: %s\r\n"
+		    "Content-Type: application/ocsp-request\r\n"
 		    "Content-Length: %zu\r\n"
 		    "\r\n",
 		    http->path, http->host, psz);

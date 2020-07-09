@@ -5,7 +5,7 @@ todo - Perl TO-DO list
 =head1 DESCRIPTION
 
 This is a list of wishes for Perl. The most up to date version of this file
-is at L<http://perl5.git.perl.org/perl.git/blob_plain/HEAD:/Porting/todo.pod>
+is at L<https://github.com/Perl/perl5/blob/blead/Porting/todo.pod>.
 
 The tasks we think are smaller or easier are listed first. Anyone is welcome
 to work on any of these, but it's a good idea to first contact
@@ -25,17 +25,18 @@ programming languages offer you 1 line of immortality?
 
 =head1 Tasks that only need Perl knowledge
 
-=head2 Classify bug tickets by type
+=head2 Label bug tickets by type
 
-Known bugs in Perl are tracked by L<https://rt.perl.org/> (which also
-includes Perl 6).  A summary can be found at
-L<https://rt.perl.org/NoAuth/perl5/Overview.html>.
-It shows bugs classified by "type".  However, the type of many of the
-bugs is "unknown".  This greatly lowers the chances of them getting
+Known bugs in Perl are tracked by L<https://github.com/Perl/perl5/issues>.
+It shows bugs and can be filtered by assigned labels.  However, many are
+L<unlabeled|https://github.com/Perl/perl5/issues?q=is%3Aopen+is%3Aissue+no%3Alabel>
+or have the label L<"Needs Triage"|https://github.com/Perl/perl5/issues?q=is%3Aopen+is%3Aissue+label%3A%22Needs+Triage%22>.
+This greatly lowers the chances of them getting
 fixed, as the number of open bugs is overwhelming -- too many to wade
 through for someone to try to find the bugs in the parts of
 Perl that s/he knows well enough to try to fix.  This task involves
-going through these bugs and classifying them into one or more types.
+going through these bugs and assigning one or more labels, and removing the
+"Needs Triage" label if present.
 
 =head2 Ongoing: investigate new bug reports
 
@@ -44,8 +45,8 @@ a quick investigation to see if it is a real problem, and to reply to
 the poster about it, asking for example code that reproduces the
 problem.  Such code should be added to the test suite as TODO tests, and
 the ticket should be classified by type.  To get started on this task,
-look at the tickets that are marked as "New Issues" in
-L<https://rt.perl.org/NoAuth/perl5/Overview.html>.
+look at the issues with no comments at
+L<https://github.com/Perl/perl5/issues?q=is%3Aopen+is%3Aissue+comments%3A0>.
 
 =head2 Migrate t/ from custom TAP generation
 
@@ -1050,7 +1051,7 @@ The old perltodo notes "Look at the "reification" code in C<av.c>".
 Implement a set of "vtables" that virtualizes operating system access
 (chdir(), chmod(), dbmopen(), getenv(), glob(), link(), mkdir(), open(),
 opendir(), readdir(), rename(), rmdir(), stat(), sysopen(), uname(),
-unlink(), etc.)  At the very least these interfaces should take SVs as
+unlink(), etc.).  At the very least these interfaces should take SVs as
 "name" arguments instead of bare char pointers; probably the most
 flexible and extensible way would be for the Perl-facing interfaces to
 accept HVs.  The system needs to be per-operating-system and

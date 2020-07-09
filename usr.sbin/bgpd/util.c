@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.49 2019/04/10 15:21:54 claudio Exp $ */
+/*	$OpenBSD: util.c,v 1.54 2020/05/10 13:38:46 deraadt Exp $ */
 
 /*
  * Copyright (c) 2006 Claudio Jeker <claudio@openbsd.org>
@@ -52,7 +52,7 @@ log_addr(const struct bgpd_addr *addr)
 		    sizeof(tbuf)) == NULL)
 			return ("?");
 		snprintf(buf, sizeof(buf), "%s %s", log_rd(addr->vpn4.rd),
-		   tbuf);
+		    tbuf);
 		return (buf);
 	case AID_VPN_IPv6:
 		if (inet_ntop(aid2af(addr->aid), &addr->vpn6.addr, tbuf,
@@ -75,6 +75,7 @@ log_in6addr(const struct in6_addr *addr)
 	sa_in6.sin6_family = AF_INET6;
 	memcpy(&sa_in6.sin6_addr, addr, sizeof(sa_in6.sin6_addr));
 
+#ifdef __KAME__
 	/* XXX thanks, KAME, for this ugliness... adopted from route/show.c */
 	if (IN6_IS_ADDR_LINKLOCAL(&sa_in6.sin6_addr) ||
 	    IN6_IS_ADDR_MC_LINKLOCAL(&sa_in6.sin6_addr)) {
@@ -83,6 +84,7 @@ log_in6addr(const struct in6_addr *addr)
 		sa_in6.sin6_addr.s6_addr[2] = 0;
 		sa_in6.sin6_addr.s6_addr[3] = 0;
 	}
+#endif
 
 	return (log_sockaddr((struct sockaddr *)&sa_in6, sizeof(sa_in6)));
 }
@@ -104,7 +106,7 @@ log_as(u_int32_t as)
 {
 	static char	buf[11];	/* "4294967294\0" */
 
-	if (snprintf(buf, sizeof(buf), "%u", as) == -1)
+	if (snprintf(buf, sizeof(buf), "%u", as) < 0)
 		return ("?");
 
 	return (buf);
@@ -161,8 +163,8 @@ log_ext_subtype(short type, u_int8_t subtype)
 }
 
 const char *
-log_shutcomm(const char *communication) {
-	static char buf[(SHUT_COMM_LEN - 1) * 4 + 1];
+log_reason(const char *communication) {
+	static char buf[(REASON_LEN - 1) * 4 + 1];
 
 	strnvis(buf, communication, sizeof(buf), VIS_NL | VIS_OCTAL);
 
@@ -206,7 +208,7 @@ aspath_snprint(char *buf, size_t size, void *data, u_int16_t len)
 {
 #define UPDATE()				\
 	do {					\
-		if (r == -1)			\
+		if (r < 0)			\
 			return (-1);		\
 		total_size += r;		\
 		if ((unsigned int)r < size) {	\
@@ -842,7 +844,7 @@ addr2sa(struct bgpd_addr *addr, u_int16_t port, socklen_t *len)
 	struct sockaddr_in		*sa_in = (struct sockaddr_in *)&ss;
 	struct sockaddr_in6		*sa_in6 = (struct sockaddr_in6 *)&ss;
 
-	if (addr->aid == AID_UNSPEC)
+	if (addr == NULL || addr->aid == AID_UNSPEC)
 		return (NULL);
 
 	bzero(&ss, sizeof(ss));
@@ -883,6 +885,23 @@ sa2addr(struct sockaddr *sa, struct bgpd_addr *addr, u_int16_t *port)
 	case AF_INET6:
 		addr->aid = AID_INET6;
 		memcpy(&addr->v6, &sa_in6->sin6_addr, sizeof(addr->v6));
+#ifdef __KAME__
+		/*
+		 * XXX thanks, KAME, for this ugliness...
+		 * adopted from route/show.c
+		 */
+		if (IN6_IS_ADDR_LINKLOCAL(&sa_in6->sin6_addr) ||
+		    IN6_IS_ADDR_MC_LINKLOCAL(&sa_in6->sin6_addr)) {
+			uint16_t tmp16;
+			memcpy(&tmp16, &sa_in6->sin6_addr.s6_addr[2],
+			    sizeof(tmp16));
+			if (tmp16 != 0) {
+				sa_in6->sin6_scope_id = ntohs(tmp16);
+				sa_in6->sin6_addr.s6_addr[2] = 0;
+				sa_in6->sin6_addr.s6_addr[3] = 0;
+			}
+		}
+#endif
 		addr->scope_id = sa_in6->sin6_scope_id; /* I hate v6 */
 		if (port)
 			*port = ntohs(sa_in6->sin6_port);

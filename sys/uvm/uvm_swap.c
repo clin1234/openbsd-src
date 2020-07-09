@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_swap.c,v 1.144 2019/04/02 13:07:28 visa Exp $	*/
+/*	$OpenBSD: uvm_swap.c,v 1.146 2020/01/20 23:21:57 claudio Exp $	*/
 /*	$NetBSD: uvm_swap.c,v 1.40 2000/11/17 11:39:39 mrg Exp $	*/
 
 /*
@@ -13,8 +13,6 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
  * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
@@ -822,7 +820,7 @@ swap_on(struct proc *p, struct swapdev *sdp)
 	long addr;
 	struct vattr va;
 #if defined(NFSCLIENT)
-	extern struct vops nfs_vops;
+	extern const struct vops nfs_vops;
 #endif /* defined(NFSCLIENT) */
 	dev_t dev;
 

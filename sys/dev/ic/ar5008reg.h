@@ -1,4 +1,4 @@
-/*	$OpenBSD: ar5008reg.h,v 1.5 2017/11/28 04:33:03 stsp Exp $	*/
+/*	$OpenBSD: ar5008reg.h,v 1.7 2020/04/27 08:21:34 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2009 Damien Bergamini <damien.bergamini@free.fr>
@@ -809,6 +809,18 @@ struct ar_tx_desc {
 #define AR_TXC7_GI0123		\
 	(AR_TXC7_GI0 | AR_TXC7_GI1 | AR_TXC7_GI2 | AR_TXC7_GI3)
 
+/* Bits for ds_ctl9. */
+#define AR_TXC9_XMIT_POWER1_M		0x3f000000
+#define AR_TXC9_XMIT_POWER1_S		24
+
+/* Bits for ds_ctl10. */
+#define AR_TXC10_XMIT_POWER2_M		0x3f000000
+#define AR_TXC10_XMIT_POWER2_S		24
+
+/* Bits for ds_ctl11. */
+#define AR_TXC11_XMIT_POWER3_M		0x3f000000
+#define AR_TXC11_XMIT_POWER3_S		24
+
 /* Bits for ds_status0. */
 #define AR_TXS0_RSSI_ANT0(i)		(((x) >> ((i) * 8)) & 0xff)
 #define AR_TXS0_BA_STATUS		0x40000000
@@ -915,6 +927,7 @@ struct ar_rx_desc {
 #define AR_RXS8_KEY_IDX_S		9
 #define AR_RXS8_POST_DELIM_CRC_ERR	0x00040000
 #define AR_RXS8_DECRYPT_BUSY_ERR	0x40000000
+#define AR_RXS8_KEY_MISS		0x80000000
 
 #define AR_MAX_PWR_RANGE_IN_HALF_DB	64
 #define AR9285_PD_GAIN_BOUNDARY_DEFAULT	58

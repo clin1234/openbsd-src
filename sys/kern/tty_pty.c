@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty_pty.c,v 1.93 2019/03/11 17:13:31 anton Exp $	*/
+/*	$OpenBSD: tty_pty.c,v 1.101 2020/06/22 13:14:32 mpi Exp $	*/
 /*	$NetBSD: tty_pty.c,v 1.33.4.1 1996/06/02 09:08:11 mrg Exp $	*/
 
 /*
@@ -255,8 +255,7 @@ ptsopen(dev_t dev, int flag, int devtype, struct proc *p)
 		tp->t_state |= TS_WOPEN;
 		if (flag & FNONBLOCK)
 			break;
-		error = ttysleep(tp, &tp->t_rawq, TTIPRI | PCATCH,
-				 ttopen, 0);
+		error = ttysleep(tp, &tp->t_rawq, TTIPRI | PCATCH, ttopen);
 		if (error)
 			return (error);
 	}
@@ -296,8 +295,7 @@ again:
 			    pr->ps_flags & PS_PPWAIT)
 				return (EIO);
 			pgsignal(pr->ps_pgrp, SIGTTIN, 1);
-			error = ttysleep(tp, &lbolt,
-			    TTIPRI | PCATCH, ttybg, 0);
+			error = ttysleep(tp, &lbolt, TTIPRI | PCATCH, ttybg);
 			if (error)
 				return (error);
 		}
@@ -305,7 +303,7 @@ again:
 			if (flag & IO_NDELAY)
 				return (EWOULDBLOCK);
 			error = ttysleep(tp, &tp->t_canq,
-			    TTIPRI | PCATCH, ttyin, 0);
+			    TTIPRI | PCATCH, ttyin);
 			if (error)
 				return (error);
 			goto again;
@@ -479,8 +477,8 @@ ptcread(dev_t dev, struct uio *uio, int flag)
 			return (0);	/* EOF */
 		if (flag & IO_NDELAY)
 			return (EWOULDBLOCK);
-		error = tsleep(&tp->t_outq.c_cf, TTIPRI | PCATCH,
-		    ttyin, 0);
+		error = tsleep_nsec(&tp->t_outq.c_cf, TTIPRI | PCATCH, ttyin,
+		    INFSLP);
 		if (error)
 			return (error);
 	}
@@ -589,8 +587,7 @@ block:
 			error = EWOULDBLOCK;
 		goto done;
 	}
-	error = tsleep(&tp->t_rawq.c_cf, TTOPRI | PCATCH,
-	    ttyout, 0);
+	error = tsleep_nsec(&tp->t_rawq.c_cf, TTOPRI | PCATCH, ttyout, INFSLP);
 	if (error == 0)
 		goto again;
 
@@ -658,7 +655,7 @@ filt_ptcrdetach(struct knote *kn)
 	int s;
 
 	s = spltty();
-	SLIST_REMOVE(&pti->pt_selr.si_note, kn, knote, kn_selnext);
+	klist_remove(&pti->pt_selr.si_note, kn);
 	splx(s);
 }
 
@@ -671,6 +668,16 @@ filt_ptcread(struct knote *kn, long hint)
 	tp = pti->pt_tty;
 	kn->kn_data = 0;
 
+	if (kn->kn_sfflags & NOTE_OOB) {
+		/* If in packet or user control mode, check for data. */
+		if (((pti->pt_flags & PF_PKT) && pti->pt_send) ||
+		    ((pti->pt_flags & PF_UCNTL) && pti->pt_ucntl)) {
+			kn->kn_fflags |= NOTE_OOB;
+			kn->kn_data = 1;
+			return (1);
+		}
+		return (0);
+	}
 	if (ISSET(tp->t_state, TS_ISOPEN)) {
 		if (!ISSET(tp->t_state, TS_TTSTOP))
 			kn->kn_data = tp->t_outq.c_cc;
@@ -681,6 +688,8 @@ filt_ptcread(struct knote *kn, long hint)
 
 	if (!ISSET(tp->t_state, TS_CARR_ON)) {
 		kn->kn_flags |= EV_EOF;
+		if (kn->kn_flags & __EV_POLL)
+			kn->kn_flags |= __EV_HUP;
 		return (1);
 	}
 
@@ -694,7 +703,7 @@ filt_ptcwdetach(struct knote *kn)
 	int s;
 
 	s = spltty();
-	SLIST_REMOVE(&pti->pt_selw.si_note, kn, knote, kn_selnext);
+	klist_remove(&pti->pt_selw.si_note, kn);
 	splx(s);
 }
 
@@ -711,7 +720,8 @@ filt_ptcwrite(struct knote *kn, long hint)
 		if (ISSET(pti->pt_flags, PF_REMOTE)) {
 			if (tp->t_canq.c_cc == 0)
 				kn->kn_data = tp->t_canq.c_cn;
-		} else if (tp->t_rawq.c_cc + tp->t_canq.c_cc < TTYHOG(tp)-2)
+		} else if ((tp->t_rawq.c_cc + tp->t_canq.c_cc < TTYHOG(tp)-2) ||
+		    (tp->t_canq.c_cc == 0 && ISSET(tp->t_lflag, ICANON)))
 			kn->kn_data = tp->t_canq.c_cn -
 			    (tp->t_rawq.c_cc + tp->t_canq.c_cc);
 	}
@@ -719,10 +729,26 @@ filt_ptcwrite(struct knote *kn, long hint)
 	return (kn->kn_data > 0);
 }
 
-struct filterops ptcread_filtops =
-	{ 1, NULL, filt_ptcrdetach, filt_ptcread };
-struct filterops ptcwrite_filtops =
-	{ 1, NULL, filt_ptcwdetach, filt_ptcwrite };
+const struct filterops ptcread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_ptcrdetach,
+	.f_event	= filt_ptcread,
+};
+
+const struct filterops ptcwrite_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_ptcwdetach,
+	.f_event	= filt_ptcwrite,
+};
+
+const struct filterops ptcexcept_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_ptcrdetach,
+	.f_event	= filt_ptcread,
+};
 
 int
 ptckqfilter(dev_t dev, struct knote *kn)
@@ -740,6 +766,10 @@ ptckqfilter(dev_t dev, struct knote *kn)
 		klist = &pti->pt_selw.si_note;
 		kn->kn_fop = &ptcwrite_filtops;
 		break;
+	case EVFILT_EXCEPT:
+		klist = &pti->pt_selr.si_note;
+		kn->kn_fop = &ptcexcept_filtops;
+		break;
 	default:
 		return (EINVAL);
 	}
@@ -747,7 +777,7 @@ ptckqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = (caddr_t)pti;
 
 	s = spltty();
-	SLIST_INSERT_HEAD(klist, kn, kn_selnext);
+	klist_insert(klist, kn);
 	splx(s);
 
 	return (0);

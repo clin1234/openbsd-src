@@ -1,4 +1,4 @@
-/*	$OpenBSD: kbd.c,v 1.30 2015/09/26 21:51:58 jasper Exp $	*/
+/*	$OpenBSD: kbd.c,v 1.34 2020/02/09 10:13:13 florian Exp $	*/
 
 /* This file is in the public domain. */
 
@@ -15,6 +15,10 @@
 #include "key.h"
 #include "macro.h"
 
+#ifdef  MGLOG
+#include "log.h"
+#endif
+
 #define METABIT 0x80
 
 #define PROMPTL 80
@@ -22,13 +26,13 @@ char	 prompt[PROMPTL] = "", *promptp = prompt;
 
 static int mgwrap(PF, int, int);
 
-static int	 use_metakey = TRUE;
-static int	 pushed = FALSE;
-static int	 pushedc;
+static int		 use_metakey = TRUE;
+static int		 pushed = FALSE;
+static int		 pushedc;
 
 struct map_element	*ele;
-
-struct key key;
+struct key		 key;
+int			 rptcount;
 
 /*
  * Toggle the value of use_metakey
@@ -151,6 +155,11 @@ doin(void)
 	while ((funct = doscan(curmap, (key.k_chars[key.k_count++] =
 	    getkey(TRUE)), &curmap)) == NULL)
 		/* nothing */;
+
+#ifdef  MGLOG
+	if (!mglog(funct, curmap))
+		ewprintf("Problem with logging");
+#endif
 
 	if (macrodef && macrocount < MAXMACRO)
 		macro[macrocount++].m_funct = funct;
@@ -378,6 +387,29 @@ selfinsert(int f, int n)
 			return (TRUE);
 	}
 	return (linsert(n, c));
+}
+
+/*
+ * selfinsert() can't be called directly from a startup file or by
+ * 'eval-current-buffer' since it is by design, meant to be called interactively
+ * as characters are typed in a buffer. ask_selfinsert() allows selfinsert() to
+ * be used by excline(). Having ask_selfinsert() helps with regression testing.
+ * No manual page entry since use case is a bit obscure. See 'insert' command.
+ */
+int
+ask_selfinsert(int f, int n)
+{
+	char	*c, cbuf[2];
+
+	if ((c = eread("Insert a character: ", cbuf, sizeof(cbuf),
+	    EFNEW)) == NULL || (c[0] == '\0'))
+		return (ABORT);
+
+	key.k_chars[0] = *c;
+	key.k_chars[1] = '\0';
+	key.k_count = 1;
+
+	return (selfinsert(FFRAND, 1));
 }
 
 /*

@@ -1,4 +1,4 @@
-/* $OpenBSD: wsconsio.h,v 1.91 2019/03/24 17:55:39 bru Exp $ */
+/* $OpenBSD: wsconsio.h,v 1.94 2020/03/22 07:59:59 anton Exp $ */
 /* $NetBSD: wsconsio.h,v 1.74 2005/04/28 07:15:44 martin Exp $ */
 
 /*
@@ -81,9 +81,9 @@ struct wscons_event {
 #define	WSCONS_EVENT_MOUSE_DELTA_W	16	/* W delta amount */
 #define	WSCONS_EVENT_MOUSE_ABSOLUTE_W	17	/* (legacy, see below) */
 #define	WSCONS_EVENT_SYNC		18
-/* 
+/*
  * Following events are not real wscons_event but are used as parameters of the
- * WSDISPLAYIO_WSMOUSED ioctl 
+ * WSDISPLAYIO_WSMOUSED ioctl
  */
 #define WSCONS_EVENT_WSMOUSED_ON	12	/* wsmoused(8) active */
 #define WSCONS_EVENT_WSMOUSED_OFF	13	/* wsmoused(8) inactive */
@@ -292,6 +292,8 @@ enum wsmousecfg {
 	WSMOUSECFG_SWAPXY,	/* swap X- and Y-axis */
 	WSMOUSECFG_X_INV,	/* map absolute coordinate X to (INV - X) */
 	WSMOUSECFG_Y_INV,	/* map absolute coordinate Y to (INV - Y) */
+	WSMOUSECFG_REVERSE_SCROLLING,
+				/* reverse scroll directions */
 
 	/*
 	 * Coordinate handling, applying only in WSMOUSE_COMPAT  mode.
@@ -343,7 +345,7 @@ enum wsmousecfg {
 	WSMOUSECFG_LOG_INPUT = 256,
 	WSMOUSECFG_LOG_EVENTS,
 };
-#define WSMOUSECFG_MAX	38	/* max size of param array per ioctl */
+#define WSMOUSECFG_MAX	39	/* max size of param array per ioctl */
 
 struct wsmouse_param {
 	enum wsmousecfg key;
@@ -436,6 +438,7 @@ struct wsmouse_parameters {
 #define		WSDISPLAY_TYPE_INTELDRM	69	/* Intel KMS framebuffer */
 #define		WSDISPLAY_TYPE_RADEONDRM 70	/* ATI Radeon KMS framebuffer */
 #define		WSDISPLAY_TYPE_EFIFB	71	/* EFI framebuffer */
+#define		WSDISPLAY_TYPE_RKDRM	72	/* Rockchip KMS framebuffer */
 
 /* Basic display information.  Not applicable to all display types. */
 struct wsdisplay_fbinfo {
@@ -453,7 +456,7 @@ struct wsdisplay_cmap {
 	u_char	*red;				/* red color map elements */
 	u_char	*green;				/* green color map elements */
 	u_char	*blue;				/* blue color map elements */
-};      
+};
 #define WSDISPLAYIO_GETCMAP	_IOW('W', 66, struct wsdisplay_cmap)
 #define WSDISPLAYIO_PUTCMAP	_IOW('W', 67, struct wsdisplay_cmap)
 
@@ -535,7 +538,7 @@ struct wsdisplay_burner {
 #define	WSDISPLAY_BURN_OUTPUT	0x0008
 };
 #define	WSDISPLAYIO_SBURNER	_IOW('W', 81, struct wsdisplay_burner)
-#define	WSDISPLAYIO_GBURNER	_IOR('W', 82, struct wsdisplay_burner) 
+#define	WSDISPLAYIO_GBURNER	_IOR('W', 82, struct wsdisplay_burner)
 
 /*
  * XXX WARNING

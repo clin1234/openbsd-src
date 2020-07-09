@@ -1,7 +1,7 @@
-/*	$OpenBSD: cgi.c,v 1.104 2019/03/06 12:32:10 schwarze Exp $ */
+/* $OpenBSD: cgi.c,v 1.111 2020/06/29 19:16:59 schwarze Exp $ */
 /*
+ * Copyright (c) 2014-2019 Ingo Schwarze <schwarze@usta.de>
  * Copyright (c) 2011, 2012 Kristaps Dzonsons <kristaps@bsd.lv>
- * Copyright (c) 2014, 2015, 2016, 2017, 2018 Ingo Schwarze <schwarze@usta.de>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,6 +14,8 @@
  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ * Implementation of the man.cgi(8) program.
  */
 #include <sys/types.h>
 #include <sys/time.h>
@@ -66,14 +68,15 @@ enum	focus {
 static	void		 html_print(const char *);
 static	void		 html_putchar(char);
 static	int		 http_decode(char *);
-static	void		 http_encode(const char *p);
+static	void		 http_encode(const char *);
 static	void		 parse_manpath_conf(struct req *);
-static	void		 parse_path_info(struct req *req, const char *path);
+static	void		 parse_path_info(struct req *, const char *);
 static	void		 parse_query_string(struct req *, const char *);
 static	void		 pg_error_badrequest(const char *);
 static	void		 pg_error_internal(void);
 static	void		 pg_index(const struct req *);
-static	void		 pg_noresult(const struct req *, const char *);
+static	void		 pg_noresult(const struct req *, int, const char *,
+				const char *);
 static	void		 pg_redirect(const struct req *, const char *);
 static	void		 pg_search(const struct req *);
 static	void		 pg_searchres(const struct req *,
@@ -115,10 +118,11 @@ static	const char *const sec_names[] = {
 static	const int sec_MAX = sizeof(sec_names) / sizeof(char *);
 
 static	const char *const arch_names[] = {
-    "amd64",       "alpha",       "armv7",	"arm64",
-    "hppa",        "i386",        "landisk",
-    "loongson",    "luna88k",     "macppc",      "mips64",
-    "octeon",      "sgi",         "socppc",      "sparc64",
+    "amd64",       "alpha",       "armv7",       "arm64",
+    "hppa",        "i386",        "landisk",     "loongson",
+    "luna88k",     "macppc",      "mips64",      "octeon",
+    "powerpc64",   "sgi",         "socppc",      "sparc64",
+
     "amiga",       "arc",         "armish",      "arm32",
     "atari",       "aviion",      "beagle",      "cats",
     "hppa64",      "hp300",
@@ -335,6 +339,8 @@ resp_begin_http(int code, const char *msg)
 
 	printf("Content-Type: text/html; charset=utf-8\r\n"
 	     "Cache-Control: no-cache\r\n"
+	     "Content-Security-Policy: default-src 'none'; "
+	     "style-src 'self' 'unsafe-inline'\r\n"
 	     "Pragma: no-cache\r\n"
 	     "\r\n");
 
@@ -404,7 +410,8 @@ resp_searchform(const struct req *req, enum focus focus)
 {
 	int		 i;
 
-	printf("<form action=\"/%s\" method=\"get\">\n"
+	printf("<form action=\"/%s\" method=\"get\" "
+	       "autocomplete=\"off\" autocapitalize=\"none\">\n"
 	       "  <fieldset>\n"
 	       "    <legend>Manual Page Search Parameters</legend>\n",
 	       scriptname);
@@ -542,12 +549,13 @@ pg_index(const struct req *req)
 }
 
 static void
-pg_noresult(const struct req *req, const char *msg)
+pg_noresult(const struct req *req, int code, const char *http_msg,
+    const char *user_msg)
 {
-	resp_begin_html(200, NULL, NULL);
+	resp_begin_html(code, http_msg, NULL);
 	resp_searchform(req, FOCUS_QUERY);
 	puts("<p>");
-	puts(msg);
+	puts(user_msg);
 	puts("</p>");
 	resp_end_html();
 }
@@ -865,7 +873,6 @@ resp_format(const struct req *req, const char *file)
 	memset(&conf, 0, sizeof(conf));
 	conf.fragment = 1;
 	conf.style = mandoc_strdup(CSS_DIR "/mandoc.css");
-	conf.toc = 1;
 	usepath = strcmp(req->q.manpath, req->p[0]);
 	mandoc_asprintf(&conf.man, "/%s%s%s%s%%N.%%S",
 	    scriptname, *scriptname == '\0' ? "" : "/",
@@ -1013,9 +1020,10 @@ pg_search(const struct req *req)
 	if (req->isquery && req->q.equal && argc == 1)
 		pg_redirect(req, argv[0]);
 	else if (mansearch(&search, &paths, argc, argv, &res, &ressz) == 0)
-		pg_noresult(req, "You entered an invalid query.");
+		pg_noresult(req, 400, "Bad Request",
+		    "You entered an invalid query.");
 	else if (ressz == 0)
-		pg_noresult(req, "No results found.");
+		pg_noresult(req, 404, "Not Found", "No results found.");
 	else
 		pg_searchres(req, res, ressz);
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: boot.c,v 1.7 2019/04/10 22:02:03 aoyama Exp $	*/
+/*	$OpenBSD: boot.c,v 1.10 2020/05/26 13:47:29 deraadt Exp $	*/
 /*	$NetBSD: boot.c,v 1.3 2013/03/05 15:34:53 tsutsui Exp $	*/
 
 /*
@@ -87,6 +87,7 @@
 #include <luna88k/stand/boot/samachdep.h>
 #include <luna88k/stand/boot/status.h>
 #include <lib/libsa/loadfile.h>
+#include <lib/libsa/arc4.h>
 
 int howto;
 
@@ -100,6 +101,7 @@ uint32_t cpu_bootarg1;
 uint32_t cpu_bootarg2;
 
 char rnddata[BOOTRANDOM_MAX];
+struct rc4_ctx randomctx;
 
 #if 0
 int
@@ -197,6 +199,9 @@ bootunix(char *line)
 		rnd_loaded = loadrandom(rndpath, rnddata, sizeof(rnddata));
 	}
 
+	rc4_keysetup(&randomctx, rnddata, sizeof rnddata);
+	rc4_skip(&randomctx, 1536);
+
 	/* Note marks[MARK_START] is passed as an load address offset */
 	memset(marks, 0, sizeof(marks));
 
@@ -223,21 +228,29 @@ int
 loadrandom(const char *name, char *buf, size_t buflen)
 {
 	struct stat sb;
-	int fd;
-	int rc = 0;
+	int fd, error = 0;
 
 	fd = open(name, O_RDONLY);
 	if (fd == -1) {
 		if (errno != EPERM)
 			printf("cannot open %s: %s\n", name, strerror(errno));
-		return 0;
+		return -1;
 	}
-	if (fstat(fd, &sb) == -1 || sb.st_uid != 0 || !S_ISREG(sb.st_mode) ||
-	    (sb.st_mode & (S_IWOTH|S_IROTH)))
-		goto fail;
-	(void) read(fd, buf, buflen);
-	rc = 1;
-fail:
+	if (fstat(fd, &sb) == -1) {
+		error = -1;
+		goto done;
+	}
+	if (read(fd, buf, buflen) != buflen) {
+		error = -1;
+		goto done;
+	}
+	if (sb.st_mode & S_ISTXT) {
+		printf("NOTE: random seed is being reused.\n");
+		error = -1;
+		goto done;
+	}
+	fchmod(fd, sb.st_mode | S_ISTXT);
+done:
 	close(fd);
-	return rc;
+	return (error);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: parser.c,v 1.93 2019/04/10 15:22:18 claudio Exp $ */
+/*	$OpenBSD: parser.c,v 1.104 2020/05/12 13:26:02 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -32,7 +32,6 @@
 #include <unistd.h>
 
 #include "parser.h"
-#include "irrfilter.h"
 
 enum token_type {
 	NOTOKEN,
@@ -47,7 +46,7 @@ enum token_type {
 	PEERDESC,
 	GROUPDESC,
 	RIBNAME,
-	SHUTDOWN_COMMUNICATION,
+	COMMUNICATION,
 	COMMUNITY,
 	EXTCOMMUNITY,
 	EXTCOM_SUBTYPE,
@@ -61,15 +60,8 @@ enum token_type {
 	WEIGHT,
 	RD,
 	FAMILY,
-	GETOPT,
 	RTABLE,
-	FILENAME,
-	BULK
-};
-
-enum getopts {
-	GETOPT_NONE,
-	GETOPT_IRRFILTER
+	FILENAME
 };
 
 struct token {
@@ -118,19 +110,17 @@ static const struct token t_pftable[];
 static const struct token t_prepnbr[];
 static const struct token t_prepself[];
 static const struct token t_weight[];
-static const struct token t_irrfilter[];
-static const struct token t_irrfilter_opts[];
 static const struct token t_log[];
 static const struct token t_fib_table[];
 static const struct token t_show_fib_table[];
+static const struct token t_communication[];
 
 static const struct token t_main[] = {
-	{ KEYWORD,	"reload",	RELOAD,		NULL},
+	{ KEYWORD,	"reload",	RELOAD,		t_communication},
 	{ KEYWORD,	"show",		SHOW,		t_show},
 	{ KEYWORD,	"fib",		FIB,		t_fib},
 	{ KEYWORD,	"neighbor",	NEIGHBOR,	t_neighbor},
 	{ KEYWORD,	"network",	NONE,		t_network},
-	{ KEYWORD,	"irrfilter",	IRRFILTER,	t_irrfilter},
 	{ KEYWORD,	"log",		NONE,		t_log},
 	{ ENDTOKEN,	"",		NONE,		NULL}
 };
@@ -210,8 +200,9 @@ static const struct token t_show_mrt[] = {
 	{ ASTYPE,	"peer-as",	AS_PEER,	t_show_mrt_as},
 	{ ASTYPE,	"empty-as",	AS_EMPTY,	t_show_mrt},
 	{ FLAG,		"detail",	F_CTL_DETAIL,	t_show_mrt},
-	{ FLAG,		"ssv"	,	F_CTL_SSV,	t_show_mrt},
+	{ FLAG,		"ssv",		F_CTL_SSV,	t_show_mrt},
 	{ KEYWORD,	"neighbor",	NONE,		t_show_mrt_neigh},
+	{ FLAG,		"peers",	F_CTL_NEIGHBORS,t_show_mrt},
 	{ KEYWORD,	"file",		NONE,		t_show_mrt_file},
 	{ FAMILY,	"",		NONE,		t_show_mrt},
 	{ PREFIX,	"",		NONE,		t_show_prefix},
@@ -285,16 +276,16 @@ static const struct token t_neighbor[] = {
 	{ ENDTOKEN,	"",		NONE,		NULL}
 };
 
-static const struct token t_nei_mod_shutc[] = {
+static const struct token t_communication[] = {
 	{ NOTOKEN,	"",		NONE,		NULL},
-	{ SHUTDOWN_COMMUNICATION, "",	NONE,		NULL},
+	{ COMMUNICATION, "",		NONE,		NULL},
 	{ ENDTOKEN,	"",		NONE,		NULL}
 };
 
 static const struct token t_neighbor_modifiers[] = {
 	{ KEYWORD,	"up",		NEIGHBOR_UP,		NULL},
-	{ KEYWORD,	"down",		NEIGHBOR_DOWN,		t_nei_mod_shutc},
-	{ KEYWORD,	"clear",	NEIGHBOR_CLEAR,		t_nei_mod_shutc},
+	{ KEYWORD,	"down",		NEIGHBOR_DOWN,		t_communication},
+	{ KEYWORD,	"clear",	NEIGHBOR_CLEAR,		t_communication},
 	{ KEYWORD,	"refresh",	NEIGHBOR_RREFRESH,	NULL},
 	{ KEYWORD,	"destroy",	NEIGHBOR_DESTROY,	NULL},
 	{ ENDTOKEN,	"",		NONE,			NULL}
@@ -314,6 +305,8 @@ static const struct token t_show_prefix[] = {
 	{ NOTOKEN,	"",		NONE,		NULL},
 	{ FLAG,		"all",		F_LONGER,	NULL},
 	{ FLAG,		"longer-prefixes", F_LONGER,	NULL},
+	{ FLAG,		"or-longer", 	F_LONGER,	NULL},
+	{ FLAG,		"or-shorter", 	F_SHORTER,	NULL},
 	{ ENDTOKEN,	"",		NONE,		NULL}
 };
 
@@ -468,18 +461,6 @@ static const struct token t_weight[] = {
 	{ ENDTOKEN,	"",			NONE,	NULL}
 };
 
-static const struct token t_irrfilter[] = {
-	{ GETOPT,	"",	GETOPT_IRRFILTER,	t_irrfilter},
-	{ ASNUM,	"",	NONE,			t_irrfilter_opts},
-	{ ENDTOKEN,	"",	NONE,			NULL}
-};
-
-static const struct token t_irrfilter_opts[] = {
-	{ NOTOKEN,	"",		NONE,			NULL},
-	{ FLAG,		"importonly",	F_IMPORTONLY,		t_irrfilter_opts},
-	{ ENDTOKEN,	"",		NONE,			NULL}
-};
-
 static const struct token t_log[] = {
 	{ KEYWORD,	"verbose",	LOG_VERBOSE,	NULL},
 	{ KEYWORD,	"brief",	LOG_BRIEF,	NULL},
@@ -505,10 +486,9 @@ void			 show_valid_args(const struct token []);
 int	parse_addr(const char *, struct bgpd_addr *);
 int	parse_asnum(const char *, size_t, u_int32_t *);
 int	parse_number(const char *, struct parse_result *, enum token_type);
-void	parsecommunity(struct filter_community *c, int type, char *s);
-int	parseextcommunity(struct filter_community *c, const char *t, char *s);
+void	parsecommunity(struct community *c, int type, char *s);
+void	parseextcommunity(struct community *c, const char *t, char *s);
 int	parse_nexthop(const char *, struct parse_result *);
-int	bgpctl_getopt(int *, char **[], int);
 
 struct parse_result *
 parse(int argc, char *argv[])
@@ -519,10 +499,6 @@ parse(int argc, char *argv[])
 	bzero(&res, sizeof(res));
 	res.rtableid = getrtable();
 	TAILQ_INIT(&res.set);
-	if ((res.irr_outdir = getcwd(NULL, 0)) == NULL) {
-		fprintf(stderr, "getcwd failed: %s\n", strerror(errno));
-		return (NULL);
-	}
 
 	while (argc >= 0) {
 		if ((match = match_token(&argc, &argv, table)) == NULL) {
@@ -605,29 +581,28 @@ match_token(int *argc, char **argv[], const struct token table[])
 				t = &table[i];
 				res.aid = AID_VPN_IPv4;
 			}
+			if (!strcasecmp(word, "VPNv6")) {
+				match++;
+				t = &table[i];
+				res.aid = AID_VPN_IPv6;
+			}
 			break;
 		case ADDRESS:
 			if (parse_addr(word, &res.addr)) {
 				match++;
 				t = &table[i];
-				if (t->value)
-					res.action = t->value;
 			}
 			break;
 		case PEERADDRESS:
 			if (parse_addr(word, &res.peeraddr)) {
 				match++;
 				t = &table[i];
-				if (t->value)
-					res.action = t->value;
 			}
 			break;
 		case PREFIX:
 			if (parse_prefix(word, wordlen, &res.addr, &res.prefixlen)) {
 				match++;
 				t = &table[i];
-				if (t->value)
-					res.action = t->value;
 			}
 			break;
 		case ASTYPE:
@@ -668,11 +643,11 @@ match_token(int *argc, char **argv[], const struct token table[])
 				t = &table[i];
 			}
 			break;
-		case SHUTDOWN_COMMUNICATION:
+		case COMMUNICATION:
 			if (!match && word != NULL && wordlen > 0) {
-				if (strlcpy(res.shutcomm, word,
-				    sizeof(res.shutcomm)) >=
-				    sizeof(res.shutcomm))
+				if (strlcpy(res.reason, word,
+				    sizeof(res.reason)) >=
+				    sizeof(res.reason))
 					errx(1, "shutdown reason too long");
 				match++;
 				t = &table[i];
@@ -732,7 +707,7 @@ match_token(int *argc, char **argv[], const struct token table[])
 		case RD:
 			if (word != NULL && wordlen > 0) {
 				char *p = strdup(word);
-				struct filter_community ext;
+				struct community ext;
 				u_int64_t rd;
 
 				if (p == NULL)
@@ -740,21 +715,22 @@ match_token(int *argc, char **argv[], const struct token table[])
 				parseextcommunity(&ext, "rt", p);
 				free(p);
 
-				switch (ext.c.e.type) {
+				switch (ext.data3 >> 8) {
 				case EXT_COMMUNITY_TRANS_TWO_AS:
 					rd = (0ULL << 48);
-					rd |= (u_int64_t)ext.c.e.data1 << 32;
-					rd |= ext.c.e.data2 & 0xffffffff;
-					break;
+					rd |= ((u_int64_t)ext.data1 & 0xffff)
+					    << 32;
+					rd |= (u_int64_t)ext.data2;
+				break;
 				case EXT_COMMUNITY_TRANS_IPV4:
 					rd = (1ULL << 48);
-					rd |= (u_int64_t)ext.c.e.data1 << 16;
-					rd |= ext.c.e.data2 & 0xffff;
+					rd |= (u_int64_t)ext.data1 << 16;
+					rd |= (u_int64_t)ext.data2 & 0xffff;
 					break;
 				case EXT_COMMUNITY_TRANS_FOUR_AS:
 					rd = (2ULL << 48);
-					rd |= (u_int64_t)ext.c.e.data1 << 16;
-					rd |= ext.c.e.data2 & 0xffff;
+					rd |= (u_int64_t)ext.data1 << 16;
+					rd |= (u_int64_t)ext.data2 & 0xffff;
 					break;
 				default:
 					errx(1, "bad encoding of rd");
@@ -797,12 +773,6 @@ match_token(int *argc, char **argv[], const struct token table[])
 				t = &table[i];
 			}
 			break;
-		case GETOPT:
-			if (bgpctl_getopt(argc, argv, table[i].value)) {
-				match++;
-				t = &table[i];
-			}
-			break;
 		case FILENAME:
 			if (word != NULL && wordlen > 0) {
 				if ((res.mrtfd = open(word, O_RDONLY)) == -1) {
@@ -819,10 +789,6 @@ match_token(int *argc, char **argv[], const struct token table[])
 				match++;
 				t = &table[i];
 			}
-			break;
-		case BULK:
-			match++;
-			t = &table[i];
 			break;
 		case ENDTOKEN:
 			break;
@@ -875,8 +841,8 @@ show_valid_args(const struct token table[])
 		case RIBNAME:
 			fprintf(stderr, "  <rib name>\n");
 			break;
-		case SHUTDOWN_COMMUNICATION:
-			fprintf(stderr, "  <shutdown reason>\n");
+		case COMMUNICATION:
+			fprintf(stderr, "  <reason>\n");
 			break;
 		case COMMUNITY:
 			fprintf(stderr, "  <community>\n");
@@ -907,15 +873,12 @@ show_valid_args(const struct token table[])
 			fprintf(stderr, "  <pftable>\n");
 			break;
 		case FAMILY:
-			fprintf(stderr, "  [ inet | inet6 | IPv4 | IPv6 | VPNv4 ]\n");
-			break;
-		case GETOPT:
-			fprintf(stderr, "  <options>\n");
+			fprintf(stderr, "  [ inet | inet6 | IPv4 | IPv6 | "
+			    "VPNv4 | VPNv6 ]\n");
 			break;
 		case FILENAME:
 			fprintf(stderr, "  <filename>\n");
 			break;
-		case BULK:
 		case ENDTOKEN:
 			break;
 		}
@@ -1010,7 +973,7 @@ int
 parse_asnum(const char *word, size_t wordlen, u_int32_t *asnum)
 {
 	const char	*errstr;
-	char		*dot;
+	char		*dot, *parseword;
 	u_int32_t	 uval, uvalh = 0;
 
 	if (word == NULL)
@@ -1019,20 +982,22 @@ parse_asnum(const char *word, size_t wordlen, u_int32_t *asnum)
 	if (wordlen < 1 || word[0] < '0' || word[0] > '9')
 		return (0);
 
-	if ((dot = strchr(word,'.')) != NULL) {
+	parseword = strdup(word);
+	if ((dot = strchr(parseword, '.')) != NULL) {
 		*dot++ = '\0';
-		uvalh = strtonum(word, 0, USHRT_MAX, &errstr);
+		uvalh = strtonum(parseword, 0, USHRT_MAX, &errstr);
 		if (errstr)
 			errx(1, "AS number is %s: %s", errstr, word);
 		uval = strtonum(dot, 0, USHRT_MAX, &errstr);
 		if (errstr)
 			errx(1, "AS number is %s: %s", errstr, word);
 	} else {
-		uval = strtonum(word, 0, UINT_MAX, &errstr);
+		uval = strtonum(parseword, 0, UINT_MAX, &errstr);
 		if (errstr)
 			errx(1, "AS number is %s: %s", errstr, word);
 	}
 
+	free(parseword);
 	*asnum = uval | (uvalh << 16);
 	return (1);
 }
@@ -1097,7 +1062,7 @@ parse_number(const char *word, struct parse_result *r, enum token_type type)
 }
 
 static void
-getcommunity(char *s, int large, u_int32_t *val, u_int8_t *flag)
+getcommunity(char *s, int large, u_int32_t *val, u_int32_t *flag)
 {
 	long long	 max = USHRT_MAX;
 	const char	*errstr;
@@ -1122,21 +1087,22 @@ getcommunity(char *s, int large, u_int32_t *val, u_int8_t *flag)
 }
 
 static void
-setcommunity(struct filter_community *c, u_int32_t as, u_int32_t data,
-    u_int8_t asflag, u_int8_t dataflag)
+setcommunity(struct community *c, u_int32_t as, u_int32_t data,
+    u_int32_t asflag, u_int32_t dataflag)
 {
-	memset(c, 0, sizeof(*c));
-	c->type = COMMUNITY_TYPE_BASIC;
-	c->dflag1 = asflag;
-	c->dflag2 = dataflag;
-	c->c.b.data1 = as;
-	c->c.b.data2 = data;
+	c->flags = COMMUNITY_TYPE_BASIC;
+	c->flags |= asflag << 8;
+	c->flags |= dataflag << 16;
+	c->data1 = as;
+	c->data2 = data;
+	c->data3 = 0;
 }
 
 static void
-parselargecommunity(struct filter_community *c, char *s)
+parselargecommunity(struct community *c, char *s)
 {
 	char *p, *q;
+	u_int32_t dflag1, dflag2, dflag3;
 
 	if ((p = strchr(s, ':')) == NULL)
 		errx(1, "Bad community syntax");
@@ -1146,19 +1112,21 @@ parselargecommunity(struct filter_community *c, char *s)
 		errx(1, "Bad community syntax");
 	*q++ = 0;
 
-	getcommunity(s, 1, &c->c.l.data1, &c->dflag1);
-	getcommunity(p, 1, &c->c.l.data2, &c->dflag2);
-	getcommunity(q, 1, &c->c.l.data3, &c->dflag3);
+	getcommunity(s, 1, &c->data1, &dflag1);
+	getcommunity(p, 1, &c->data2, &dflag2);
+	getcommunity(q, 1, &c->data3, &dflag3);
 
-	c->type = COMMUNITY_TYPE_LARGE;
+	c->flags = COMMUNITY_TYPE_LARGE;
+	c->flags |= dflag1 << 8;
+	c->flags |= dflag2 << 16;
+	c->flags |= dflag3 << 24;
 }
 
 void
-parsecommunity(struct filter_community *c, int type, char *s)
+parsecommunity(struct community *c, int type, char *s)
 {
 	char *p;
-	u_int32_t as, data;
-	u_int8_t asflag, dataflag;
+	u_int32_t as, data, asflag, dataflag;
 
 	if (type == COMMUNITY_TYPE_LARGE) {
 		parselargecommunity(c, s);
@@ -1207,7 +1175,6 @@ parsesubtype(const char *name, int *type, int *subtype)
 	const struct ext_comm_pairs *cp;
 	int found = 0;
 
-printf("%s: looking for %s\n", __func__, name);
 	for (cp = iana_ext_comms; cp->subname != NULL; cp++) {
 		if (strcmp(name, cp->subname) == 0) {
 			if (found == 0) {
@@ -1223,15 +1190,23 @@ printf("%s: looking for %s\n", __func__, name);
 }
 
 static int
-parseextvalue(int type, char *s, u_int32_t *v)
+parseextvalue(int type, char *s, u_int32_t *v, u_int32_t *flag)
 {
-	const char 	*errstr;
+	const char	*errstr;
 	char		*p;
 	struct in_addr	 ip;
 	u_int32_t	 uvalh, uval;
 
 	if (type != -1) {
 		/* nothing */
+	} else if (strcmp(s, "neighbor-as") == 0) {
+		*flag = COMMUNITY_NEIGHBOR_AS;
+		*v = 0;
+		return EXT_COMMUNITY_TRANS_FOUR_AS;
+	} else if (strcmp(s, "local-as") == 0) {
+		*flag = COMMUNITY_LOCAL_AS;
+		*v = 0;
+		return EXT_COMMUNITY_TRANS_FOUR_AS;
 	} else if ((p = strchr(s, '.')) == NULL) {
 		/* AS_PLAIN number (4 or 2 byte) */
 		strtonum(s, 0, USHRT_MAX, &errstr);
@@ -1283,16 +1258,20 @@ parseextvalue(int type, char *s, u_int32_t *v)
 	return (type);
 }
 
-int
-parseextcommunity(struct filter_community *c, const char *t, char *s)
+void
+parseextcommunity(struct community *c, const char *t, char *s)
 {
 	const struct ext_comm_pairs *cp;
-	const char 	*errstr;
-	u_int64_t	 ullval;
-	u_int32_t	 uval;
 	char		*p, *ep;
+	u_int64_t	 ullval;
+	u_int32_t	 uval, uval2, dflag1 = 0, dflag2 = 0;
 	int		 type = 0, subtype = 0;
 
+	if (strcmp(t, "*") == 0 && strcmp(s, "*") == 0) {
+		c->flags = COMMUNITY_TYPE_EXT;
+		c->flags |= COMMUNITY_ANY << 24;
+		return;
+	}
 	if (parsesubtype(t, &type, &subtype) == 0)
 		errx(1, "Bad ext-community unknown type");
 
@@ -1301,55 +1280,80 @@ parseextcommunity(struct filter_community *c, const char *t, char *s)
 	case EXT_COMMUNITY_TRANS_FOUR_AS:
 	case EXT_COMMUNITY_TRANS_IPV4:
 	case -1:
+		if (strcmp(s, "*") == 0) {
+			dflag1 = COMMUNITY_ANY;
+			break;
+		}
 		if ((p = strchr(s, ':')) == NULL)
 			errx(1, "Bad ext-community %s", s);
 		*p++ = '\0';
-		type = parseextvalue(type, s, &uval);
+		type = parseextvalue(type, s, &uval, &dflag1);
+
 		switch (type) {
 		case EXT_COMMUNITY_TRANS_TWO_AS:
-			ullval = strtonum(p, 0, UINT_MAX, &errstr);
+			getcommunity(p, 1, &uval2, &dflag2);
 			break;
 		case EXT_COMMUNITY_TRANS_IPV4:
 		case EXT_COMMUNITY_TRANS_FOUR_AS:
-			ullval = strtonum(p, 0, USHRT_MAX, &errstr);
+			getcommunity(p, 0, &uval2, &dflag2);
 			break;
 		default:
 			errx(1, "parseextcommunity: unexpected result");
 		}
-		if (errstr)
-			errx(1, "Bad ext-community %s is %s", p, errstr);
-		c->c.e.data1 = uval;
-		c->c.e.data2 = ullval;
+
+		c->data1 = uval;
+		c->data2 = uval2;
 		break;
 	case EXT_COMMUNITY_TRANS_OPAQUE:
 	case EXT_COMMUNITY_TRANS_EVPN:
+		if (strcmp(s, "*") == 0) {
+			dflag1 = COMMUNITY_ANY;
+			break;
+		}
 		errno = 0;
 		ullval = strtoull(s, &ep, 0);
 		if (s[0] == '\0' || *ep != '\0')
 			errx(1, "Bad ext-community bad value");
 		if (errno == ERANGE && ullval > EXT_COMMUNITY_OPAQUE_MAX)
 			errx(1, "Bad ext-community value too big");
-		c->c.e.data2 = ullval;
+		c->data1 = ullval >> 32;
+		c->data2 = ullval;
 		break;
 	case EXT_COMMUNITY_NON_TRANS_OPAQUE:
-		if (strcmp(s, "valid") == 0)
-			c->c.e.data2 = EXT_COMMUNITY_OVS_VALID;
-		else if (strcmp(s, "invalid") == 0)
-			c->c.e.data2 = EXT_COMMUNITY_OVS_INVALID;
-		else if (strcmp(s, "not-found") == 0)
-			c->c.e.data2 = EXT_COMMUNITY_OVS_NOTFOUND;
-		else
-			errx(1, "Bad ext-community %s", s);
-		break;
+		if (subtype == EXT_COMMUNITY_SUBTYPE_OVS) {
+			if (strcmp(s, "valid") == 0) {
+				c->data2 = EXT_COMMUNITY_OVS_VALID;
+				break;
+			} else if (strcmp(s, "invalid") == 0) {
+				c->data2 = EXT_COMMUNITY_OVS_INVALID;
+				break;
+			} else if (strcmp(s, "not-found") == 0) {
+				c->data2 = EXT_COMMUNITY_OVS_NOTFOUND;
+				break;
+			} else if (strcmp(s, "*") == 0) {
+				dflag1 = COMMUNITY_ANY;
+				break;
+			}
+		}
+		errx(1, "Bad ext-community %s", s);
 	}
-	c->c.e.type = type;
-	c->c.e.subtype = subtype;
+
+	c->data3 = type << 8 | subtype;
+
+	/* special handling of ext-community rt * since type is not known */
+	if (dflag1 == COMMUNITY_ANY && type == -1) {
+		c->flags = COMMUNITY_TYPE_EXT;
+		c->flags |= dflag1 << 8;
+		return;
+	}
 
 	/* verify type/subtype combo */
 	for (cp = iana_ext_comms; cp->subname != NULL; cp++) {
 		if (cp->type == type && cp->subtype == subtype) {
-			c->type = COMMUNITY_TYPE_EXT;
-			return (0);
+			c->flags = COMMUNITY_TYPE_EXT;
+			c->flags |= dflag1 << 8;
+			c->flags |= dflag2 << 16;
+			return;
 		}
 	}
 
@@ -1379,39 +1383,4 @@ parse_nexthop(const char *word, struct parse_result *r)
 
 	TAILQ_INSERT_TAIL(&r->set, fs, entry);
 	return (1);
-}
-
-int
-bgpctl_getopt(int *argc, char **argv[], int type)
-{
-	int	  ch;
-
-	optind = optreset = 1;
-	while ((ch = getopt((*argc) + 1, (*argv) - 1, "46o:")) != -1) {
-		switch (ch) {
-		case '4':
-			res.flags = (res.flags | F_IPV4) & ~F_IPV6;
-			break;
-		case '6':
-			res.flags = (res.flags | F_IPV6) & ~F_IPV4;
-			break;
-		case 'o':
-			res.irr_outdir = optarg;
-			break;
-		default:
-			usage();
-			/* NOTREACHED */
-		}
-	}
-
-	if (optind > 1) {
-		(*argc) -= (optind - 1);
-		(*argv) += (optind - 1);
-
-		/* need to move one backwards as calling code moves forward */
-		(*argc)++;
-		(*argv)--;
-		return (1);
-	} else
-		return (0);
 }

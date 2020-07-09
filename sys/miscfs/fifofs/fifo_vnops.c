@@ -1,4 +1,4 @@
-/*	$OpenBSD: fifo_vnops.c,v 1.68 2018/07/30 12:22:14 mpi Exp $	*/
+/*	$OpenBSD: fifo_vnops.c,v 1.77 2020/06/15 15:29:40 mpi Exp $	*/
 /*	$NetBSD: fifo_vnops.c,v 1.18 1996/03/16 23:52:42 christos Exp $	*/
 
 /*
@@ -64,7 +64,7 @@ struct fifoinfo {
 	long		fi_writers;
 };
 
-struct vops fifo_vops = {
+const struct vops fifo_vops = {
 	.vop_lookup	= vop_generic_lookup,
 	.vop_create	= fifo_badop,
 	.vop_mknod	= fifo_badop,
@@ -107,10 +107,19 @@ int	filt_fiforead(struct knote *kn, long hint);
 void	filt_fifowdetach(struct knote *kn);
 int	filt_fifowrite(struct knote *kn, long hint);
 
-struct filterops fiforead_filtops =
-	{ 1, NULL, filt_fifordetach, filt_fiforead };
-struct filterops fifowrite_filtops =
-	{ 1, NULL, filt_fifowdetach, filt_fifowrite };
+const struct filterops fiforead_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_fifordetach,
+	.f_event	= filt_fiforead,
+};
+
+const struct filterops fifowrite_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_fifowdetach,
+	.f_event	= filt_fifowrite,
+};
 
 /*
  * Open called to set up a new instance of a fifo or
@@ -183,16 +192,16 @@ fifo_open(void *v)
 	if ((ap->a_mode & O_NONBLOCK) == 0) {
 		if ((ap->a_mode & FREAD) && fip->fi_writers == 0) {
 			VOP_UNLOCK(vp);
-			error = tsleep(&fip->fi_readers,
-			    PCATCH | PSOCK, "fifor", 0);
+			error = tsleep_nsec(&fip->fi_readers,
+			    PCATCH | PSOCK, "fifor", INFSLP);
 			vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
 			if (error)
 				goto bad;
 		}
 		if ((ap->a_mode & FWRITE) && fip->fi_readers == 0) {
 			VOP_UNLOCK(vp);
-			error = tsleep(&fip->fi_writers,
-			    PCATCH | PSOCK, "fifow", 0);
+			error = tsleep_nsec(&fip->fi_writers,
+			    PCATCH | PSOCK, "fifow", INFSLP);
 			vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
 			if (error)
 				goto bad;
@@ -498,16 +507,23 @@ int
 fifo_kqfilter(void *v)
 {
 	struct vop_kqfilter_args *ap = v;
-	struct socket *so = (struct socket *)ap->a_vp->v_fifoinfo->fi_readsock;
+	struct fifoinfo *fip = ap->a_vp->v_fifoinfo;
 	struct sockbuf *sb;
+	struct socket *so;
 
 	switch (ap->a_kn->kn_filter) {
 	case EVFILT_READ:
+		if (!(ap->a_fflag & FREAD))
+			return (EINVAL);
 		ap->a_kn->kn_fop = &fiforead_filtops;
+		so = fip->fi_readsock;
 		sb = &so->so_rcv;
 		break;
 	case EVFILT_WRITE:
+		if (!(ap->a_fflag & FWRITE))
+			return (EINVAL);
 		ap->a_kn->kn_fop = &fifowrite_filtops;
+		so = fip->fi_writesock;
 		sb = &so->so_snd;
 		break;
 	default:
@@ -516,7 +532,7 @@ fifo_kqfilter(void *v)
 
 	ap->a_kn->kn_hook = so;
 
-	SLIST_INSERT_HEAD(&sb->sb_sel.si_note, ap->a_kn, kn_selnext);
+	klist_insert(&sb->sb_sel.si_note, ap->a_kn);
 	sb->sb_flagsintr |= SB_KNOTE;
 
 	return (0);
@@ -527,8 +543,8 @@ filt_fifordetach(struct knote *kn)
 {
 	struct socket *so = (struct socket *)kn->kn_hook;
 
-	SLIST_REMOVE(&so->so_rcv.sb_sel.si_note, kn, knote, kn_selnext);
-	if (SLIST_EMPTY(&so->so_rcv.sb_sel.si_note))
+	klist_remove(&so->so_rcv.sb_sel.si_note, kn);
+	if (klist_empty(&so->so_rcv.sb_sel.si_note))
 		so->so_rcv.sb_flagsintr &= ~SB_KNOTE;
 }
 
@@ -536,16 +552,24 @@ int
 filt_fiforead(struct knote *kn, long hint)
 {
 	struct socket *so = (struct socket *)kn->kn_hook;
-	int rv;
+	int s, rv;
 
+	if ((hint & NOTE_SUBMIT) == 0)
+		s = solock(so);
 	kn->kn_data = so->so_rcv.sb_cc;
 	if (so->so_state & SS_CANTRCVMORE) {
 		kn->kn_flags |= EV_EOF;
+		if (kn->kn_flags & __EV_POLL) {
+			if (so->so_state & SS_ISDISCONNECTED)
+				kn->kn_flags |= __EV_HUP;
+		}
 		rv = 1;
 	} else {
 		kn->kn_flags &= ~EV_EOF;
 		rv = (kn->kn_data > 0);
 	}
+	if ((hint & NOTE_SUBMIT) == 0)
+		sounlock(so, s);
 
 	return (rv);
 }
@@ -555,8 +579,8 @@ filt_fifowdetach(struct knote *kn)
 {
 	struct socket *so = (struct socket *)kn->kn_hook;
 
-	SLIST_REMOVE(&so->so_snd.sb_sel.si_note, kn, knote, kn_selnext);
-	if (SLIST_EMPTY(&so->so_snd.sb_sel.si_note))
+	klist_remove(&so->so_snd.sb_sel.si_note, kn);
+	if (klist_empty(&so->so_snd.sb_sel.si_note))
 		so->so_snd.sb_flagsintr &= ~SB_KNOTE;
 }
 
@@ -564,8 +588,10 @@ int
 filt_fifowrite(struct knote *kn, long hint)
 {
 	struct socket *so = (struct socket *)kn->kn_hook;
-	int rv;
+	int s, rv;
 
+	if ((hint & NOTE_SUBMIT) == 0)
+		s = solock(so);
 	kn->kn_data = sbspace(so, &so->so_snd);
 	if (so->so_state & SS_CANTSENDMORE) {
 		kn->kn_flags |= EV_EOF;
@@ -574,6 +600,8 @@ filt_fifowrite(struct knote *kn, long hint)
 		kn->kn_flags &= ~EV_EOF;
 		rv = (kn->kn_data >= so->so_snd.sb_lowat);
 	}
+	if ((hint & NOTE_SUBMIT) == 0)
+		sounlock(so, s);
 
 	return (rv);
 }

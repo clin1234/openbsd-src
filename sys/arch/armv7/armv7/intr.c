@@ -1,4 +1,4 @@
-/* $OpenBSD: intr.c,v 1.14 2018/08/08 11:06:33 patrick Exp $ */
+/* $OpenBSD: intr.c,v 1.17 2020/04/27 13:02:50 kettenis Exp $ */
 /*
  * Copyright (c) 2011 Dale Rahn <drahn@openbsd.org>
  *
@@ -17,10 +17,8 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/timetc.h>
 #include <sys/malloc.h>
 
-#include <dev/clock_subr.h>
 #include <arm/cpufunc.h>
 #include <machine/cpu.h>
 #include <machine/intr.h>
@@ -28,7 +26,7 @@
 #include <dev/ofw/openfirm.h>
 
 uint32_t arm_intr_get_parent(int);
-uint32_t arm_intr_msi_get_parent(int);
+uint32_t arm_intr_map_msi(int, uint64_t *);
 
 void *arm_intr_prereg_establish_fdt(void *, int *, int, int (*)(void *),
     void *, char *);
@@ -105,15 +103,67 @@ arm_intr_get_parent(int node)
 }
 
 uint32_t
-arm_intr_msi_get_parent(int node)
+arm_intr_map_msi(int node, uint64_t *data)
 {
+	uint64_t msi_base;
 	uint32_t phandle = 0;
+	uint32_t *cell;
+	uint32_t *map;
+	uint32_t mask, rid_base, rid;
+	int i, len, length, mcells, ncells;
 
-	while (node && !phandle) {
-		phandle = OF_getpropint(node, "msi-parent", 0);
-		node = OF_parent(node);
+	len = OF_getproplen(node, "msi-map");
+	if (len <= 0) {
+		while (node && !phandle) {
+			phandle = OF_getpropint(node, "msi-parent", 0);
+			node = OF_parent(node);
+		}
+
+		return phandle;
 	}
 
+	map = malloc(len, M_TEMP, M_WAITOK);
+	OF_getpropintarray(node, "msi-map", map, len);
+
+	mask = OF_getpropint(node, "msi-map-mask", 0xffff);
+	rid = *data & mask;
+
+	cell = map;
+	ncells = len / sizeof(uint32_t);
+	while (ncells > 1) {
+		node = OF_getnodebyphandle(cell[1]);
+		if (node == 0)
+			goto out;
+
+		/*
+		 * Some device trees (e.g. those for the Rockchip
+		 * RK3399 boards) are missing a #msi-cells property.
+		 * Assume the msi-specifier uses a single cell in that
+		 * case.
+		 */
+		mcells = OF_getpropint(node, "#msi-cells", 1);
+		if (ncells < mcells + 3)
+			goto out;
+
+		rid_base = cell[0];
+		length = cell[2 + mcells];
+		msi_base = cell[2];
+		for (i = 1; i < mcells; i++) {
+			msi_base <<= 32;
+			msi_base |= cell[2 + i];
+		}
+		if (rid >= rid_base && rid < rid_base + length) {
+			*data = msi_base + (rid - rid_base);
+			phandle = cell[1];
+			break;
+		}
+
+		cell += (3 + mcells);
+		ncells -= (3 + mcells);
+	}
+
+out:
+	free(map, M_TEMP, len);
 	return phandle;
 }
 
@@ -339,7 +389,7 @@ arm_intr_establish_fdt_imap(int node, int *reg, int nreg, int level,
 	struct arm_intr_handle *ih;
 	uint32_t *cell;
 	uint32_t map_mask[4], *map;
-	int i, len, acells, ncells;
+	int len, acells, ncells;
 	void *val = NULL;
 
 	if (nreg != sizeof(map_mask))
@@ -358,7 +408,7 @@ arm_intr_establish_fdt_imap(int node, int *reg, int nreg, int level,
 
 	cell = map;
 	ncells = len / sizeof(uint32_t);
-	for (i = 0; ncells > 0; i++) {
+	while (ncells > 5) {
 		LIST_FOREACH(ic, &interrupt_controllers, ic_list) {
 			if (ic->ic_phandle == cell[4])
 				break;
@@ -405,7 +455,7 @@ arm_intr_establish_fdt_msi(int node, uint64_t *addr, uint64_t *data,
 	uint32_t phandle;
 	void *val = NULL;
 
-	phandle = arm_intr_msi_get_parent(node);
+	phandle = arm_intr_map_msi(node, data);
 	LIST_FOREACH(ic, &interrupt_controllers, ic_list) {
 		if (ic->ic_phandle == phandle)
 			break;
@@ -505,6 +555,16 @@ arm_intr_route(void *cookie, int enable, struct cpu_info *ci)
 
 	if (ic->ic_route)
 		ic->ic_route(ih->ih_ih, enable, ci);
+}
+
+void
+arm_intr_cpu_enable(void)
+{
+	struct interrupt_controller *ic;
+
+	LIST_FOREACH(ic, &interrupt_controllers, ic_list)
+		if (ic->ic_cpu_enable)
+			ic->ic_cpu_enable();
 }
 
 int
@@ -754,6 +814,15 @@ cpu_initclocks(void)
 }
 
 void
+cpu_startclock(void)
+{
+	if (arm_clock_func.mpstartclock == NULL)
+		panic("startclock function not initialized yet");
+
+	arm_clock_func.mpstartclock();
+}
+
+void
 arm_dflt_delay(u_int usecs)
 {
 	int j;
@@ -765,91 +834,6 @@ arm_dflt_delay(u_int usecs)
 
 }
 
-todr_chip_handle_t todr_handle;
-
-/*
- * inittodr:
- *
- *      Initialize time from the time-of-day register.
- */
-#define MINYEAR         2003    /* minimum plausible year */
-void
-inittodr(time_t base)
-{
-	time_t deltat;
-	struct timeval rtctime;
-	struct timespec ts;
-	int badbase;
-
-	if (base < (MINYEAR - 1970) * SECYR) {
-		printf("WARNING: preposterous time in file system\n");
-		/* read the system clock anyway */
-		base = (MINYEAR - 1970) * SECYR;
-		badbase = 1;
-	} else
-		badbase = 0;
-
-	if (todr_handle == NULL ||
-	    todr_gettime(todr_handle, &rtctime) != 0 ||
-	    rtctime.tv_sec == 0) {
-		/*
-		 * Believe the time in the file system for lack of
-		 * anything better, resetting the TODR.
-		 */
-		rtctime.tv_sec = base;
-		rtctime.tv_usec = 0;
-		if (todr_handle != NULL && !badbase) {
-			printf("WARNING: preposterous clock chip time\n");
-			resettodr();
-		}
-		ts.tv_sec = rtctime.tv_sec;
-		ts.tv_nsec = rtctime.tv_usec * 1000;
-		tc_setclock(&ts);
-		goto bad;
-	} else {
-		ts.tv_sec = rtctime.tv_sec;
-		ts.tv_nsec = rtctime.tv_usec * 1000;
-		tc_setclock(&ts);
-	}
-
-	if (!badbase) {
-		/*
-		 * See if we gained/lost two or more days; if
-		 * so, assume something is amiss.
-		 */
-		deltat = rtctime.tv_sec - base;
-		if (deltat < 0)
-			deltat = -deltat;
-		if (deltat < 2 * SECDAY)
-			return;         /* all is well */
-		printf("WARNING: clock %s %ld days\n",
-		    rtctime.tv_sec < base ? "lost" : "gained",
-		    (long)deltat / SECDAY);
-	}
- bad:
-	printf("WARNING: CHECK AND RESET THE DATE!\n");
-}
-
-/*
- * resettodr:
- *
- *      Reset the time-of-day register with the current time.
- */
-void
-resettodr(void)
-{
-	struct timeval rtctime;
-
-	if (time_second == 1)
-		return;
-
-	microtime(&rtctime);
-
-	if (todr_handle != NULL &&
-	   todr_settime(todr_handle, &rtctime) != 0)
-		printf("resettodr: failed to set time\n");
-}
-
 void
 setstatclockrate(int new)
 {
@@ -857,4 +841,29 @@ setstatclockrate(int new)
 		panic("arm_clock_func.setstatclockrate not intialized");
 	}
 	arm_clock_func.setstatclockrate(new);
+}
+
+void
+intr_barrier(void *ih)
+{
+	sched_barrier(NULL);
+}
+
+/*
+ * IPI implementation
+ */
+
+void arm_no_send_ipi(struct cpu_info *ci, int id);
+void (*intr_send_ipi_func)(struct cpu_info *, int) = arm_no_send_ipi;
+
+void
+arm_send_ipi(struct cpu_info *ci, int id)
+{
+	(*intr_send_ipi_func)(ci, id);
+}
+
+void
+arm_no_send_ipi(struct cpu_info *ci, int id)
+{
+	panic("arm_send_ipi() called: no ipi function");
 }

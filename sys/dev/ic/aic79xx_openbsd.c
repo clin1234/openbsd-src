@@ -1,4 +1,4 @@
-/*	$OpenBSD: aic79xx_openbsd.c,v 1.46 2017/12/12 12:33:36 krw Exp $	*/
+/*	$OpenBSD: aic79xx_openbsd.c,v 1.52 2020/07/02 15:58:17 krw Exp $	*/
 
 /*
  * Copyright (c) 2004 Milos Urbanek, Kenneth R. Westerback & Marco Peereboom
@@ -76,18 +76,13 @@ void	ahd_setup_data(struct ahd_softc *, struct scsi_xfer *,
 		    struct scb *);
 
 void	ahd_adapter_req_set_xfer_mode(struct ahd_softc *, struct scb *);
-void    ahd_minphys(struct buf *, struct scsi_link *);
 
 struct cfdriver ahd_cd = {
 	NULL, "ahd", DV_DULL
 };
 
-static struct scsi_adapter ahd_switch =
-{
-	ahd_action,
-	ahd_minphys,
-	0,
-	0,
+static struct scsi_adapter ahd_switch = {
+	ahd_action, NULL, NULL, NULL, NULL
 };
 
 /*
@@ -104,6 +99,16 @@ ahd_attach(struct ahd_softc *ahd)
 	printf("%s\n", ahd_info);
 	ahd_lock(ahd, &s);
 
+	if (bootverbose) {
+		ahd_controller_info(ahd, ahd_info, sizeof ahd_info);
+		printf("%s: %s\n", ahd->sc_dev.dv_xname, ahd_info);
+	}
+
+	ahd_intr_enable(ahd, TRUE);
+
+	if (ahd->flags & AHD_RESET_BUS_A)
+		ahd_reset_channel(ahd, 'A', TRUE);
+
 	/*
 	 * fill in the prototype scsi_links.
 	 */
@@ -115,17 +120,6 @@ ahd_attach(struct ahd_softc *ahd)
 	ahd->sc_channel.openings = 16; /* Must ALWAYS be < 256!! */
 	ahd->sc_channel.pool = &ahd->sc_iopool;
 
-	if (bootverbose) {
-		ahd_controller_info(ahd, ahd_info, sizeof ahd_info);
-		printf("%s: %s\n", ahd->sc_dev.dv_xname, ahd_info);
-	}
-
-	ahd_intr_enable(ahd, TRUE);
-
-	if (ahd->flags & AHD_RESET_BUS_A)
-		ahd_reset_channel(ahd, 'A', TRUE);
-
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &ahd->sc_channel;
 
 	ahd->sc_child = config_found((void *)&ahd->sc_dev, &saa, scsiprint);
@@ -250,22 +244,6 @@ ahd_done(struct ahd_softc *ahd, struct scb *scb)
 	}
 
 	scsi_done(xs);
-}
-
-void
-ahd_minphys(struct buf *bp, struct scsi_link *sl)
-{
-	/*
-	 * Even though the card can transfer up to 16megs per command
-	 * we are limited by the number of segments in the dma segment
-	 * list that we can hold.  The worst case is that all pages are
-	 * discontinuous physically, hence the "page per segment" limit
-	 * enforced here.
-	 */
-	if (bp->b_bcount > ((AHD_NSEG - 1) * PAGE_SIZE)) {
-		bp->b_bcount = ((AHD_NSEG - 1) * PAGE_SIZE);
-	}
-	minphys(bp);
 }
 
 void

@@ -1,4 +1,4 @@
-/*	$OpenBSD: boot.c,v 1.25 2019/04/10 04:17:36 deraadt Exp $ */
+/*	$OpenBSD: boot.c,v 1.30 2020/06/06 10:53:09 visa Exp $ */
 
 /*
  * Copyright (c) 2004 Opsycon AB, www.opsycon.se.
@@ -33,6 +33,7 @@
 #undef _KERNEL
 
 #include <lib/libkern/libkern.h>
+#include <lib/libsa/arc4.h>
 #include <stand.h>
 
 #include <mips64/arcbios.h>
@@ -43,7 +44,7 @@
 #include "loadfile.h"
 
 void	 dobootopts(int, char **);
-void	 loadrandom(const char *, const char *, void *, size_t);
+int	 loadrandom(const char *, const char *, void *, size_t);
 char	*strstr(char *, const char *);	/* strstr.c */
 
 enum {
@@ -59,8 +60,7 @@ char *OSLoadFilename = NULL;
 int	IP;
 
 char   rnddata[BOOTRANDOM_MAX];
-
-#include "version"
+struct rc4_ctx randomctx;
 
 /*
  * OpenBSD/sgi Boot Loader.
@@ -74,6 +74,7 @@ boot_main(int argc, char *argv[])
 	u_long entry;
 	int fd;
 	extern int arcbios_init(void);
+	extern char version[];
 
 	IP = arcbios_init();
 	printf("\nOpenBSD/sgi-IP%d ARCBios boot version %s\n", IP, version);
@@ -106,9 +107,13 @@ boot_main(int argc, char *argv[])
 	if (bootauto != AUTO_MINI &&
 	    strstr(OSLoadPartition, "bootp(") == NULL &&
 	    strstr(OSLoadPartition, "cdrom(") == NULL) {
+		/* XXX set RB_GOODRANDOM in boothowto */
 		loadrandom(OSLoadPartition, BOOTRANDOM, rnddata,
 		    sizeof(rnddata));
 	}
+
+	rc4_keysetup(&randomctx, rnddata, sizeof rnddata);
+	rc4_skip(&randomctx, 1536);
 
 	/*
 	 * Load the kernel and symbol table.
@@ -282,12 +287,12 @@ check_phdr(void *v)
 /*
  * Load the saved randomness file.
  */
-void
+int
 loadrandom(const char *partition, const char *name, void *buf, size_t buflen)
 {
 	char path[MAXPATHLEN];
 	struct stat sb;
-	int fd;
+	int fd, error = 0;
 
 	strlcpy(path, partition, sizeof path);
 	strlcat(path, name, sizeof path);
@@ -296,12 +301,23 @@ loadrandom(const char *partition, const char *name, void *buf, size_t buflen)
 	if (fd == -1) {
 		if (errno != EPERM)
 			printf("cannot open %s: %s\n", path, strerror(errno));
-		return;
+		return (-1);
 	}
-	if (fstat(fd, &sb) == -1 || sb.st_uid != 0 || !S_ISREG(sb.st_mode) ||
-	    (sb.st_mode & (S_IWOTH|S_IROTH)))
-		goto fail;
-	(void) read(fd, buf, buflen);
-fail:
+	if (fstat(fd, &sb) == -1) {
+		error = -1;
+		goto done;
+	}
+	if (read(fd, buf, buflen) != buflen) {
+		error = -1;
+		goto done;
+	}
+	if (sb.st_mode & S_ISTXT) {
+		printf("NOTE: random seed is being reused.\n");
+		error = -1;
+		goto done;
+	}
+	fchmod(fd, sb.st_mode | S_ISTXT);
+done:
 	close(fd);
+	return (error);
 }

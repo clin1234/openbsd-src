@@ -1,4 +1,4 @@
-/* $OpenBSD: machdep.c,v 1.39 2019/04/30 20:04:31 patrick Exp $ */
+/* $OpenBSD: machdep.c,v 1.53 2020/06/05 23:16:24 naddy Exp $ */
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  *
@@ -16,7 +16,6 @@
  */
 
 #include <sys/param.h>
-#include <sys/timetc.h>
 #include <sys/sched.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
@@ -31,11 +30,11 @@
 #include <sys/buf.h>
 #include <sys/termios.h>
 #include <sys/sensors.h>
+#include <sys/malloc.h>
 
 #include <net/if.h>
 #include <uvm/uvm.h>
 #include <dev/cons.h>
-#include <dev/clock_subr.h>
 #include <dev/ofw/fdt.h>
 #include <dev/ofw/openfirm.h>
 #include <machine/param.h>
@@ -83,79 +82,18 @@ paddr_t msgbufphys;
 struct user *proc0paddr;
 
 struct uvm_constraint_range  dma_constraint = { 0x0, (paddr_t)-1 };
-struct uvm_constraint_range *uvm_md_constraints[] = { NULL };
+struct uvm_constraint_range *uvm_md_constraints[] = {
+	&dma_constraint,
+	NULL,
+};
 
 /* the following is used externally (sysctl_hw) */
 char    machine[] = MACHINE;            /* from <machine/param.h> */
-extern todr_chip_handle_t todr_handle;
 
 int safepri = 0;
 
 struct cpu_info cpu_info_primary;
 struct cpu_info *cpu_info[MAXCPUS] = { &cpu_info_primary };
-
-/*
- * inittodr:
- *
- *      Initialize time from the time-of-day register.
- */
-#define MINYEAR         2003    /* minimum plausible year */
-void
-inittodr(time_t base)
-{
-	time_t deltat;
-	struct timeval rtctime;
-	struct timespec ts;
-	int badbase;
-
-	if (base < (MINYEAR - 1970) * SECYR) {
-		printf("WARNING: preposterous time in file system\n");
-		/* read the system clock anyway */
-		base = (MINYEAR - 1970) * SECYR;
-		badbase = 1;
-	} else
-		badbase = 0;
-
-	if (todr_handle == NULL ||
-	    todr_gettime(todr_handle, &rtctime) != 0 ||
-	    rtctime.tv_sec == 0) {
-		/*
-		 * Believe the time in the file system for lack of
-		 * anything better, resetting the TODR.
-		 */
-		rtctime.tv_sec = base;
-		rtctime.tv_usec = 0;
-		if (todr_handle != NULL && !badbase) {
-			printf("WARNING: preposterous clock chip time\n");
-			resettodr();
-		}
-		ts.tv_sec = rtctime.tv_sec;
-		ts.tv_nsec = rtctime.tv_usec * 1000;
-		tc_setclock(&ts);
-		goto bad;
-	} else {
-		ts.tv_sec = rtctime.tv_sec;
-		ts.tv_nsec = rtctime.tv_usec * 1000;
-		tc_setclock(&ts);
-	}
-
-	if (!badbase) {
-		/*
-		 * See if we gained/lost two or more days; if
-		 * so, assume something is amiss.
-		 */
-		deltat = rtctime.tv_sec - base;
-		if (deltat < 0)
-			deltat = -deltat;
-		if (deltat < 2 * SECDAY)
-			return;         /* all is well */
-		printf("WARNING: clock %s %ld days\n",
-		    rtctime.tv_sec < base ? "lost" : "gained",
-		    (long)deltat / SECDAY);
-	}
- bad:
-	printf("WARNING: CHECK AND RESET THE DATE!\n");
-}
 
 static int
 atoi(const char *s)
@@ -229,6 +167,7 @@ fdt_find_cons(const char *name)
 	return (NULL);
 }
 
+extern void	amluart_init_cons(void);
 extern void	com_fdt_init_cons(void);
 extern void	imxuart_init_cons(void);
 extern void	mvuart_init_cons(void);
@@ -245,6 +184,7 @@ consinit(void)
 
 	consinit_called = 1;
 
+	amluart_init_cons();
 	com_fdt_init_cons();
 	imxuart_init_cons();
 	mvuart_init_cons();
@@ -352,12 +292,25 @@ int
 cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
     size_t newlen, struct proc *p)
 {
+	char *compatible;
+	int node, len, error;
+
 	/* all sysctl names at this level are terminal */
 	if (namelen != 1)
 		return (ENOTDIR);		/* overloaded */
 
 	switch (name[0]) {
-		// none supported currently
+	case CPU_COMPATIBLE:
+		node = OF_finddevice("/");
+		len = OF_getproplen(node, "compatible");
+		if (len <= 0)
+			return (EOPNOTSUPP); 
+		compatible = malloc(len, M_TEMP, M_WAITOK | M_ZERO);
+		OF_getprop(node, "compatible", compatible, len);
+		compatible[len - 1] = 0;
+		error = sysctl_rdstring(oldp, oldlenp, newp, compatible);
+		free(compatible, M_TEMP, len);
+		return error;
 	default:
 		return (EOPNOTSUPP);
 	}
@@ -792,7 +745,7 @@ EFI_MEMORY_DESCRIPTOR *mmap;
 
 void	remap_efi_runtime(EFI_PHYSICAL_ADDRESS);
 
-void	collect_kernel_args(char *);
+void	collect_kernel_args(const char *);
 void	process_kernel_args(void);
 
 void
@@ -812,8 +765,10 @@ initarm(struct arm64_bootparams *abp)
 	// NOTE that 1GB of ram is mapped in by default in
 	// the bootstrap memory config, so nothing is necessary
 	// until pmap_bootstrap_finalize is called??
+	pmap_map_early((paddr_t)config, PAGE_SIZE);
 	if (!fdt_init(config) || fdt_get_size(config) == 0)
 		panic("initarm: no FDT");
+	pmap_map_early((paddr_t)config, round_page(fdt_get_size(config)));
 
 	struct fdt_reg reg;
 	void *node;
@@ -827,6 +782,10 @@ initarm(struct arm64_bootparams *abp)
 		len = fdt_node_property(node, "bootargs", &prop);
 		if (len > 0)
 			collect_kernel_args(prop);
+
+		len = fdt_node_property(node, "openbsd,boothowto", &prop);
+		if (len == sizeof(boothowto))
+			boothowto = bemtoh32((uint32_t *)prop);
 
 		len = fdt_node_property(node, "openbsd,bootduid", &prop);
 		if (len == sizeof(bootduid))
@@ -870,6 +829,12 @@ initarm(struct arm64_bootparams *abp)
 		len = fdt_node_property(node, "openbsd,uefi-system-table", &prop);
 		if (len == sizeof(system_table))
 			system_table = bemtoh64((uint64_t *)prop);
+
+		len = fdt_node_property(node, "openbsd,dma-constraint", &prop);
+		if (len == sizeof(dma_constraint)) {
+			dma_constraint.ucr_low = bemtoh64((uint64_t *)prop);
+			dma_constraint.ucr_high = bemtoh64((uint64_t *)prop + 1);
+		}
 	}
 
 	/* Set the pcpu data, this is needed by pmap_bootstrap */
@@ -1064,6 +1029,14 @@ initarm(struct arm64_bootparams *abp)
 		}
 	}
 
+	/*
+	 * Make sure that we have enough KVA to initialize UVM.  In
+	 * particular, we need enough KVA to be able to allocate the
+	 * vm_page structures.
+	 */
+	pmap_growkernel(VM_MIN_KERNEL_ADDRESS + 1024 * 1024 * 1024 +
+	    physmem * sizeof(struct vm_page));
+
 #ifdef DDB
 	db_machine_init();
 
@@ -1150,6 +1123,8 @@ remap_efi_runtime(EFI_PHYSICAL_ADDRESS system_table)
 				     (phys_end - phys_start);
 				phys_end += src->NumberOfPages * PAGE_SIZE;
 			}
+			/* Mask address to make sure it fits in our pmap. */
+			src->VirtualStart &= ((1ULL << USER_SPACE_BITS) - 1);
 			memcpy(dst, src, mmap_desc_size);
 			dst = NextMemoryDescriptor(dst, mmap_desc_size);
 		}
@@ -1167,7 +1142,7 @@ remap_efi_runtime(EFI_PHYSICAL_ADDRESS system_table)
 char bootargs[256];
 
 void
-collect_kernel_args(char *args)
+collect_kernel_args(const char *args)
 {
 	/* Make a local copy of the bootargs */
 	strlcpy(bootargs, args, sizeof(bootargs));
@@ -1178,23 +1153,20 @@ process_kernel_args(void)
 {
 	char *cp = bootargs;
 
-	if (cp[0] == '\0') {
-		boothowto = RB_AUTOBOOT;
+	if (*cp == 0)
 		return;
-	}
 
-	boothowto = 0;
 	boot_file = bootargs;
 
 	/* Skip the kernel image filename */
 	while (*cp != ' ' && *cp != 0)
-		++cp;
+		cp++;
 
 	if (*cp != 0)
 		*cp++ = 0;
 
 	while (*cp == ' ')
-		++cp;
+		cp++;
 
 	boot_args = cp;
 
@@ -1206,28 +1178,25 @@ process_kernel_args(void)
 		if (*cp++ == '\0')
 			return;
 
-	for (;*++cp;) {
-		int fl;
-
-		fl = 0;
+	while (*cp != 0) {
 		switch(*cp) {
 		case 'a':
-			fl |= RB_ASKNAME;
+			boothowto |= RB_ASKNAME;
 			break;
 		case 'c':
-			fl |= RB_CONFIG;
+			boothowto |= RB_CONFIG;
 			break;
 		case 'd':
-			fl |= RB_KDB;
+			boothowto |= RB_KDB;
 			break;
 		case 's':
-			fl |= RB_SINGLE;
+			boothowto |= RB_SINGLE;
 			break;
 		default:
 			printf("unknown option `%c'\n", *cp);
 			break;
 		}
-		boothowto |= fl;
+		cp++;
 	}
 }
 

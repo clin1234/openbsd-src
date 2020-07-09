@@ -1,4 +1,4 @@
-/*	$OpenBSD: queue_fs.c,v 1.18 2018/12/30 23:09:58 guenther Exp $	*/
+/*	$OpenBSD: queue_fs.c,v 1.20 2020/02/25 17:03:13 millert Exp $	*/
 
 /*
  * Copyright (c) 2011 Gilles Chehade <gilles@poolp.org>
@@ -228,8 +228,7 @@ queue_fs_envelope_create(uint32_t msgid, const char *buf, size_t len,
 			fsqueue_envelope_incoming_path(*evpid, path,
 			    sizeof(path));
 
-		r = fsqueue_envelope_dump(path, buf, len, 0, 0);
-		if (r >= 0)
+		if ((r = fsqueue_envelope_dump(path, buf, len, 0, 0)) != 0)
 			goto done;
 	}
 	r = 0;
@@ -414,7 +413,7 @@ fsqueue_check_space(void)
 	uint64_t	used;
 	uint64_t	total;
 
-	if (statfs(PATH_QUEUE, &buf) < 0) {
+	if (statfs(PATH_QUEUE, &buf) == -1) {
 		log_warn("warn: queue-fs: statfs");
 		return 0;
 	}

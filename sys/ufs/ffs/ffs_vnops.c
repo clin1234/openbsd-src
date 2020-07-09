@@ -1,4 +1,4 @@
-/*	$OpenBSD: ffs_vnops.c,v 1.93 2018/12/23 10:46:51 natano Exp $	*/
+/*	$OpenBSD: ffs_vnops.c,v 1.98 2020/02/27 09:10:31 mpi Exp $	*/
 /*	$NetBSD: ffs_vnops.c,v 1.7 1996/05/11 18:27:24 mycroft Exp $	*/
 
 /*
@@ -57,7 +57,7 @@
 #include <ufs/ffs/fs.h>
 #include <ufs/ffs/ffs_extern.h>
 
-struct vops ffs_vops = {
+const struct vops ffs_vops = {
 	.vop_lookup	= ufs_lookup,
 	.vop_create	= ufs_create,
 	.vop_mknod	= ufs_mknod,
@@ -95,7 +95,7 @@ struct vops ffs_vops = {
 	.vop_bwrite	= vop_generic_bwrite
 };
 
-struct vops ffs_specvops = {
+const struct vops ffs_specvops = {
 	.vop_close	= ufsspec_close,
 	.vop_access	= ufs_access,
 	.vop_getattr	= ufs_getattr,
@@ -136,7 +136,7 @@ struct vops ffs_specvops = {
 };
 
 #ifdef FIFO
-struct vops ffs_fifovops = {
+const struct vops ffs_fifovops = {
 	.vop_close	= ufsfifo_close,
 	.vop_access	= ufs_access,
 	.vop_getattr	= ufs_getattr,
@@ -232,11 +232,15 @@ ffs_read(void *v)
 
 		if (lblktosize(fs, nextlbn) >= DIP(ip, size))
 			error = bread(vp, lbn, size, &bp);
-		else
+		else if (lbn - 1 == ip->i_ci.ci_lastr ||
+		    uio->uio_resid > xfersize) {
 			error = bread_cluster(vp, lbn, size, &bp);
+		} else
+			error = bread(vp, lbn, size, &bp);
 
 		if (error)
 			break;
+		ip->i_ci.ci_lastr = lbn;
 
 		/*
 		 * We should only get non-zero b_resid when an I/O error
@@ -370,10 +374,9 @@ ffs_write(void *v)
 		if (error != 0 && !(flags & B_CLRBUF))
 			memset(bp->b_data + blkoffset, 0, xfersize);
 
-#if 0
 		if (ioflag & IO_NOCACHE)
 			bp->b_flags |= B_NOCACHE;
-#endif
+
 		if (ioflag & IO_SYNC)
 			(void)bwrite(bp);
 		else if (xfersize + blkoffset == fs->fs_bsize) {
@@ -486,7 +489,7 @@ loop:
 		goto loop;
 	}
 	if (ap->a_waitfor == MNT_WAIT) {
-		vwaitforio(vp, 0, "ffs_fsync", 0);
+		vwaitforio(vp, 0, "ffs_fsync", INFSLP);
 
 		/*
 		 * Ensure that any filesystem metadata associated
@@ -530,7 +533,7 @@ ffs_reclaim(void *v)
 	struct inode *ip = VTOI(vp);
 	int error;
 
-	if ((error = ufs_reclaim(vp, ap->a_p)) != 0)
+	if ((error = ufs_reclaim(vp)) != 0)
 		return (error);
 
 	if (ip->i_din1 != NULL) {

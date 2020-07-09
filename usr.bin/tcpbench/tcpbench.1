@@ -1,4 +1,4 @@
-.\" $OpenBSD: tcpbench.1,v 1.25 2018/09/28 19:01:52 bluhm Exp $
+.\" $OpenBSD: tcpbench.1,v 1.28 2020/05/04 12:13:09 sthen Exp $
 .\"
 .\" Copyright (c) 2008 Damien Miller <djm@mindrot.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: September 28 2018 $
+.Dd $Mdocdate: May 4 2020 $
 .Dt TCPBENCH 1
 .Os
 .Sh NAME
@@ -26,7 +26,7 @@
 .Nm
 .Op Fl 46RUuv
 .Op Fl B Ar buf
-.Op Fl b Ar addr
+.Op Fl b Ar sourceaddr
 .Op Fl k Ar kvars
 .Op Fl n Ar connections
 .Op Fl p Ar port
@@ -65,14 +65,32 @@ of a listening server to connect to.
 .Pp
 Once connected, the client will send TCP or UDP traffic as fast as possible to
 the server.
-Both the client and server will periodically display throughput
-statistics along with any kernel variables the user has selected to
+Both the client and server will periodically compute and display throughput
+statistics.
+The server starts computing these for UDP on receipt of the first datagram,
+and stops for TCP when it has no connections.
+This display also includes any kernel variables the user has selected to
 sample (using the
 .Fl k
 option, which is only available in TCP mode).
 A list of available kernel variables may be obtained using the
 .Fl l
 option.
+.Pp
+A summary over the periodic throughput statistics is displayed on exit.
+Its accuracy may be increased by decreasing the
+.Ar interval .
+The summary bytes and duration cover the interval from transfer start
+to process exit.
+The summary information can also be displayed while
+.Nm
+is running by sending it a
+.Dv SIGINFO
+signal (see the
+.Cm status
+argument of
+.Xr stty 1
+for more information).
 .Pp
 The options are as follows:
 .Bl -tag -width Ds
@@ -90,8 +108,9 @@ Specify the size of the internal read/write buffer used by
 The default is 262144 bytes for TCP client/server and UDP server.
 In UDP client mode this may be used to specify the packet size on the test
 stream.
-.It Fl b Ar addr
-Specify the IP address of the interface which is used to send the packets.
+.It Fl b Ar sourceaddr
+Specify the IP address to send the packets from,
+which is useful on machines with multiple interfaces.
 .It Fl k Ar kvars
 Specify one or more kernel variables to monitor; multiple variables must be
 separated with commas.

@@ -1,6 +1,6 @@
-#	$OpenBSD: Makefile,v 1.27 2019/05/03 20:03:58 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.30 2020/05/18 06:20:43 otto Exp $
 
-FS=		miniroot${OSrev}.fs
+FS=		miniroot${OSrev}.img
 FSSIZE=		8192
 FSDISKTYPE=	miniroot
 MOUNT_POINT=	/mnt
@@ -17,11 +17,11 @@ LDSTATIC=-static
 
 all: ${FS}
 
-${FS}: vn_up install_files showit vn_down
+${FS}: bsd.rd
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
 	vnconfig -v ${FS} > vnd
 	disklabel -w `cat vnd` ${FSDISKTYPE}
-	newfs -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
+	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
 	install -c -m 555 -o root -g wheel \
 	    ${DESTDIR}/usr/mdec/boot ${MOUNT_POINT}/boot
@@ -52,7 +52,7 @@ mr.fs: instbin
 	makefs ${MRMAKEFSARGS} $@ $@.d
 
 instbin.mk instbin.cache instbin.c: instbin.conf
-	crunchgen -D ${.CURDIR}/../../.. -L ${DESTDIR}/usr/lib \
+	crunchgen -E -D ${.CURDIR}/../../.. -L ${DESTDIR}/usr/lib \
 	    -c instbin.c -e instbin -m instbin.mk instbin.conf
 
 instbin: instbin.mk instbin.cache instbin.c

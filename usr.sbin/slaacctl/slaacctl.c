@@ -1,4 +1,4 @@
-/*	$OpenBSD: slaacctl.c,v 1.15 2018/07/27 06:26:38 bket Exp $	*/
+/*	$OpenBSD: slaacctl.c,v 1.19 2020/04/16 05:28:30 florian Exp $	*/
 
 /*
  * Copyright (c) 2005 Claudio Jeker <claudio@openbsd.org>
@@ -71,13 +71,13 @@ main(int argc, char *argv[])
 	int			 done = 0;
 	int			 n, verbose = 0;
 	int			 ch;
-	char			*sockname;
+	char			*sockname = NULL;
 
-	sockname = SLAACD_SOCKET;
 	while ((ch = getopt(argc, argv, "s:")) != -1) {
 		switch (ch) {
 		case 's':
-			sockname = optarg;
+			if ((sockname = strdup(optarg)) == NULL)
+				err(1, NULL);
 			break;
 		default:
 			usage();
@@ -85,6 +85,12 @@ main(int argc, char *argv[])
 	}
 	argc -= optind;
 	argv += optind;
+
+	if (sockname == NULL) {
+		if (asprintf(&sockname, "%s.%d", SLAACD_SOCKET, getrtable()) ==
+		    -1)
+			err(1, NULL);
+	}
 
 	if (pledge("stdio unix", NULL) == -1)
 		err(1, "pledge");
@@ -99,8 +105,9 @@ main(int argc, char *argv[])
 
 	memset(&sun, 0, sizeof(sun));
 	sun.sun_family = AF_UNIX;
-
 	strlcpy(sun.sun_path, sockname, sizeof(sun.sun_path));
+	free(sockname);
+
 	if (connect(ctl_sock, (struct sockaddr *)&sun, sizeof(sun)) == -1)
 		err(1, "connect: %s", sockname);
 
@@ -180,8 +187,10 @@ show_interface_msg(struct imsg *imsg)
 	struct ctl_engine_info_ra_dnssl		*cei_ra_dnssl;
 	struct ctl_engine_info_address_proposal	*cei_addr_proposal;
 	struct ctl_engine_info_dfr_proposal	*cei_dfr_proposal;
+	struct ctl_engine_info_rdns_proposal	*cei_rdns_proposal;
 	struct tm				*t;
 	struct timespec				 now, diff;
+	int					 i;
 	char					 buf[IF_NAMESIZE], *bufp;
 	char					 hbuf[NI_MAXHOST], whenbuf[255];
 	char					 ntopbuf[INET6_ADDRSTRLEN];
@@ -332,8 +341,45 @@ show_interface_msg(struct imsg *imsg)
 			printf("\n");
 
 		break;
+	case IMSG_CTL_SHOW_INTERFACE_INFO_RDNS_PROPOSALS:
+		printf("\trDNS proposals\n");
+		break;
+	case IMSG_CTL_SHOW_INTERFACE_INFO_RDNS_PROPOSAL:
+		cei_rdns_proposal = imsg->data;
+
+		if (getnameinfo((struct sockaddr *)&cei_rdns_proposal->from,
+		    cei_rdns_proposal->from.sin6_len, hbuf, sizeof(hbuf),
+		    NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV))
+			err(1, "cannot get router IP");
+
+		printf("\t\tid: %4lld, state: %15s\n",
+		    cei_rdns_proposal->id, cei_rdns_proposal->state);
+		printf("\t\trouter: %s\n", hbuf);
+		printf("\t\trdns lifetime: %10u\n",
+		    cei_rdns_proposal->rdns_lifetime);
+		printf("\t\trdns:\n");
+		for (i = 0; i < cei_rdns_proposal->rdns_count; i++) {
+			printf("\t\t\t%s\n", inet_ntop(AF_INET6,
+			    &cei_rdns_proposal->rdns[i], ntopbuf,
+			    INET6_ADDRSTRLEN));
+		}
+
+		if (clock_gettime(CLOCK_MONOTONIC, &now))
+			err(1, "clock_gettime");
+
+		timespecsub(&now, &cei_rdns_proposal->uptime, &diff);
+
+		t = localtime(&cei_rdns_proposal->when.tv_sec);
+		strftime(whenbuf, sizeof(whenbuf), "%F %T", t);
+		printf("\t\tupdated: %s; %llds ago", whenbuf, diff.tv_sec);
+		if (cei_rdns_proposal->next_timeout != 0)
+			printf(", timeout: %10llds\n",
+			    cei_rdns_proposal->next_timeout - diff.tv_sec);
+		else
+			printf("\n");
+
+		break;
 	case IMSG_CTL_END:
-		printf("\n");
 		return (1);
 	default:
 		break;

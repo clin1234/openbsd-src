@@ -1,4 +1,4 @@
-/*      $OpenBSD: codepatch.h,v 1.9 2019/05/17 19:07:16 guenther Exp $    */
+/*      $OpenBSD: codepatch.h,v 1.14 2020/03/11 07:27:08 guenther Exp $    */
 /*
  * Copyright (c) 2014-2015 Stefan Fritsch <sf@sfritsch.de>
  *
@@ -30,7 +30,8 @@ __cptext void codepatch_unmaprw(vaddr_t nva);
 __cptext void codepatch_fill_nop(void *caddr, uint16_t len);
 __cptext void codepatch_nop(uint16_t tag);
 __cptext void codepatch_replace(uint16_t tag, void *code, size_t len);
-__cptext void codepatch_call(uint16_t tag, void *func);
+__cptext void codepatch_call(uint16_t _tag, void *_func);
+__cptext void codepatch_jmp(uint16_t _tag, void *_func);
 void codepatch_disable(void);
 
 #endif /* !_LOCORE */
@@ -58,26 +59,35 @@ void codepatch_disable(void);
 #define CPTAG_XRSTOR		4
 #define CPTAG_XSAVE		5
 #define CPTAG_MELTDOWN_NOP	6
-#define CPTAG_PCID_SET_REUSE	7
-#define CPTAG_MDS		8
-#define CPTAG_MDS_VMM		9
+#define CPTAG_MELTDOWN_ALLTRAPS	7
+#define CPTAG_PCID_SET_REUSE	8
+#define CPTAG_MDS		9
+#define CPTAG_MDS_VMM		10
+#define CPTAG_FENCE_SWAPGS_MIS_TAKEN	11
+#define CPTAG_FENCE_NO_SAFE_SMAP	12
 
 /*
- * As stac/clac SMAP instructions are 3 bytes, we want the fastest
- * 3 byte nop sequence possible here.  This will be replaced by
- * stac/clac instructions if SMAP is detected after booting.
- *
- * This would be 'nop (%rax)' if binutils could cope.
- * Intel documents multi-byte NOP sequences as being available
- * on all family 0x6 and 0xf processors (ie 686+)
+ * stac/clac SMAP instructions have lfence like semantics.  Let's
+ * guarantee those semantics on older cpus.
  */
-#define SMAP_NOP	.byte 0x0f, 0x1f, 0x00
+#define SMAP_NOP	lfence
 #define SMAP_STAC	CODEPATCH_START			;\
 			SMAP_NOP			;\
 			CODEPATCH_END(CPTAG_STAC)
 #define SMAP_CLAC	CODEPATCH_START			;\
 			SMAP_NOP			;\
 			CODEPATCH_END(CPTAG_CLAC)
+
+/* CVE-2019-1125: block speculation after swapgs */
+#define	FENCE_SWAPGS_MIS_TAKEN \
+	CODEPATCH_START				; \
+	lfence					; \
+	CODEPATCH_END(CPTAG_FENCE_SWAPGS_MIS_TAKEN)
+/* block speculation when a correct SMAP impl would have been enough */
+#define	FENCE_NO_SAFE_SMAP \
+	CODEPATCH_START				; \
+	lfence					; \
+	CODEPATCH_END(CPTAG_FENCE_NO_SAFE_SMAP)
 
 #define	PCID_SET_REUSE_SIZE	12
 #define	PCID_SET_REUSE_NOP					\

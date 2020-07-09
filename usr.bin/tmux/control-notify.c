@@ -1,4 +1,4 @@
-/* $OpenBSD: control-notify.c,v 1.23 2019/05/07 10:25:15 nicm Exp $ */
+/* $OpenBSD: control-notify.c,v 1.27 2020/05/21 07:24:13 nicm Exp $ */
 
 /*
  * Copyright (c) 2012 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -25,36 +25,6 @@
 
 #define CONTROL_SHOULD_NOTIFY_CLIENT(c) \
 	((c) != NULL && ((c)->flags & CLIENT_CONTROL))
-
-void
-control_notify_input(struct client *c, struct window_pane *wp,
-    const u_char *buf, size_t len)
-{
-	struct evbuffer *message;
-	u_int		 i;
-
-	if (c->session == NULL)
-	    return;
-
-	/*
-	 * Only write input if the window pane is linked to a window belonging
-	 * to the client's session.
-	 */
-	if (winlink_find_by_window(&c->session->windows, wp->window) != NULL) {
-		message = evbuffer_new();
-		if (message == NULL)
-			fatalx("out of memory");
-		evbuffer_add_printf(message, "%%output %%%u ", wp->id);
-		for (i = 0; i < len; i++) {
-			if (buf[i] < ' ' || buf[i] == '\\')
-			    evbuffer_add_printf(message, "\\%03o", buf[i]);
-			else
-			    evbuffer_add_printf(message, "%c", buf[i]);
-		}
-		control_write_buffer(c, message);
-		evbuffer_free(message);
-	}
-}
 
 void
 control_notify_pane_mode_changed(int pane)

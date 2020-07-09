@@ -1,4 +1,4 @@
-/*	$OpenBSD: filedesc.h,v 1.41 2018/07/02 14:36:33 visa Exp $	*/
+/*	$OpenBSD: filedesc.h,v 1.45 2020/07/04 08:06:08 anton Exp $	*/
 /*	$NetBSD: filedesc.h,v 1.14 1996/04/09 20:55:28 cgd Exp $	*/
 
 /*
@@ -57,26 +57,36 @@
 #define NDHISLOTS(x)	(NDREDUCE(NDREDUCE(x)))
 #define NDLOSLOTS(x)	(NDHISLOTS(x) << NDENTRYSHIFT)
 
+struct kqueue;
+
+/*
+ * Locking:
+ *	a	atomic operations
+ *	f	fd_lock
+ *	f/w	fd_lock when writing
+ *	K	kernel lock
+ *	m	fd_fplock
+ */
 struct filedesc {
-	struct	file **fd_ofiles;	/* file structures for open files */
-	char	*fd_ofileflags;		/* per-process open file flags */
-	struct	vnode *fd_cdir;		/* current directory */
-	struct	vnode *fd_rdir;		/* root directory */
-	int	fd_nfiles;		/* number of open files allocated */
-	int	fd_openfd;		/* number of files currently open */
-	u_int	*fd_himap;		/* each bit points to 32 fds */
-	u_int	*fd_lomap;		/* bitmap of free fds */
-	int	fd_lastfile;		/* high-water mark of fd_ofiles */
-	int	fd_freefile;		/* approx. next free file */
-	u_short	fd_cmask;		/* mask for file creation */
-	u_short	fd_refcnt;		/* reference count */
-	struct rwlock fd_lock;		/* lock for the file descs; must be */
-					/* held when writing to fd_ofiles, */
-					/* fd_ofileflags, or fd_{hi,lo}map */
+	struct	file **fd_ofiles;	/* [f/w,m] file structures for
+					 *     open files */
+	char	*fd_ofileflags;		/* [f] per-process open file flags */
+	struct	vnode *fd_cdir;		/* [K] current directory */
+	struct	vnode *fd_rdir;		/* [K] root directory */
+	int	fd_nfiles;		/* [f] number of open files allocated */
+	int	fd_openfd;		/* [f] number of files currently open */
+	u_int	*fd_himap;		/* [f] each bit points to 32 fds */
+	u_int	*fd_lomap;		/* [f] bitmap of free fds */
+	int	fd_lastfile;		/* [f] high-water mark of fd_ofiles */
+	int	fd_freefile;		/* [f] approx. next free file */
+	u_short	fd_cmask;		/* [f/w] mask for file creation */
+	u_short	fd_refcnt;		/* [K] reference count */
+	struct rwlock fd_lock;		/* lock for the file descs */
 	struct mutex fd_fplock;		/* lock for reading fd_ofiles without
 					 * fd_lock */
-
-	int fd_flags;			/* flags on the file descriptor table */
+	LIST_HEAD(, kqueue) fd_kqlist;	/* [f] kqueues attached to this
+					 *     filedesc */
+	int fd_flags;			/* [a] flags on this filedesc */
 };
 
 /*
@@ -136,6 +146,7 @@ void	fdcloseexec(struct proc *);
 struct file *fd_iterfile(struct file *, struct proc *);
 struct file *fd_getfile(struct filedesc *, int);
 struct file *fd_getfile_mode(struct filedesc *, int, int);
+int	fd_checkclosed(struct filedesc *, int, struct file *);
 
 int	closef(struct file *, struct proc *);
 int	getsock(struct proc *, int, struct file **);

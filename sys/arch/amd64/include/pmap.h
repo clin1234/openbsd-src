@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.h,v 1.75 2019/04/01 12:45:49 mlarkin Exp $	*/
+/*	$OpenBSD: pmap.h,v 1.77 2020/01/24 05:27:32 kettenis Exp $	*/
 /*	$NetBSD: pmap.h,v 1.1 2003/04/26 18:39:46 fvdl Exp $	*/
 
 /*
@@ -143,10 +143,12 @@
 #define L4_SLOT_KERNBASE	511
 #define NUM_L4_SLOT_DIRECT	4
 #define L4_SLOT_DIRECT		(L4_SLOT_KERNBASE - NUM_L4_SLOT_DIRECT)
+#define L4_SLOT_EARLY		(L4_SLOT_DIRECT - 1)
 
 #define PDIR_SLOT_KERN		L4_SLOT_KERN
 #define PDIR_SLOT_PTE		L4_SLOT_PTE
 #define PDIR_SLOT_DIRECT	L4_SLOT_DIRECT
+#define PDIR_SLOT_EARLY		L4_SLOT_EARLY
 
 /*
  * the following defines give the virtual addresses of various MMU
@@ -383,13 +385,13 @@ void		map_tramps(void);	/* machdep.c */
 paddr_t		pmap_bootstrap(paddr_t, paddr_t);
 void		pmap_randomize(void);
 void		pmap_randomize_level(pd_entry_t *, int);
-boolean_t	pmap_clear_attrs(struct vm_page *, unsigned long);
+int		pmap_clear_attrs(struct vm_page *, unsigned long);
 static void	pmap_page_protect(struct vm_page *, vm_prot_t);
 void		pmap_page_remove (struct vm_page *);
 static void	pmap_protect(struct pmap *, vaddr_t,
 				vaddr_t, vm_prot_t);
 void		pmap_remove(struct pmap *, vaddr_t, vaddr_t);
-boolean_t	pmap_test_attrs(struct vm_page *, unsigned);
+int		pmap_test_attrs(struct vm_page *, unsigned);
 static void	pmap_update_pg(vaddr_t);
 void		pmap_write_protect(struct pmap *, vaddr_t,
 				vaddr_t, vm_prot_t);
@@ -401,6 +403,8 @@ void	pagezero(vaddr_t);
 
 int	pmap_convert(struct pmap *, int);
 void	pmap_enter_special(vaddr_t, paddr_t, vm_prot_t);
+vaddr_t	pmap_set_pml4_early(paddr_t pa);
+void	pmap_clear_pml4_early(void);
 
 /*
  * functions for flushing the cache for vaddrs and pages.

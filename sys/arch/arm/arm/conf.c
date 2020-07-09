@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.50 2017/01/23 08:37:08 deraadt Exp $	*/
+/*	$OpenBSD: conf.c,v 1.55 2020/07/06 04:32:25 dlg Exp $	*/
 /*	$NetBSD: conf.c,v 1.10 2002/04/19 01:04:38 wiz Exp $	*/
 
 /*
@@ -68,10 +68,12 @@
  * Standard pseudo-devices
  */
 #include "bpfilter.h"
+#include "dt.h"
 #include "pf.h"
 #include "pty.h"
 #include "tun.h"
 #include "ksyms.h"
+#include "kstat.h"
 
 /*
  * APM interface
@@ -123,6 +125,7 @@ cdev_decl(pci);
 #include "ucom.h"
 #include "ugen.h"
 #include "uhid.h"
+#include "fido.h"
 #include "ulpt.h"
 
 /*
@@ -298,7 +301,7 @@ struct cdevsw cdevsw[] = {
 	cdev_ch_init(NCH,ch),	 		/* 27: SCSI autochanger */
 	cdev_uk_init(NUK,uk),	 		/* 28: SCSI unknown */
 	cdev_notdef(),				/* 29: */
-	cdev_notdef(),				/* 30: */
+	cdev_dt_init(NDT,dt),			/* 30: dynamic tracer */
 	cdev_notdef(),				/* 31: */
 	cdev_notdef(),				/* 32: */
 	cdev_tun_init(NTUN,tun),		/* 33: network tunnel */
@@ -319,7 +322,7 @@ struct cdevsw cdevsw[] = {
 	cdev_notdef(),				/* 48: reserved */
 	cdev_notdef(),				/* 49: reserved */
 	cdev_notdef(),				/* 50: reserved */
-	cdev_notdef(),				/* 51: reserved */
+	cdev_kstat_init(NKSTAT,kstat),		/* 51: kernel statistics */
  	cdev_bio_init(NBIO,bio),		/* 52: ioctl tunnel */
 	cdev_notdef(),				/* 53: reserved */
 	cdev_notdef(),				/* 54 was FOOTBRIDGE console */
@@ -378,6 +381,8 @@ struct cdevsw cdevsw[] = {
 	cdev_pppx_init(NPPPX,pppx),		/* 103: pppx */
 	cdev_tun_init(NTUN,tap),		/* 104: Ethernet tap */
 	cdev_switch_init(NSWITCH,switch),	/* 105: switch(4) control interface */
+	cdev_fido_init(NFIDO,fido),		/* 106: FIDO/U2F security key */
+	cdev_pppx_init(NPPPX,pppac),		/* 107: PPP Access Concentrator */
 };
 
 int nblkdev = nitems(bdevsw);

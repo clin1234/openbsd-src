@@ -410,6 +410,15 @@ void addr2str(
 #endif
 	, char* str, size_t len);
 
+/* print addr@port */
+void addrport2str(
+#ifdef INET6
+	struct sockaddr_storage *addr
+#else
+	struct sockaddr_in *addr
+#endif
+	, char* str, size_t len);
+
 /** copy dirname string and append slash.  Previous dirname is leaked,
  * but it is to be used once, at startup, for chroot */
 void append_trailing_slash(const char** dirname, struct region* region);
@@ -419,5 +428,10 @@ int file_inside_chroot(const char* fname, const char* chr);
 
 /** Something went wrong, give error messages and exit. */
 void error(const char *format, ...) ATTR_FORMAT(printf, 1, 2) ATTR_NORETURN;
+
+#if HAVE_CPUSET_T
+int number_of_cpus(void);
+int set_cpu_affinity(cpuset_t *set);
+#endif
 
 #endif /* _UTIL_H_ */

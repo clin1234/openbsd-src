@@ -1,4 +1,4 @@
-/*	$OpenBSD: pcidump.c,v 1.53 2019/04/02 07:01:29 jmatthew Exp $	*/
+/*	$OpenBSD: pcidump.c,v 1.57 2020/06/22 05:54:26 dlg Exp $	*/
 
 /*
  * Copyright (c) 2006, 2007 David Gwynne <loki@animata.net>
@@ -34,6 +34,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <vis.h>
 
 #define PCIDEV	"/dev/pci"
 
@@ -52,8 +53,10 @@ int pci_read(int, int, int, u_int32_t, u_int32_t *);
 int pci_readmask(int, int, int, u_int32_t, u_int32_t *);
 void dump_bars(int, int, int, int);
 void dump_caplist(int, int, int, u_int8_t);
+void dump_vpd(int, int, int);
 void dump_pci_powerstate(int, int, int, uint8_t);
 void dump_pcie_linkspeed(int, int, int, uint8_t);
+void dump_pcie_devserial(int, int, int, uint16_t);
 void dump_msi(int, int, int, uint8_t);
 void dump_msix(int, int, int, uint8_t);
 void print_pcie_ls(uint8_t);
@@ -186,6 +189,11 @@ main(int argc, char *argv[])
 		if (romfd == -1)
 			err(1, "%s", romfile);
 	}
+
+	if (unveil("/dev", "r") == -1)
+		err(1, "unveil");
+	if (unveil(NULL, NULL) == -1)
+		err(1, "unveil");
 
 	if (hex > 1)
 		size = 256;
@@ -329,6 +337,137 @@ probe(int bus, int dev, int func)
 	return (0);
 }
 
+int
+print_bytes(const uint8_t *buf, size_t len)
+{
+	char dst[8];
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		vis(dst, buf[i], VIS_TAB|VIS_NL, 0);
+		printf("%s", dst);
+	}
+	printf("\n");
+
+	return (0);
+}
+
+int
+print_vpd(const uint8_t *buf, size_t len)
+{
+	const struct pci_vpd *vpd;
+	char key0[8];
+	char key1[8];
+	size_t vlen, i;
+
+	while (len > 0) {
+		if (len < sizeof(*vpd))
+			return (1);
+
+		vpd = (const struct pci_vpd *)buf;
+		vis(key0, vpd->vpd_key0, VIS_TAB|VIS_NL, 0);
+		vis(key1, vpd->vpd_key1, VIS_TAB|VIS_NL, 0);
+		vlen = vpd->vpd_len;
+
+		printf("\t\t    %s%s: ", key0, key1);
+
+		buf += sizeof(*vpd);
+		len -= sizeof(*vpd);
+
+		if (len < vlen)
+			return (1);
+		print_bytes(buf, vlen);
+
+		buf += vlen;
+		len -= vlen;
+	}
+
+	return (0);
+}
+
+void
+dump_vpd(int bus, int dev, int func)
+{
+	struct pci_vpd_req io;
+	uint32_t data[64]; /* XXX this can be up to 32k of data */
+	uint8_t *buf = (uint8_t *)data;
+	size_t len = sizeof(data);
+	size_t i;
+
+	bzero(&io, sizeof(io));
+	io.pv_sel.pc_bus = bus;
+	io.pv_sel.pc_dev = dev;
+	io.pv_sel.pc_func = func;
+	io.pv_offset = 0;
+	io.pv_count = nitems(data);
+	io.pv_data = data;
+
+	if (ioctl(pcifd, PCIOCGETVPD, &io) == -1)
+		warn("PCIOCGETVPD");
+
+	do {
+		uint8_t vpd = *buf;
+		uint8_t type;
+		size_t hlen, vlen;
+		int (*print)(const uint8_t *, size_t) = print_bytes;
+
+		if (PCI_VPDRES_ISLARGE(vpd)) {
+			struct pci_vpd_largeres *res;
+			type = PCI_VPDRES_LARGE_NAME(vpd);
+
+			switch (type) {
+			case PCI_VPDRES_TYPE_IDENTIFIER_STRING:
+				printf("\t\tProduct Name: ");
+				break;
+			case PCI_VPDRES_TYPE_VPD:
+				print = print_vpd;
+				break;
+			default:
+				printf("%02x: ", type);
+				break;
+			}
+
+			if (len < sizeof(*res))
+				goto trunc;
+			res = (struct pci_vpd_largeres *)buf;
+
+			hlen = sizeof(*res);
+			vlen = ((size_t)res->vpdres_len_msb << 8) |
+			    (size_t)res->vpdres_len_lsb;
+		} else { /* small */
+			type = PCI_VPDRES_SMALL_NAME(vpd);
+			if (type == PCI_VPDRES_TYPE_END_TAG)
+				break;
+
+			printf("\t\t");
+			switch (type) {
+			case PCI_VPDRES_TYPE_COMPATIBLE_DEVICE_ID:
+			case PCI_VPDRES_TYPE_VENDOR_DEFINED:
+			default:
+				printf("%02x", type);
+				break;
+			}
+
+			hlen = sizeof(vpd);
+			vlen = PCI_VPDRES_SMALL_LENGTH(vpd);
+		}
+		buf += hlen;
+		len -= hlen;
+
+		if (len < vlen)
+			goto trunc;
+		(*print)(buf, vlen);
+
+		buf += vlen;
+		len -= vlen;
+	} while (len > 0);
+
+	return;
+trunc:
+	/* i have spent too much time in tcpdump - dlg */
+	printf("[|vpd]\n");
+}
+
 void
 dump_pci_powerstate(int bus, int dev, int func, uint8_t ptr)
 {
@@ -400,6 +539,21 @@ dump_pcie_linkspeed(int bus, int dev, int func, uint8_t ptr)
 }
 
 void
+dump_pcie_devserial(int bus, int dev, int func, u_int16_t ptr)
+{
+	uint32_t lower, upper;
+	uint64_t serial;
+
+	if ((pci_read(bus, dev, func, ptr + 8, &upper) != 0) ||
+	    (pci_read(bus, dev, func, ptr + 4, &lower) != 0))
+		return;
+
+	serial = ((uint64_t)upper << 32) | (uint64_t)lower;
+
+	printf("\t\tSerial Number: %016llx\n", serial);
+}
+
+void
 dump_msi(int bus, int dev, int func, u_int8_t ptr)
 {
 	u_int32_t reg;
@@ -454,6 +608,12 @@ dump_pcie_enhanced_caplist(int bus, int dev, int func)
 		printf("\t0x%04x: Enhanced Capability 0x%02x: ", ptr, ecap);
 		printf("%s\n", pci_enhanced_capnames[capidx]);
 
+		switch (ecap) {
+		case 0x03:
+			dump_pcie_devserial(bus, dev, func, ptr);
+			break;
+		}
+
 		ptr = PCI_PCIE_ECAP_NEXT(reg);
 
 	} while (ptr != PCI_PCIE_ECAP_LAST);
@@ -484,6 +644,9 @@ dump_caplist(int bus, int dev, int func, u_int8_t ptr)
 		switch (cap) {
 		case PCI_CAP_PWRMGMT:
 			dump_pci_powerstate(bus, dev, func, ptr);
+			break;
+		case PCI_CAP_VPD:
+			dump_vpd(bus, dev, func);
 			break;
 		case PCI_CAP_PCIEXPRESS:
 			dump_pcie_linkspeed(bus, dev, func, ptr);
@@ -881,14 +1044,14 @@ dump_rom(int bus, int dev, int func)
 	rom.pr_sel.pc_bus = bus;
 	rom.pr_sel.pc_dev = dev;
 	rom.pr_sel.pc_func = func;
-	if (ioctl(pcifd, PCIOCGETROMLEN, &rom))
+	if (ioctl(pcifd, PCIOCGETROMLEN, &rom) == -1)
 		return (errno);
 
 	rom.pr_rom = malloc(rom.pr_romlen);
 	if (rom.pr_rom == NULL)
 		return (ENOMEM);
 
-	if (ioctl(pcifd, PCIOCGETROM, &rom))
+	if (ioctl(pcifd, PCIOCGETROM, &rom) == -1)
 		return (errno);
 
 	if (write(romfd, rom.pr_rom, rom.pr_romlen) == -1)

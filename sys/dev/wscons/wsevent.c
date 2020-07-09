@@ -1,4 +1,4 @@
-/* $OpenBSD: wsevent.c,v 1.19 2019/02/01 17:23:08 anton Exp $ */
+/* $OpenBSD: wsevent.c,v 1.24 2020/04/07 13:27:51 visa Exp $ */
 /* $NetBSD: wsevent.c,v 1.16 2003/08/07 16:31:29 agc Exp $ */
 
 /*
@@ -89,30 +89,36 @@ void	filt_wseventdetach(struct knote *);
 int	filt_wseventread(struct knote *, long);
 
 const struct filterops wsevent_filtops = {
-	1,
-	NULL,
-	filt_wseventdetach,
-	filt_wseventread
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_wseventdetach,
+	.f_event	= filt_wseventread,
 };
 
 /*
  * Initialize a wscons_event queue.
  */
-void
+int
 wsevent_init(struct wseventvar *ev)
 {
+	struct wscons_event *queue;
 
-	if (ev->q != NULL) {
-#ifdef DIAGNOSTIC
-		printf("wsevent_init: already initialized\n");
-#endif
-		return;
-	}
-	ev->get = ev->put = 0;
-	ev->q = malloc(WSEVENT_QSIZE * sizeof(struct wscons_event),
+	if (ev->q != NULL)
+		return (0);
+
+        queue = mallocarray(WSEVENT_QSIZE, sizeof(struct wscons_event),
 	    M_DEVBUF, M_WAITOK | M_ZERO);
+	if (ev->q != NULL) {
+		free(queue, M_DEVBUF, WSEVENT_QSIZE * sizeof(struct wscons_event));
+		return (1);
+	}
+
+	ev->q = queue;
+	ev->get = ev->put = 0;
 
 	sigio_init(&ev->sigio);
+
+	return (0);
 }
 
 /*
@@ -156,8 +162,8 @@ wsevent_read(struct wseventvar *ev, struct uio *uio, int flags)
 			return (EWOULDBLOCK);
 		}
 		ev->wanted = 1;
-		error = tsleep(ev, PWSEVENT | PCATCH,
-		    "wsevent_read", 0);
+		error = tsleep_nsec(ev, PWSEVENT | PCATCH,
+		    "wsevent_read", INFSLP);
 		if (error) {
 			splx(s);
 			return (error);
@@ -230,7 +236,7 @@ wsevent_kqfilter(struct wseventvar *ev, struct knote *kn)
 	kn->kn_hook = ev;
 
 	s = splwsevent();
-	SLIST_INSERT_HEAD(klist, kn, kn_selnext);
+	klist_insert(klist, kn);
 	splx(s);
 
 	return (0);
@@ -244,7 +250,7 @@ filt_wseventdetach(struct knote *kn)
 	int s;
 
 	s = splwsevent();
-	SLIST_REMOVE(klist, kn, knote, kn_selnext);
+	klist_remove(klist, kn);
 	splx(s);
 }
 

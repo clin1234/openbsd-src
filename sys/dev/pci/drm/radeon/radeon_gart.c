@@ -25,7 +25,10 @@
  *          Alex Deucher
  *          Jerome Glisse
  */
-#include <drm/drmP.h>
+
+#include <linux/pci.h>
+#include <linux/vmalloc.h>
+
 #include <drm/radeon_drm.h>
 #ifdef CONFIG_X86
 #include <asm/set_memory.h>
@@ -70,7 +73,7 @@ int radeon_gart_table_ram_alloc(struct radeon_device *rdev)
 	struct drm_dmamem *dmah;
 	int flags = 0;
 
-#if defined(__amd64__) || defined(__i386__)
+#ifdef CONFIG_X86
 	if (rdev->family == CHIP_RS400 || rdev->family == CHIP_RS480 ||
 	    rdev->family == CHIP_RS690 || rdev->family == CHIP_RS740) {
 		flags |= BUS_DMA_NOCACHE;
@@ -102,7 +105,7 @@ void radeon_gart_table_ram_free(struct radeon_device *rdev)
 	if (rdev->gart.ptr == NULL) {
 		return;
 	}
-#ifdef CONFIG_X86
+#if defined (CONFIG_X86) && defined(__linux__)
 	if (rdev->family == CHIP_RS400 || rdev->family == CHIP_RS480 ||
 	    rdev->family == CHIP_RS690 || rdev->family == CHIP_RS740) {
 		set_memory_wb((unsigned long)rdev->gart.ptr,

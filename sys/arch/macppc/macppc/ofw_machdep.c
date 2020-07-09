@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofw_machdep.c,v 1.56 2017/07/22 18:33:38 anton Exp $	*/
+/*	$OpenBSD: ofw_machdep.c,v 1.59 2020/05/25 09:55:48 jsg Exp $	*/
 /*	$NetBSD: ofw_machdep.c,v 1.1 1996/09/30 16:34:50 ws Exp $	*/
 
 /*
@@ -274,7 +274,7 @@ int fbnode;
 void of_display_console(void);
 
 void
-ofwconprobe()
+ofwconprobe(void)
 {
 	char type[32];
 	int stdout_node;
@@ -361,7 +361,7 @@ ofw_recurse_keyboard(int pnode)
 }
 
 void
-ofw_find_keyboard()
+ofw_find_keyboard(void)
 {
 	int stdin_node;
 	char iname[32];
@@ -486,7 +486,7 @@ of_display_console(void)
 {
 	struct ofwfb *fb = &ofwfb;
 	struct rasops_info *ri = &fb->ofw_ri;
-	long defattr;
+	uint32_t defattr;
 
 	ri->ri_width = cons_width;
 	ri->ri_height = cons_height;
@@ -511,7 +511,7 @@ of_display_console(void)
 	fb->ofw_wsd.fontheight = ri->ri_font->fontheight;
 #endif
 
-	ri->ri_ops.alloc_attr(ri, 0, 0, 0, &defattr);
+	ri->ri_ops.pack_attr(ri, 0, 0, 0, &defattr);
 	wsdisplay_cnattach(&fb->ofw_wsd, ri, 0, 0, defattr);
 }
 #endif

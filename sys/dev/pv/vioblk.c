@@ -1,4 +1,4 @@
-/*	$OpenBSD: vioblk.c,v 1.12 2019/03/24 18:22:36 sf Exp $	*/
+/*	$OpenBSD: vioblk.c,v 1.20 2020/06/27 14:29:45 krw Exp $	*/
 
 /*
  * Copyright (c) 2012 Stefan Fritsch.
@@ -65,9 +65,8 @@
 
 #define VIOBLK_DONE	-1
 
-#define MAX_XFER	MAX(MAXPHYS,MAXBSIZE)
 /* Number of DMA segments for buffers that the device must support */
-#define SEG_MAX		(MAX_XFER/PAGE_SIZE + 1)
+#define SEG_MAX		(MAXPHYS/PAGE_SIZE + 1)
 /* In the virtqueue, we need space for header and footer, too */
 #define ALLOC_SEGS	(SEG_MAX + 2)
 
@@ -109,7 +108,6 @@ struct vioblk_softc {
 	struct virtio_blk_req   *sc_reqs;
 	bus_dma_segment_t        sc_reqs_segs[1];
 
-	struct scsi_adapter	 sc_switch;
 	struct scsi_link	 sc_link;
 	struct scsi_iopool	 sc_iopool;
 	struct mutex		 sc_vr_mtx;
@@ -131,8 +129,6 @@ void	vioblk_vq_done1(struct vioblk_softc *, struct virtio_softc *,
 void	vioblk_reset(struct vioblk_softc *);
 
 void	vioblk_scsi_cmd(struct scsi_xfer *);
-int	vioblk_dev_probe(struct scsi_link *);
-void	vioblk_dev_free(struct scsi_link *);
 
 void   *vioblk_req_get(void *);
 void	vioblk_req_put(void *, void *);
@@ -153,6 +149,9 @@ struct cfdriver vioblk_cd = {
 	NULL, "vioblk", DV_DULL
 };
 
+struct scsi_adapter vioblk_switch = {
+	vioblk_scsi_cmd, NULL, NULL, NULL, NULL
+};
 
 int vioblk_match(struct device *parent, void *match, void *aux)
 {
@@ -171,7 +170,6 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 	struct vioblk_softc *sc = (struct vioblk_softc *)self;
 	struct virtio_softc *vsc = (struct virtio_softc *)parent;
 	struct scsibus_attach_args saa;
-	uint64_t features;
 	int qsize;
 
 	vsc->sc_vqs = &sc->sc_vq[0];
@@ -182,15 +180,12 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 	vsc->sc_child = self;
 	vsc->sc_ipl = IPL_BIO;
 	sc->sc_virtio = vsc;
+	vsc->sc_driver_features = VIRTIO_BLK_F_RO | VIRTIO_F_NOTIFY_ON_EMPTY |
+	     VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_FLUSH;
 
-        features = virtio_negotiate_features(vsc,
-	    (VIRTIO_BLK_F_RO       | VIRTIO_F_NOTIFY_ON_EMPTY |
-	     VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX |
-	     VIRTIO_BLK_F_FLUSH),
-	    vioblk_feature_names);
+        virtio_negotiate_features(vsc, vioblk_feature_names);
 
-
-	if (features & VIRTIO_BLK_F_SIZE_MAX) {
+	if (virtio_has_feature(vsc, VIRTIO_BLK_F_SIZE_MAX)) {
 		uint32_t size_max = virtio_read_device_config_4(vsc,
 		    VIRTIO_BLK_CONFIG_SIZE_MAX);
 		if (size_max < PAGE_SIZE) {
@@ -199,7 +194,7 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 		}
 	}
 
-	if (features & VIRTIO_BLK_F_SEG_MAX) {
+	if (virtio_has_feature(vsc, VIRTIO_BLK_F_SEG_MAX)) {
 		uint32_t seg_max = virtio_read_device_config_4(vsc,
 		    VIRTIO_BLK_CONFIG_SEG_MAX);
 		if (seg_max < SEG_MAX) {
@@ -212,7 +207,7 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_capacity = virtio_read_device_config_8(vsc,
 	    VIRTIO_BLK_CONFIG_CAPACITY);
 
-	if (virtio_alloc_vq(vsc, &sc->sc_vq[0], 0, MAX_XFER, ALLOC_SEGS,
+	if (virtio_alloc_vq(vsc, &sc->sc_vq[0], 0, MAXPHYS, ALLOC_SEGS,
 	    "I/O request") != 0) {
 		printf("\nCan't alloc virtqueue\n");
 		goto err;
@@ -220,7 +215,7 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 	qsize = sc->sc_vq[0].vq_num;
 	sc->sc_vq[0].vq_done = vioblk_vq_done;
 
-	if (features & VIRTIO_F_NOTIFY_ON_EMPTY) {
+	if (virtio_has_feature(vsc, VIRTIO_F_NOTIFY_ON_EMPTY)) {
 		virtio_stop_vq_intr(vsc, &sc->sc_vq[0]);
 		sc->sc_notify_on_empty = 1;
 	}
@@ -229,11 +224,6 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	sc->sc_queued = 0;
-
-	sc->sc_switch.scsi_cmd = vioblk_scsi_cmd;
-	sc->sc_switch.scsi_minphys = scsi_minphys;
-	sc->sc_switch.dev_probe = vioblk_dev_probe;
-	sc->sc_switch.dev_free = vioblk_dev_free;
 
 	SLIST_INIT(&sc->sc_freelist);
 	mtx_init(&sc->sc_vr_mtx, IPL_BIO);
@@ -245,17 +235,17 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 		goto err;
 	}
 
-	sc->sc_link.adapter = &sc->sc_switch;
+	sc->sc_link.adapter = &vioblk_switch;
 	sc->sc_link.pool = &sc->sc_iopool;
 	sc->sc_link.adapter_softc = self;
-	sc->sc_link.adapter_buswidth = 2;
+	/* Only valid target/lun is 0/0. */
+	sc->sc_link.adapter_buswidth = 1;
 	sc->sc_link.luns = 1;
-	sc->sc_link.adapter_target = 2;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	DNPRINTF(1, "%s: qsize: %d\n", __func__, qsize);
-	if (features & VIRTIO_BLK_F_RO)
+	if (virtio_has_feature(vsc, VIRTIO_BLK_F_RO))
 		sc->sc_link.flags |= SDEV_READONLY;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 	printf("\n");
 	config_found(self, &saa, scsiprint);
@@ -430,7 +420,7 @@ vioblk_scsi_cmd(struct scsi_xfer *xs)
 		break;
 
 	case SYNCHRONIZE_CACHE:
-		if ((vsc->sc_features & VIRTIO_BLK_F_FLUSH) == 0) {
+		if (!virtio_has_feature(vsc, VIRTIO_BLK_F_FLUSH)) {
 			vioblk_scsi_done(xs, XS_NOERROR);
 			return;
 		}
@@ -553,13 +543,10 @@ vioblk_scsi_cmd(struct scsi_xfer *xs)
 		delay(1000);
 	} while(--timeout > 0);
 	if (timeout <= 0) {
-		uint32_t features;
 		printf("%s: SCSI_POLL timed out\n", __func__);
 		vioblk_reset(sc);
 		virtio_reinit_start(vsc);
-		features = virtio_negotiate_features(vsc, vsc->sc_features,
-		    NULL);
-		KASSERT(features == vsc->sc_features);
+		virtio_reinit_end(vsc);
 	}
 	splx(s);
 	return;
@@ -634,21 +621,6 @@ vioblk_scsi_done(struct scsi_xfer *xs, int error)
 {
 	xs->error = error;
 	scsi_done(xs);
-}
-
-int
-vioblk_dev_probe(struct scsi_link *link)
-{
-	KASSERT(link->lun == 0);
-	if (link->target == 0)
-		return (0);
-	return (ENODEV);
-}
-
-void
-vioblk_dev_free(struct scsi_link *link)
-{
-	printf("%s\n", __func__);
 }
 
 int
@@ -730,8 +702,8 @@ vioblk_alloc_reqs(struct vioblk_softc *sc, int qsize)
 			nreqs = i;
 			goto err_reqs;
 		}
-		r = bus_dmamap_create(sc->sc_virtio->sc_dmat, MAX_XFER,
-		    SEG_MAX, MAX_XFER, 0, BUS_DMA_NOWAIT|BUS_DMA_ALLOCNOW,
+		r = bus_dmamap_create(sc->sc_virtio->sc_dmat, MAXPHYS,
+		    SEG_MAX, MAXPHYS, 0, BUS_DMA_NOWAIT|BUS_DMA_ALLOCNOW,
 		    &vr->vr_payload);
 		if (r != 0) {
 			printf("payload dmamap creation failed, err %d\n", r);

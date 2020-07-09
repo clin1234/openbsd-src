@@ -1,4 +1,4 @@
-/*	$OpenBSD: imxesdhc.c,v 1.11 2018/12/29 11:37:54 patrick Exp $	*/
+/*	$OpenBSD: imxesdhc.c,v 1.16 2020/04/28 17:22:53 patrick Exp $	*/
 /*
  * Copyright (c) 2009 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2006 Uwe Stuehler <uwe@openbsd.org>
@@ -22,7 +22,6 @@
 #include <sys/param.h>
 #include <sys/device.h>
 #include <sys/kernel.h>
-#include <sys/kthread.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
 #include <machine/bus.h>
@@ -148,10 +147,11 @@
 #define SDHC_WTMK_LVL_WR_WML_SHIFT		16
 #define SDHC_WTMK_LVL_WR_BRST_LEN_SHIFT		24
 
-#define SDHC_COMMAND_TIMEOUT			hz
-#define SDHC_BUFFER_TIMEOUT			hz
-#define SDHC_TRANSFER_TIMEOUT			hz
-#define SDHC_DMA_TIMEOUT			(3 * hz)
+/* timeouts in seconds */
+#define SDHC_COMMAND_TIMEOUT			1
+#define SDHC_BUFFER_TIMEOUT			1
+#define SDHC_TRANSFER_TIMEOUT			1
+#define SDHC_DMA_TIMEOUT			3
 
 #define SDHC_ADMA2_VALID			(1 << 0)
 #define SDHC_ADMA2_END				(1 << 1)
@@ -287,7 +287,7 @@ imxesdhc_match(struct device *parent, void *match, void *aux)
 	return OF_is_compatible(faa->fa_node, "fsl,imx6q-usdhc") ||
 	    OF_is_compatible(faa->fa_node, "fsl,imx6sl-usdhc") ||
 	    OF_is_compatible(faa->fa_node, "fsl,imx6sx-usdhc") ||
-	    OF_is_compatible(faa->fa_node, "fsl,imx8mq-usdhc");
+	    OF_is_compatible(faa->fa_node, "fsl,imx7d-usdhc");
 }
 
 void
@@ -315,6 +315,7 @@ imxesdhc_attach(struct device *parent, struct device *self, void *aux)
 	pinctrl_byname(faa->fa_node, "default");
 
 	clock_set_assigned(faa->fa_node);
+	clock_enable_all(faa->fa_node);
 
 	sc->sc_ih = fdt_intr_establish(faa->fa_node, IPL_SDMMC,
 	   imxesdhc_intr, sc, sc->sc_dev.dv_xname);
@@ -336,7 +337,7 @@ imxesdhc_attach(struct device *parent, struct device *self, void *aux)
 	caps = HREAD4(sc, SDHC_HOST_CTRL_CAP);
 	if (OF_is_compatible(sc->sc_node, "fsl,imx6sl-usdhc") ||
 	    OF_is_compatible(sc->sc_node, "fsl,imx6sx-usdhc") ||
-	    OF_is_compatible(sc->sc_node, "fsl,imx8mq-usdhc"))
+	    OF_is_compatible(sc->sc_node, "fsl,imx7d-usdhc"))
 		caps &= 0xffff0000;
 
 	/* Use DMA if the host system and the controller support it. */
@@ -871,10 +872,9 @@ imxesdhc_start_command(struct imxesdhc_softc *sc, struct sdmmc_command *cmd)
 	int seg;
 	int s;
 
-	DPRINTF(1,("%s: start cmd %u arg=%#x data=%p dlen=%d flags=%#x "
-	    "proc=\"%s\"\n", HDEVNAME(sc), cmd->c_opcode, cmd->c_arg,
-	    cmd->c_data, cmd->c_datalen, cmd->c_flags, curproc ?
-	    curproc->p_p->ps_comm : ""));
+	DPRINTF(1,("%s: start cmd %u arg=%#x data=%p dlen=%d flags=%#x\n",
+	    HDEVNAME(sc), cmd->c_opcode, cmd->c_arg, cmd->c_data,
+	    cmd->c_datalen, cmd->c_flags));
 
 	/*
 	 * The maximum block length for commands should be the minimum
@@ -1137,7 +1137,7 @@ imxesdhc_soft_reset(struct imxesdhc_softc *sc, int mask)
 }
 
 int
-imxesdhc_wait_intr(struct imxesdhc_softc *sc, int mask, int timo)
+imxesdhc_wait_intr(struct imxesdhc_softc *sc, int mask, int secs)
 {
 	int status;
 	int s;
@@ -1152,8 +1152,8 @@ imxesdhc_wait_intr(struct imxesdhc_softc *sc, int mask, int timo)
 
 	status = sc->intr_status & mask;
 	while (status == 0) {
-		if (tsleep(&sc->intr_status, PWAIT, "hcintr", timo)
-		    == EWOULDBLOCK) {
+		if (tsleep_nsec(&sc->intr_status, PWAIT, "hcintr",
+		    SEC_TO_NSEC(secs)) == EWOULDBLOCK) {
 			status |= SDHC_INT_STATUS_ERR;
 			break;
 		}

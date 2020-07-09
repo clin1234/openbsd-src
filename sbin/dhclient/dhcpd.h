@@ -1,4 +1,4 @@
-/*	$OpenBSD: dhcpd.h,v 1.277 2019/04/02 02:59:43 krw Exp $	*/
+/*	$OpenBSD: dhcpd.h,v 1.287 2020/05/21 01:07:52 krw Exp $	*/
 
 /*
  * Copyright (c) 2004 Henning Brauer <henning@openbsd.org>
@@ -129,6 +129,8 @@ struct interface_info {
 	int			 rdomain;
 	int			 flags;
 #define IFI_IN_CHARGE		0x01
+#define IFI_AUTOCONF		0x02
+	uint32_t		 mtu;
 	struct dhcp_packet	 recv_packet;
 	struct dhcp_packet	 sent_packet;
 	int			 sent_packet_length;
@@ -147,6 +149,7 @@ struct interface_info {
 	struct client_lease	*offer;
 	char			*offer_src;
 	struct proposal		*configured;
+	struct unwind_info	*unwind_info;
 	struct client_lease_tq	 lease_db;
 };
 
@@ -164,7 +167,7 @@ char			*code_to_name(int);
 char			*code_to_format(int);
 int			 code_to_action(int, int);
 int			 name_to_code(char *);
-void			 merge_option_data(struct option_data *,
+void			 merge_option_data(char *, struct option_data *,
     struct option_data *, struct option_data *);
 
 /* conflex.c */
@@ -178,10 +181,10 @@ int		 peek_token(char **, FILE *);
 /* parse.c */
 void		 skip_to_semi(FILE *);
 int		 parse_semi(FILE *);
-int		 parse_string(FILE *, unsigned int *, char **);
+int		 parse_string(FILE *, char **);
 int		 parse_ip_addr(FILE *, struct in_addr *);
 int		 parse_cidr(FILE *, unsigned char *);
-int		 parse_number(FILE *, unsigned char *, char);
+int		 parse_number(FILE *, long long *, long long, long long);
 int		 parse_boolean(FILE *, unsigned char *);
 void		 parse_warn(char *);
 
@@ -208,10 +211,13 @@ extern struct client_config	*config;
 extern struct imsgbuf		*unpriv_ibuf;
 extern int			 quit;
 extern int			 cmd_opts;
-#define		OPT_NOACTION	1
-#define		OPT_VERBOSE	2
-#define		OPT_FOREGROUND	4
-#define		OPT_RELEASE	8
+#define		OPT_NOACTION	0x01
+#define		OPT_VERBOSE	0x02
+#define		OPT_FOREGROUND	0x04
+#define		OPT_RELEASE	0x08
+#define		OPT_CONFPATH	0x10
+#define		OPT_DBPATH	0x20
+#define		OPT_IGNORELIST	0x40
 
 void		 dhcpoffer(struct interface_info *, struct option_data *,
     const char *);
@@ -237,12 +243,14 @@ uint32_t	 wrapsum(uint32_t);
 /* clparse.c */
 void		 init_config(void);
 void		 read_conf(char *, char *, struct ether_addr *);
-void		 read_lease_db(char *, struct client_lease_tq *);
+void		 read_lease_db(struct client_lease_tq *);
 
 /* kroute.c */
-unsigned int	 extract_classless_route(uint8_t *, unsigned int,
-    in_addr_t *, in_addr_t *, in_addr_t *);
+unsigned int	 extract_route(uint8_t *, unsigned int, in_addr_t *,
+    in_addr_t *, in_addr_t *);
 void		 write_resolv_conf(void);
 
 void		 propose(struct proposal *);
 void		 revoke_proposal(struct proposal *);
+
+void		 tell_unwind(struct unwind_info *, int);

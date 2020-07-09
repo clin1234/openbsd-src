@@ -1,4 +1,4 @@
-/*	$OpenBSD: synch.h,v 1.3 2018/06/04 22:08:56 kettenis Exp $ */
+/*	$OpenBSD: synch.h,v 1.5 2020/07/06 13:33:06 pirofti Exp $ */
 /*
  * Copyright (c) 2017 Martin Pieuchot
  *
@@ -25,13 +25,6 @@ _wake(volatile uint32_t *p, int n)
 	return futex(p, FUTEX_WAKE_PRIVATE, n, NULL, NULL);
 }
 
-static inline void
-_wait(volatile uint32_t *p, int val)
-{
-	while (*p != (uint32_t)val)
-		futex(p, FUTEX_WAIT_PRIVATE, val, NULL, NULL);
-}
-
 static inline int
 _twait(volatile uint32_t *p, int val, clockid_t clockid, const struct timespec *abs)
 {
@@ -40,7 +33,7 @@ _twait(volatile uint32_t *p, int val, clockid_t clockid, const struct timespec *
 	if (abs == NULL)
 		return futex(p, FUTEX_WAIT_PRIVATE, val, NULL, NULL);
 
-	if (abs->tv_nsec >= 1000000000 || clock_gettime(clockid, &rel))
+	if (abs->tv_nsec >= 1000000000 || WRAP(clock_gettime)(clockid, &rel))
 		return (EINVAL);
 
 	rel.tv_sec = abs->tv_sec - rel.tv_sec;

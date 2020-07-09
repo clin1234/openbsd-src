@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.39 2016/09/04 10:51:24 naddy Exp $ */
+/*	$OpenBSD: conf.c,v 1.43 2020/07/06 04:32:25 dlg Exp $ */
 
 /*
  * Copyright (c) 1992, 1993
@@ -107,6 +107,7 @@ cdev_decl(wd);
 #include "audio.h"
 #include "video.h"
 #include "ksyms.h"
+#include "kstat.h"
 
 #include "wsdisplay.h"
 #include "wskbd.h"
@@ -115,10 +116,12 @@ cdev_decl(wd);
 #include "pci.h"
 cdev_decl(pci);
 
+#include "dt.h"
 #include "pf.h"
 
 #include "usb.h"
 #include "uhid.h"
+#include "fido.h"
 #include "ugen.h"
 #include "ulpt.h"
 #include "ucom.h"
@@ -164,7 +167,7 @@ struct cdevsw	cdevsw[] =
 #else
 	cdev_notdef(),			/* 29 */
 #endif
-	cdev_notdef(),			/* 30: */
+	cdev_dt_init(NDT,dt),		/* 30: dynamic tracer */
 	cdev_pf_init(NPF,pf),		/* 31: packet filter */
 	cdev_uk_init(NUK,uk),		/* 32: unknown SCSI */
 	cdev_random_init(1,random),	/* 33: random data source */
@@ -185,7 +188,7 @@ struct cdevsw	cdevsw[] =
 	cdev_notdef(),			/* 48: */
 	cdev_bio_init(NBIO,bio),	/* 49: ioctl tunnel */
 	cdev_notdef(),			/* 50: */
-	cdev_notdef(),			/* 51: */
+	cdev_kstat_init(NKSTAT,kstat),	/* 51: kernel statistics */
 	cdev_ptm_init(NPTY,ptm),	/* 52: pseudo-tty ptm device */
 	cdev_notdef(),			/* 53: */
 	cdev_notdef(),			/* 54: */
@@ -210,6 +213,8 @@ struct cdevsw	cdevsw[] =
 	cdev_fuse_init(NFUSE,fuse),	/* 73: fuse */
 	cdev_tun_init(NTUN,tap),	/* 74: Ethernet network tunnel */
 	cdev_switch_init(NSWITCH,switch), /* 75: switch(4) control interface */
+	cdev_fido_init(NFIDO,fido),	/* 76: FIDO/U2F security key */
+	cdev_pppx_init(NPPPX,pppac),	/* 77: PPP Access Concentrator */
 };
 
 int	nchrdev = nitems(cdevsw);

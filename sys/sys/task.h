@@ -1,4 +1,4 @@
-/*	$OpenBSD: task.h,v 1.15 2019/04/28 04:20:40 dlg Exp $ */
+/*	$OpenBSD: task.h,v 1.17 2020/06/08 00:27:45 dlg Exp $ */
 
 /*
  * Copyright (c) 2013 David Gwynne <dlg@openbsd.org>

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_socket2.c,v 1.101 2019/04/16 13:15:32 yasuoka Exp $	*/
+/*	$OpenBSD: uipc_socket2.c,v 1.104 2020/04/11 14:07:06 claudio Exp $	*/
 /*	$NetBSD: uipc_socket2.c,v 1.11 1996/02/04 02:17:55 christos Exp $	*/
 
 /*
@@ -181,10 +181,10 @@ sonewconn(struct socket *head, int connstatus)
 	}
 	so->so_snd.sb_wat = head->so_snd.sb_wat;
 	so->so_snd.sb_lowat = head->so_snd.sb_lowat;
-	so->so_snd.sb_timeo = head->so_snd.sb_timeo;
+	so->so_snd.sb_timeo_nsecs = head->so_snd.sb_timeo_nsecs;
 	so->so_rcv.sb_wat = head->so_rcv.sb_wat;
 	so->so_rcv.sb_lowat = head->so_rcv.sb_lowat;
-	so->so_rcv.sb_timeo = head->so_rcv.sb_timeo;
+	so->so_rcv.sb_timeo_nsecs = head->so_rcv.sb_timeo_nsecs;
 
 	sigio_init(&so->so_sigio);
 	sigio_copy(&so->so_sigio, &head->so_sigio);
@@ -332,14 +332,15 @@ soassertlocked(struct socket *so)
 }
 
 int
-sosleep(struct socket *so, void *ident, int prio, const char *wmesg, int timo)
+sosleep_nsec(struct socket *so, void *ident, int prio, const char *wmesg,
+    uint64_t nsecs)
 {
 	if ((so->so_proto->pr_domain->dom_family != PF_UNIX) &&
 	    (so->so_proto->pr_domain->dom_family != PF_ROUTE) &&
 	    (so->so_proto->pr_domain->dom_family != PF_KEY)) {
-		return rwsleep(ident, &netlock, prio, wmesg, timo);
+		return rwsleep_nsec(ident, &netlock, prio, wmesg, nsecs);
 	} else
-		return tsleep(ident, prio, wmesg, timo);
+		return tsleep_nsec(ident, prio, wmesg, nsecs);
 }
 
 /*
@@ -353,7 +354,7 @@ sbwait(struct socket *so, struct sockbuf *sb)
 	soassertlocked(so);
 
 	sb->sb_flags |= SB_WAIT;
-	return (sosleep(so, &sb->sb_cc, prio, "netio", sb->sb_timeo));
+	return sosleep_nsec(so, &sb->sb_cc, prio, "netio", sb->sb_timeo_nsecs);
 }
 
 int
@@ -372,7 +373,7 @@ sblock(struct socket *so, struct sockbuf *sb, int wait)
 
 	while (sb->sb_flags & SB_LOCK) {
 		sb->sb_flags |= SB_WANT;
-		error = sosleep(so, &sb->sb_flags, prio, "netlck", 0);
+		error = sosleep_nsec(so, &sb->sb_flags, prio, "netlck", INFSLP);
 		if (error)
 			return (error);
 	}
@@ -407,11 +408,9 @@ sowakeup(struct socket *so, struct sockbuf *sb)
 		sb->sb_flags &= ~SB_WAIT;
 		wakeup(&sb->sb_cc);
 	}
-	KERNEL_LOCK();
 	if (so->so_state & SS_ASYNC)
 		pgsigio(&so->so_sigio, SIGIO, 0);
 	selwakeup(&sb->sb_sel);
-	KERNEL_UNLOCK();
 }
 
 /*
@@ -620,6 +619,7 @@ sbappend(struct socket *so, struct sockbuf *sb, struct mbuf *m)
 	if (m == NULL)
 		return;
 
+	soassertlocked(so);
 	SBLASTRECORDCHK(sb, "sbappend 1");
 
 	if ((n = sb->sb_lastrecord) != NULL) {
@@ -784,6 +784,8 @@ sbappendaddr(struct socket *so, struct sockbuf *sb, const struct sockaddr *asa,
 {
 	struct mbuf *m, *n, *nlast;
 	int space = asa->sa_len;
+
+	soassertlocked(so);
 
 	if (m0 && (m0->m_flags & M_PKTHDR) == 0)
 		panic("sbappendaddr");

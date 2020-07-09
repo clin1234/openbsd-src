@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.20 2016/09/04 10:51:24 naddy Exp $ */
+/*	$OpenBSD: conf.c,v 1.25 2020/07/06 04:32:25 dlg Exp $ */
 
 /*
  * Copyright (c) 1992, 1993
@@ -121,6 +121,7 @@ cdev_decl(octcf);
 cdev_decl(amdcf);
 
 #include "ksyms.h"
+#include "kstat.h"
 
 #include "wsdisplay.h"
 #include "wskbd.h"
@@ -129,10 +130,12 @@ cdev_decl(amdcf);
 #include "pci.h"
 cdev_decl(pci);
 
+#include "dt.h"
 #include "pf.h"
 
 #include "usb.h"
 #include "uhid.h"
+#include "fido.h"
 #include "ugen.h"
 #include "ulpt.h"
 #include "ucom.h"
@@ -140,6 +143,7 @@ cdev_decl(pci);
 #include "vscsi.h"
 #include "pppx.h"
 #include "fuse.h"
+#include "octboot.h"
 #include "openprom.h"
 #include "switch.h"
 
@@ -170,7 +174,7 @@ struct cdevsw	cdevsw[] =
 	cdev_disk_init(NWD,wd),		/* 18: ST506/ESDI/IDE disk */
 	cdev_disk_init(NAMDCF,amdcf),	/* 19: CF disk */
 	cdev_openprom_init(NOPENPROM,openprom),	/* 20: /dev/openprom */
-	cdev_notdef(),			/* 21: */
+	cdev_octboot_init(NOCTBOOT,octboot),	/* 21: /dev/octboot */
 	cdev_disk_init(NRD,rd),		/* 22: ramdisk device */
 	cdev_notdef(),			/* 23: was: concatenated disk driver */
 	cdev_notdef(),			/* 24: */
@@ -183,7 +187,7 @@ struct cdevsw	cdevsw[] =
 #else
 	cdev_notdef(),			/* 29 */
 #endif
-	cdev_notdef(),			/* 30: */
+	cdev_dt_init(NDT,dt),		/* 30: dynamic tracer */
 	cdev_pf_init(NPF,pf),		/* 31: packet filter */
 	cdev_uk_init(NUK,uk),		/* 32: unknown SCSI */
 	cdev_random_init(1,random),	/* 33: random data source */
@@ -204,7 +208,7 @@ struct cdevsw	cdevsw[] =
 	cdev_notdef(),			/* 48: */
 	cdev_bio_init(NBIO,bio),	/* 49: ioctl tunnel */
 	cdev_notdef(),			/* 50: */
-	cdev_notdef(),			/* 51: */
+	cdev_kstat_init(NKSTAT,kstat),	/* 51: kernel statistics */
 	cdev_ptm_init(NPTY,ptm),	/* 52: pseudo-tty ptm device */
 	cdev_fuse_init(NFUSE,fuse),	/* 53: fuse */
 	cdev_notdef(),			/* 54: */
@@ -229,6 +233,8 @@ struct cdevsw	cdevsw[] =
 	cdev_notdef(),			/* 73: fuse on other mips64 */
 	cdev_tun_init(NTUN,tap),	/* 74: Ethernet network tunnel */
 	cdev_switch_init(NSWITCH,switch), /* 75: switch(4) control interface */
+	cdev_fido_init(NFIDO,fido),	/* 76: FIDO/U2F security key */
+	cdev_pppx_init(NPPPX,pppac),	/* 77: PPP Access Concentrator */
 };
 
 int	nchrdev = nitems(cdevsw);

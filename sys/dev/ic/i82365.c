@@ -1,4 +1,4 @@
-/*	$OpenBSD: i82365.c,v 1.36 2017/09/08 05:36:52 deraadt Exp $	*/
+/*	$OpenBSD: i82365.c,v 1.39 2020/03/04 23:19:58 cheloha Exp $	*/
 /*	$NetBSD: i82365.c,v 1.10 1998/06/09 07:36:55 thorpej Exp $	*/
 
 /*
@@ -424,13 +424,13 @@ pcic_event_thread(arg)
 		s = splhigh();
 		if ((pe = SIMPLEQ_FIRST(&h->events)) == NULL) {
 			splx(s);
-			(void) tsleep(&h->events, PWAIT, "pcicev", 0);
+			tsleep_nsec(&h->events, PWAIT, "pcicev", INFSLP);
 			continue;
 		} else {
 			splx(s);
 			/* sleep .25s to be enqueued chatterling interrupts */
-			(void) tsleep((caddr_t)pcic_event_thread, PWAIT,
-			    "pcicss", hz/4);
+			tsleep_nsec(pcic_event_thread, PWAIT, "pcicss",
+			    MSEC_TO_NSEC(250));
 		}
 		pcic_event_process(h, pe);
 	}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exec.c,v 1.203 2019/02/08 12:51:57 bluhm Exp $	*/
+/*	$OpenBSD: kern_exec.c,v 1.216 2020/07/07 02:01:43 deraadt Exp $	*/
 /*	$NetBSD: kern_exec.c,v 1.75 1996/02/09 18:59:28 christos Exp $	*/
 
 /*-
@@ -64,6 +64,11 @@
 #include <uvm/uvm_extern.h>
 #include <machine/tcb.h>
 
+#include <sys/timetc.h>
+
+struct uvm_object *timekeep_object;
+struct timekeep *timekeep;
+
 void	unveil_destroy(struct process *ps);
 
 const struct kmem_va_mode kv_exec = {
@@ -75,6 +80,11 @@ const struct kmem_va_mode kv_exec = {
  * Map the shared signal code.
  */
 int exec_sigcode_map(struct process *, struct emul *);
+
+/*
+ * Map the shared timekeep page.
+ */
+int exec_timekeep_map(struct process *);
 
 /*
  * If non-zero, stackgap_random specifies the upper limit of the random gap size
@@ -125,10 +135,6 @@ check_exec(struct proc *p, struct exec_package *epp)
 	epp->ep_vp = vp = ndp->ni_vp;
 
 	/* check for regular file */
-	if (vp->v_type == VDIR) {
-		error = EISDIR;
-		goto bad1;
-	}
 	if (vp->v_type != VREG) {
 		error = EACCES;
 		goto bad1;
@@ -201,7 +207,7 @@ check_exec(struct proc *p, struct exec_package *epp)
 
 		/* check limits */
 		if ((epp->ep_tsize > MAXTSIZ) ||
-		    (epp->ep_dsize > p->p_rlimit[RLIMIT_DATA].rlim_cur))
+		    (epp->ep_dsize > lim_cur(RLIMIT_DATA)))
 			error = ENOMEM;
 
 		if (!error)
@@ -654,8 +660,8 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 
 		timeout_del(&pr->ps_realit_to);
 		for (i = 0; i < nitems(pr->ps_timer); i++) {
-			timerclear(&pr->ps_timer[i].it_interval);
-			timerclear(&pr->ps_timer[i].it_value);
+			timespecclear(&pr->ps_timer[i].it_interval);
+			timespecclear(&pr->ps_timer[i].it_value);
 		}
 		splx(s);
 	}
@@ -673,6 +679,10 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	 * notify others that we exec'd
 	 */
 	KNOTE(&pr->ps_klist, NOTE_EXEC);
+
+	/* map the process's timekeep page, needs to be before e_fixup */
+	if (exec_timekeep_map(pr))
+		goto free_pack_abort;
 
 	/* setup new registers and do misc. setup. */
 	if (pack.ep_emul->e_fixup != NULL) {
@@ -705,9 +715,9 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 		p->p_descfd = pack.ep_fd;
 
 	if (pack.ep_flags & EXEC_WXNEEDED)
-		p->p_p->ps_flags |= PS_WXNEEDED;
+		atomic_setbits_int(&p->p_p->ps_flags, PS_WXNEEDED);
 	else
-		p->p_p->ps_flags &= ~PS_WXNEEDED;
+		atomic_clearbits_int(&p->p_p->ps_flags, PS_WXNEEDED);
 
 	/* update ps_emul, the old value is no longer needed */
 	pr->ps_emul = pack.ep_emul;
@@ -724,8 +734,8 @@ bad:
 	if (pack.ep_flags & EXEC_HASFD) {
 		pack.ep_flags &= ~EXEC_HASFD;
 		fdplock(p->p_fd);
+		/* fdrelease unlocks p->p_fd. */
 		(void) fdrelease(p, pack.ep_fd);
-		fdpunlock(p->p_fd);
 	}
 	if (pack.ep_interp != NULL)
 		pool_put(&namei_pool, pack.ep_interp);
@@ -749,8 +759,7 @@ exec_abort:
 	 * get rid of the (new) address space we have created, if any, get rid
 	 * of our namei data and vnode, and exit noting failure
 	 */
-	uvm_deallocate(&vm->vm_map, VM_MIN_ADDRESS,
-		VM_MAXUSER_ADDRESS - VM_MIN_ADDRESS);
+	uvm_unmap(&vm->vm_map, VM_MIN_ADDRESS, VM_MAXUSER_ADDRESS);
 	if (pack.ep_interp != NULL)
 		pool_put(&namei_pool, pack.ep_interp);
 	if (pack.ep_emul_arg != NULL)
@@ -761,7 +770,7 @@ exec_abort:
 
 free_pack_abort:
 	free(pack.ep_hdr, M_EXEC, pack.ep_hdrlen);
-	exit1(p, W_EXITCODE(0, SIGABRT), EXIT_NORMAL);
+	exit1(p, 0, SIGABRT, EXIT_NORMAL);
 
 	/* NOTREACHED */
 	atomic_clearbits_int(&pr->ps_flags, PS_INEXEC);
@@ -857,7 +866,7 @@ exec_sigcode_map(struct process *pr, struct emul *e)
 	if (uvm_map(&pr->ps_vmspace->vm_map, &pr->ps_sigcode, round_page(sz),
 	    e->e_sigobject, 0, 0, UVM_MAPFLAG(PROT_READ | PROT_EXEC,
 	    PROT_READ | PROT_WRITE | PROT_EXEC, MAP_INHERIT_COPY,
-	    MADV_RANDOM, UVM_FLAG_COPYONW))) {
+	    MADV_RANDOM, UVM_FLAG_COPYONW | UVM_FLAG_SYSCALL))) {
 		uao_detach(e->e_sigobject);
 		return (ENOMEM);
 	}
@@ -865,6 +874,52 @@ exec_sigcode_map(struct process *pr, struct emul *e)
 	/* Calculate PC at point of sigreturn entry */
 	pr->ps_sigcoderet = pr->ps_sigcode +
 	    (pr->ps_emul->e_esigret - pr->ps_emul->e_sigcode);
+
+	return (0);
+}
+
+int
+exec_timekeep_map(struct process *pr)
+{
+	size_t timekeep_sz = round_page(sizeof(struct timekeep));
+
+	/*
+	 * Similar to the sigcode object, except that there is a single
+	 * timekeep object, and not one per emulation.
+	 */
+	if (timekeep_object == NULL) {
+		vaddr_t va = 0;
+
+		timekeep_object = uao_create(timekeep_sz, 0);
+		uao_reference(timekeep_object);
+
+		if (uvm_map(kernel_map, &va, timekeep_sz, timekeep_object,
+		    0, 0, UVM_MAPFLAG(PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE,
+		    MAP_INHERIT_SHARE, MADV_RANDOM, 0))) {
+			uao_detach(timekeep_object);
+			timekeep_object = NULL;
+			return (ENOMEM);
+		}
+		if (uvm_fault_wire(kernel_map, va, va + timekeep_sz,
+		    PROT_READ | PROT_WRITE)) {
+			uvm_unmap(kernel_map, va, va + timekeep_sz);
+			uao_detach(timekeep_object);
+			timekeep_object = NULL;
+			return (ENOMEM);
+		}
+
+		timekeep = (struct timekeep *)va;
+		timekeep->tk_version = TK_VERSION;
+	}
+
+	pr->ps_timekeep = 0; /* no hint */
+	uao_reference(timekeep_object);
+	if (uvm_map(&pr->ps_vmspace->vm_map, &pr->ps_timekeep, round_page(timekeep_sz),
+	    timekeep_object, 0, 0, UVM_MAPFLAG(PROT_READ, PROT_READ,
+	    MAP_INHERIT_COPY, MADV_RANDOM, 0))) {
+		uao_detach(timekeep_object);
+		return (ENOMEM);
+	}
 
 	return (0);
 }

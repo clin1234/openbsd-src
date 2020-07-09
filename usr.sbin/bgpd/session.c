@@ -1,4 +1,4 @@
-/*	$OpenBSD: session.c,v 1.380 2019/05/08 12:41:55 claudio Exp $ */
+/*	$OpenBSD: session.c,v 1.402 2020/06/27 07:24:42 bket Exp $ */
 
 /*
  * Copyright (c) 2003, 2004, 2005 Henning Brauer <henning@openbsd.org>
@@ -33,6 +33,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <poll.h>
 #include <pwd.h>
 #include <signal.h>
@@ -43,7 +44,6 @@
 #include <unistd.h>
 
 #include "bgpd.h"
-#include "mrt.h"
 #include "session.h"
 #include "log.h"
 
@@ -113,6 +113,14 @@ struct imsgbuf		*ibuf_main;
 struct mrt_head		 mrthead;
 time_t			 pauseaccept;
 
+static inline int
+peer_compare(const struct peer *a, const struct peer *b)
+{
+	return a->conf.id - b->conf.id;
+}
+
+RB_GENERATE(peer_head, peer, entry, peer_compare);
+
 void
 session_sighdlr(int sig)
 {
@@ -145,8 +153,8 @@ setup_listeners(u_int *la_cnt)
 			continue;
 		}
 
-		if (tcp_md5_listen(la->fd, &conf->peers) == -1)
-			fatal("tcp_md5_listen");
+		if (tcp_md5_prep_listener(la, &conf->peers) == -1)
+			fatal("tcp_md5_prep_listener");
 
 		/* set ttl to 255 so that ttl-security works */
 		if (la->sa.ss_family == AF_INET && setsockopt(la->fd,
@@ -191,6 +199,7 @@ session_main(int debug, int verbose)
 	struct ctl_conn		*ctl_conn;
 	struct listen_addr	*la;
 	void			*newp;
+	time_t			 now;
 	short			 events;
 
 	log_init(debug, LOG_DAEMON);
@@ -240,13 +249,11 @@ session_main(int debug, int verbose)
 	while (session_quit == 0) {
 		/* check for peers to be initialized or deleted */
 		if (!pending_reconf) {
-			for (p = TAILQ_FIRST(&conf->peers); p != NULL;
-			   p = next) {
-				next = TAILQ_NEXT(p, entry);
+			RB_FOREACH_SAFE(p, peer_head, &conf->peers, next) {
 				/* cloned peer that idled out? */
 				if (p->template && (p->state == STATE_IDLE ||
 				    p->state == STATE_ACTIVE) &&
-				    time(NULL) - p->stats.last_updown >=
+				    getmonotime() - p->stats.last_updown >=
 				    INTERVAL_HOLD_CLONED)
 					p->reconf_action = RECONF_DELETE;
 
@@ -267,10 +274,10 @@ session_main(int debug, int verbose)
 						session_demote(p, -1);
 					p->conf.demote_group[0] = 0;
 					session_stop(p, ERR_CEASE_PEER_UNCONF);
-					log_peer_warnx(&p->conf, "removed");
-					TAILQ_REMOVE(&conf->peers, p, entry);
 					timer_remove_all(p);
-					pfkey_remove(p);
+					tcp_md5_del_listener(conf, p);
+					log_peer_warnx(&p->conf, "removed");
+					RB_REMOVE(peer_head, &conf->peers, p);
 					free(p);
 					peer_cnt--;
 					continue;
@@ -358,12 +365,13 @@ session_main(int debug, int verbose)
 		idx_listeners = i;
 		timeout = 240;	/* loop every 240s at least */
 
-		TAILQ_FOREACH(p, &conf->peers, entry) {
+		now = getmonotime();
+		RB_FOREACH(p, peer_head, &conf->peers) {
 			time_t	nextaction;
 			struct peer_timer *pt;
 
 			/* check timers */
-			if ((pt = timer_nextisdue(p)) != NULL) {
+			if ((pt = timer_nextisdue(p, now)) != NULL) {
 				switch (pt->type) {
 				case Timer_Hold:
 					bgp_fsm(p, EVNT_TIMER_HOLDTIME);
@@ -378,18 +386,10 @@ session_main(int debug, int verbose)
 					bgp_fsm(p, EVNT_START);
 					break;
 				case Timer_IdleHoldReset:
-					p->IdleHoldTime /= 2;
-					if (p->IdleHoldTime <=
-					    INTERVAL_IDLE_HOLD_INITIAL) {
-						p->IdleHoldTime =
-						    INTERVAL_IDLE_HOLD_INITIAL;
-						timer_stop(p,
-						    Timer_IdleHoldReset);
-						p->errcnt = 0;
-					} else
-						timer_set(p,
-						    Timer_IdleHoldReset,
-						    p->IdleHoldTime);
+					p->IdleHoldTime =
+					    INTERVAL_IDLE_HOLD_INITIAL;
+					p->errcnt = 0;
+					timer_stop(p, Timer_IdleHoldReset);
 					break;
 				case Timer_CarpUndemote:
 					timer_stop(p, Timer_CarpUndemote);
@@ -405,7 +405,7 @@ session_main(int debug, int verbose)
 					fatalx("King Bula lost in time");
 				}
 			}
-			if ((nextaction = timer_nextduein(p)) != -1 &&
+			if ((nextaction = timer_nextduein(p, now)) != -1 &&
 			    nextaction < timeout)
 				timeout = nextaction;
 
@@ -414,7 +414,7 @@ session_main(int debug, int verbose)
 			if (p->wbuf.queued > 0 || p->state == STATE_CONNECT)
 				events |= POLLOUT;
 			/* is there still work to do? */
-			if (p->rpending)
+			if (p->rpending && p->rbuf && p->rbuf->wpos)
 				timeout = 0;
 
 			/* poll events */
@@ -502,7 +502,7 @@ session_main(int debug, int verbose)
 			session_dispatch_msg(&pfd[j],
 			    peer_l[j - idx_listeners]);
 
-		TAILQ_FOREACH(p, &conf->peers, entry)
+		RB_FOREACH(p, peer_head, &conf->peers)
 			if (p->rbuf && p->rbuf->wpos)
 				session_process_msg(p);
 
@@ -514,11 +514,11 @@ session_main(int debug, int verbose)
 			control_dispatch_msg(&pfd[j], &ctl_cnt, &conf->peers);
 	}
 
-	while ((p = TAILQ_FIRST(&conf->peers)) != NULL) {
-		TAILQ_REMOVE(&conf->peers, p, entry);
-		strlcpy(p->conf.shutcomm,
+	RB_FOREACH_SAFE(p, peer_head, &conf->peers, next) {
+		RB_REMOVE(peer_head, &conf->peers, p);
+		strlcpy(p->conf.reason,
 		    "bgpd shutting down",
-		    sizeof(p->conf.shutcomm));
+		    sizeof(p->conf.reason));
 		session_stop(p, ERR_CEASE_ADMIN_DOWN);
 		timer_remove_all(p);
 		free(p);
@@ -611,6 +611,8 @@ bgp_fsm(struct peer *peer, enum session_events event)
 
 			peer->stats.last_sent_errcode = 0;
 			peer->stats.last_sent_suberr = 0;
+			peer->stats.last_rcvd_errcode = 0;
+			peer->stats.last_rcvd_suberr = 0;
 
 			if (!peer->depend_ok)
 				timer_stop(peer, Timer_ConnectRetry);
@@ -880,6 +882,7 @@ change_state(struct peer *peer, enum session_state state,
 		msgbuf_clear(&peer->wbuf);
 		free(peer->rbuf);
 		peer->rbuf = NULL;
+		peer->rpending = 0;
 		bzero(&peer->capa.peer, sizeof(peer->capa.peer));
 		if (!peer->template)
 			imsg_compose(ibuf_main, IMSG_PFKEY_RELOAD,
@@ -1036,6 +1039,7 @@ int
 session_connect(struct peer *peer)
 {
 	struct sockaddr		*sa;
+	struct bgpd_addr	*bind_addr = NULL;
 	socklen_t		 sa_len;
 
 	/*
@@ -1063,8 +1067,16 @@ session_connect(struct peer *peer)
 	tcp_md5_set(peer->fd, peer);
 	peer->wbuf.fd = peer->fd;
 
-	/* if update source is set we need to bind() */
-	if ((sa = addr2sa(&peer->conf.local_addr, 0, &sa_len)) != NULL) {
+	/* if local-address is set we need to bind() */
+	switch (peer->conf.remote_addr.aid) {
+	case AID_INET:
+		bind_addr = &peer->conf.local_addr_v4;
+		break;
+	case AID_INET6:
+		bind_addr = &peer->conf.local_addr_v6;
+		break;
+	}
+	if (bind_addr && (sa = addr2sa(bind_addr, 0, &sa_len)) != NULL) {
 		if (bind(peer->fd, sa, sa_len) == -1) {
 			log_peer_warn(&peer->conf, "session_connect bind");
 			bgp_fsm(peer, EVNT_CON_OPENFAIL);
@@ -1111,8 +1123,10 @@ session_setup_socket(struct peer *p)
 		}
 
 		if (p->conf.ebgp) {
-			/* set TTL to foreign router's distance
-			   1=direct n=multihop with ttlsec, we always use 255 */
+			/*
+			 * set TTL to foreign router's distance
+			 * 1=direct n=multihop with ttlsec, we always use 255
+			 */
 			if (p->conf.ttlsec) {
 				ttl = 256 - p->conf.distance;
 				if (setsockopt(p->fd, IPPROTO_IP, IP_MINTTL,
@@ -1135,8 +1149,10 @@ session_setup_socket(struct peer *p)
 		break;
 	case AID_INET6:
 		if (p->conf.ebgp) {
-			/* set hoplimit to foreign router's distance
-			   1=direct n=multihop with ttlsec, we always use 255 */
+			/*
+			 * set hoplimit to foreign router's distance
+			 * 1=direct n=multihop with ttlsec, we always use 255
+			 */
 			if (p->conf.ttlsec) {
 				ttl = 256 - p->conf.distance;
 				if (setsockopt(p->fd, IPPROTO_IPV6,
@@ -1185,6 +1201,69 @@ session_setup_socket(struct peer *p)
 	return (0);
 }
 
+/* compare two sockaddrs by converting them into bgpd_addr */
+static int
+sa_cmp(struct sockaddr *a, struct sockaddr *b)
+{
+	struct bgpd_addr ba, bb;
+
+	sa2addr(a, &ba, NULL);
+	sa2addr(b, &bb, NULL);
+
+	return (memcmp(&ba, &bb, sizeof(ba)) == 0);
+}
+
+static void
+get_alternate_addr(struct sockaddr *sa, struct bgpd_addr *alt)
+{
+	struct ifaddrs	*ifap, *ifa, *match;
+
+	if (getifaddrs(&ifap) == -1)
+		fatal("getifaddrs");
+
+	for (match = ifap; match != NULL; match = match->ifa_next)
+		if (sa_cmp(sa, match->ifa_addr) == 0)
+			break;
+
+	if (match == NULL) {
+		log_warnx("%s: local address not found", __func__);
+		return;
+	}
+
+	switch (sa->sa_family) {
+	case AF_INET6:
+		for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+			if (ifa->ifa_addr->sa_family == AF_INET &&
+			    strcmp(ifa->ifa_name, match->ifa_name) == 0) {
+				sa2addr(ifa->ifa_addr, alt, NULL);
+				break;
+			}
+		}
+		break;
+	case AF_INET:
+		for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+			struct sockaddr_in6 *s =
+			    (struct sockaddr_in6 *)ifa->ifa_addr;
+			if (ifa->ifa_addr->sa_family == AF_INET6 &&
+			    strcmp(ifa->ifa_name, match->ifa_name) == 0) {
+				/* only accept global scope addresses */
+				if (IN6_IS_ADDR_LINKLOCAL(&s->sin6_addr) ||
+				    IN6_IS_ADDR_SITELOCAL(&s->sin6_addr))
+					continue;
+				sa2addr(ifa->ifa_addr, alt, NULL);
+				break;
+			}
+		}
+		break;
+	default:
+		log_warnx("%s: unsupported address family %d", __func__,
+		    sa->sa_family);
+		break;
+	}
+
+	freeifaddrs(ifap);
+}
+
 void
 session_tcp_established(struct peer *peer)
 {
@@ -1195,6 +1274,7 @@ session_tcp_established(struct peer *peer)
 	if (getsockname(peer->fd, (struct sockaddr *)&ss, &len) == -1)
 		log_warn("getsockname");
 	sa2addr((struct sockaddr *)&ss, &peer->local, &peer->local_port);
+	get_alternate_addr((struct sockaddr *)&ss, &peer->local_alt);
 	len = sizeof(ss);
 	if (getpeername(peer->fd, (struct sockaddr *)&ss, &len) == -1)
 		log_warn("getpeername");
@@ -1697,6 +1777,7 @@ session_dispatch_msg(struct pollfd *pfd, struct peer *p)
 			bgp_fsm(p, EVNT_CON_FATAL);
 			return (1);
 		}
+		p->stats.last_write = getmonotime();
 		if (p->throttled && p->wbuf.queued < SESS_MSG_LOW_MARK) {
 			if (imsg_rde(IMSG_XON, p->conf.id, NULL, 0) == -1)
 				log_peer_warn(&p->conf, "imsg_compose XON");
@@ -1722,7 +1803,7 @@ session_dispatch_msg(struct pollfd *pfd, struct peer *p)
 		}
 
 		p->rbuf->wpos += n;
-		p->stats.last_read = time(NULL);
+		p->stats.last_read = getmonotime();
 		return (1);
 	}
 	return (0);
@@ -2161,7 +2242,7 @@ parse_notification(struct peer *peer)
 	u_int8_t	 subcode;
 	u_int8_t	 capa_code;
 	u_int8_t	 capa_len;
-	size_t		 shutcomm_len;
+	size_t		 reason_len;
 	u_int8_t	 i;
 
 	/* just log */
@@ -2184,6 +2265,8 @@ parse_notification(struct peer *peer)
 
 	log_notification(peer, errcode, subcode, p, datalen, "received");
 	peer->errcnt++;
+	peer->stats.last_rcvd_errcode = errcode;
+	peer->stats.last_rcvd_suberr = subcode;
 
 	if (errcode == ERR_OPEN && subcode == ERR_OPEN_CAPA) {
 		if (datalen == 0) {	/* zebra likes to send those.. humbug */
@@ -2260,25 +2343,25 @@ parse_notification(struct peer *peer)
 	    (subcode == ERR_CEASE_ADMIN_DOWN ||
 	     subcode == ERR_CEASE_ADMIN_RESET)) {
 		if (datalen > 1) {
-			shutcomm_len = *p++;
+			reason_len = *p++;
 			datalen--;
-			if(datalen < shutcomm_len) {
+			if (datalen < reason_len) {
 			    log_peer_warnx(&peer->conf,
 				"received truncated shutdown reason");
 			    return (0);
 			}
-			if (shutcomm_len > SHUT_COMM_LEN - 1) {
+			if (reason_len > REASON_LEN - 1) {
 			    log_peer_warnx(&peer->conf,
 				"received overly long shutdown reason");
 			    return (0);
 			}
-			memcpy(peer->stats.last_shutcomm, p, shutcomm_len);
-			peer->stats.last_shutcomm[shutcomm_len] = '\0';
+			memcpy(peer->stats.last_reason, p, reason_len);
+			peer->stats.last_reason[reason_len] = '\0';
 			log_peer_warnx(&peer->conf,
 			    "received shutdown reason: \"%s\"",
-			    log_shutcomm(peer->stats.last_shutcomm));
-			p += shutcomm_len;
-			datalen -= shutcomm_len;
+			    log_reason(peer->stats.last_reason));
+			p += reason_len;
+			datalen -= reason_len;
 		}
 	}
 
@@ -2502,6 +2585,7 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 	struct kif		*kif;
 	u_char			*data;
 	int			 n, fd, depend_ok, restricted;
+	u_int16_t		 t;
 	u_int8_t		 aid, errcode, subcode;
 
 	while (ibuf) {
@@ -2547,7 +2631,7 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 				fatalx("reconf request not from parent");
 			nconf = new_config();
 
-			copy_config(nconf, imsg.data); 
+			copy_config(nconf, imsg.data);
 			pending_reconf = 1;
 			break;
 		case IMSG_RECONF_PEER:
@@ -2558,7 +2642,8 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 			memcpy(&p->conf, imsg.data, sizeof(struct peer_config));
 			p->state = p->prev_state = STATE_NONE;
 			p->reconf_action = RECONF_REINIT;
-			TAILQ_INSERT_TAIL(&nconf->peers, p, entry);
+			if (RB_INSERT(peer_head, &nconf->peers, p) != NULL)
+				fatalx("%s: peer tree is corrupt", __func__);
 			break;
 		case IMSG_RECONF_LISTENER:
 			if (idx != PFD_PIPE_MAIN)
@@ -2647,12 +2732,8 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 			}
 
 			/* add new listeners */
-			while ((la = TAILQ_FIRST(nconf->listen_addrs)) !=
-			    NULL) {
-				TAILQ_REMOVE(nconf->listen_addrs, la, entry);
-				TAILQ_INSERT_TAIL(conf->listen_addrs, la,
-				    entry);
-			}
+			TAILQ_CONCAT(conf->listen_addrs, nconf->listen_addrs,
+			    entry);
 
 			setup_listeners(listener_cnt);
 			free_config(nconf);
@@ -2671,7 +2752,7 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 			kif = imsg.data;
 			depend_ok = kif->depend_state;
 
-			TAILQ_FOREACH(p, &conf->peers, entry)
+			RB_FOREACH(p, peer_head, &conf->peers)
 				if (!strcmp(p->conf.if_depend, kif->ifname)) {
 					if (depend_ok && !p->depend_ok) {
 						p->depend_ok = depend_ok;
@@ -2734,6 +2815,7 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 			break;
 		case IMSG_CTL_SHOW_RIB:
 		case IMSG_CTL_SHOW_RIB_PREFIX:
+		case IMSG_CTL_SHOW_RIB_COMMUNITIES:
 		case IMSG_CTL_SHOW_RIB_ATTR:
 		case IMSG_CTL_SHOW_RIB_MEM:
 		case IMSG_CTL_SHOW_RIB_HASH:
@@ -2784,10 +2866,15 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 			case ERR_CEASE:
 				switch (subcode) {
 				case ERR_CEASE_MAX_PREFIX:
+				case ERR_CEASE_MAX_SENT_PREFIX:
+					t = p->conf.max_out_prefix_restart;
+					if (subcode == ERR_CEASE_MAX_PREFIX)
+						t = p->conf.max_prefix_restart;
+
 					bgp_fsm(p, EVNT_STOP);
-					if (p->conf.max_prefix_restart)
-						timer_set(p, Timer_IdleHold, 60 *
-						    p->conf.max_prefix_restart);
+					if (t)
+						timer_set(p, Timer_IdleHold,
+						    60 * t);
 					break;
 				default:
 					bgp_fsm(p, EVNT_CON_FATAL);
@@ -2888,7 +2975,7 @@ getpeerbydesc(struct bgpd_config *c, const char *descr)
 	struct peer	*p, *res = NULL;
 	int		 match = 0;
 
-	TAILQ_FOREACH(p, &c->peers, entry)
+	RB_FOREACH(p, peer_head, &c->peers)
 		if (!strcmp(p->conf.descr, descr)) {
 			res = p;
 			match++;
@@ -2914,13 +3001,13 @@ getpeerbyip(struct bgpd_config *c, struct sockaddr *ip)
 	sa2addr(ip, &addr, NULL);
 
 	/* we might want a more effective way to find peers by IP */
-	TAILQ_FOREACH(p, &c->peers, entry)
+	RB_FOREACH(p, peer_head, &c->peers)
 		if (!p->conf.template &&
 		    !memcmp(&addr, &p->conf.remote_addr, sizeof(addr)))
 			return (p);
 
 	/* try template matching */
-	TAILQ_FOREACH(p, &c->peers, entry)
+	RB_FOREACH(p, peer_head, &c->peers)
 		if (p->conf.template &&
 		    p->conf.remote_addr.aid == addr.aid &&
 		    session_match_mask(p, &addr))
@@ -2933,11 +3020,8 @@ getpeerbyip(struct bgpd_config *c, struct sockaddr *ip)
 		if ((newpeer = malloc(sizeof(struct peer))) == NULL)
 			fatal(NULL);
 		memcpy(newpeer, loose, sizeof(struct peer));
-		for (id = UINT_MAX; id > UINT_MAX / 2; id--) {
-			TAILQ_FOREACH(p, &c->peers, entry)
-				if (p->conf.id == id)
-					break;
-			if (p == NULL)		/* we found a free id */
+		for (id = PEER_ID_DYN_MAX; id > PEER_ID_STATIC_MAX; id--) {
+			if (getpeerbyid(c, id) == NULL)	/* we found a free id */
 				break;
 		}
 		newpeer->template = loose;
@@ -2945,9 +3029,11 @@ getpeerbyip(struct bgpd_config *c, struct sockaddr *ip)
 		newpeer->state = newpeer->prev_state = STATE_NONE;
 		newpeer->reconf_action = RECONF_KEEP;
 		newpeer->rbuf = NULL;
+		newpeer->rpending = 0;
 		init_peer(newpeer);
 		bgp_fsm(newpeer, EVNT_START);
-		TAILQ_INSERT_TAIL(&c->peers, newpeer, entry);
+		if (RB_INSERT(peer_head, &c->peers, newpeer) != NULL)
+			fatalx("%s: peer tree is corrupt", __func__);
 		return (newpeer);
 	}
 
@@ -2957,13 +3043,11 @@ getpeerbyip(struct bgpd_config *c, struct sockaddr *ip)
 struct peer *
 getpeerbyid(struct bgpd_config *c, u_int32_t peerid)
 {
-	struct peer *p;
+	static struct peer lookup;
 
-	/* we might want a more effective way to find peers by id */
-	TAILQ_FOREACH(p, &c->peers, entry)
-		if (p->conf.id == peerid)
-			return (p);
-	return (NULL);
+	lookup.conf.id = peerid;
+
+	return RB_FIND(peer_head, &c->peers, &lookup);
 }
 
 int
@@ -3045,7 +3129,7 @@ void
 session_down(struct peer *peer)
 {
 	bzero(&peer->capa.neg, sizeof(peer->capa.neg));
-	peer->stats.last_updown = time(NULL);
+	peer->stats.last_updown = getmonotime();
 	/*
 	 * session_down is called in the exit code path so check
 	 * if the RDE is still around, if not there is no need to
@@ -3066,13 +3150,19 @@ session_up(struct peer *p)
 	    &p->conf, sizeof(p->conf)) == -1)
 		fatalx("imsg_compose error");
 
-	sup.local_addr = p->local;
+	if (p->local.aid == AID_INET) {
+		sup.local_v4_addr = p->local;
+		sup.local_v6_addr = p->local_alt;
+	} else {
+		sup.local_v6_addr = p->local;
+		sup.local_v4_addr = p->local_alt;
+	}
 	sup.remote_addr = p->remote;
 
 	sup.remote_bgpid = p->remote_bgpid;
 	sup.short_as = p->short_as;
 	memcpy(&sup.capa, &p->capa.neg, sizeof(sup.capa));
-	p->stats.last_updown = time(NULL);
+	p->stats.last_updown = getmonotime();
 	if (imsg_rde(IMSG_SESSION_UP, p->conf.id, &sup, sizeof(sup)) == -1)
 		fatalx("imsg_compose error");
 }
@@ -3128,25 +3218,25 @@ session_demote(struct peer *p, int level)
 void
 session_stop(struct peer *peer, u_int8_t subcode)
 {
-	char data[SHUT_COMM_LEN];
+	char data[REASON_LEN];
 	size_t datalen;
-	size_t shutcomm_len;
+	size_t reason_len;
 	char *communication;
 
 	datalen = 0;
-	communication = peer->conf.shutcomm;
+	communication = peer->conf.reason;
 
 	if ((subcode == ERR_CEASE_ADMIN_DOWN ||
 	    subcode == ERR_CEASE_ADMIN_RESET)
 	    && communication && *communication) {
-		shutcomm_len = strlen(communication);
-		if (shutcomm_len > SHUT_COMM_LEN - 1) {
+		reason_len = strlen(communication);
+		if (reason_len > REASON_LEN - 1) {
 		    log_peer_warnx(&peer->conf,
 			"trying to send overly long shutdown reason");
 		} else {
-			data[0] = shutcomm_len;
-			datalen = shutcomm_len + sizeof(data[0]);
-			memcpy(data + 1, communication, shutcomm_len);
+			data[0] = reason_len;
+			datalen = reason_len + sizeof(data[0]);
+			memcpy(data + 1, communication, reason_len);
 		}
 	}
 	switch (peer->state) {
@@ -3165,9 +3255,9 @@ session_stop(struct peer *peer, u_int8_t subcode)
 void
 merge_peers(struct bgpd_config *c, struct bgpd_config *nc)
 {
-	struct peer *p, *np;
+	struct peer *p, *np, *next;
 
-	TAILQ_FOREACH(p, &c->peers, entry) {
+	RB_FOREACH(p, peer_head, &c->peers) {
 		/* templates are handled specially */
 		if (p->template != NULL)
 			continue;
@@ -3177,8 +3267,15 @@ merge_peers(struct bgpd_config *c, struct bgpd_config *nc)
 			continue;
 		}
 
+		/* peer no longer uses TCP MD5SIG so deconfigure */
+		if (p->conf.auth.method == AUTH_MD5SIG &&
+		    np->conf.auth.method != AUTH_MD5SIG)
+			tcp_md5_del_listener(c, p);
+		else if (np->conf.auth.method == AUTH_MD5SIG)
+			tcp_md5_add_listener(c, np);
+
 		memcpy(&p->conf, &np->conf, sizeof(p->conf));
-		TAILQ_REMOVE(&nc->peers, np, entry);
+		RB_REMOVE(peer_head, &nc->peers, np);
 		free(np);
 
 		p->reconf_action = RECONF_KEEP;
@@ -3200,7 +3297,7 @@ merge_peers(struct bgpd_config *c, struct bgpd_config *nc)
 		/* apply the config to all clones of a template */
 		if (p->conf.template) {
 			struct peer *xp;
-			TAILQ_FOREACH(xp, &conf->peers, entry) {
+			RB_FOREACH(xp, peer_head, &c->peers) {
 				if (xp->template != p)
 					continue;
 				session_template_clone(xp, NULL, xp->conf.id,
@@ -3213,5 +3310,11 @@ merge_peers(struct bgpd_config *c, struct bgpd_config *nc)
 	}
 
 	/* pfkeys of new peers already loaded by the parent process */
-	TAILQ_CONCAT(&c->peers, &nc->peers, entry);
+	RB_FOREACH_SAFE(np, peer_head, &nc->peers, next) {
+		RB_REMOVE(peer_head, &nc->peers, np);
+		if (RB_INSERT(peer_head, &c->peers, np) != NULL)
+			fatalx("%s: peer tree is corrupt", __func__);
+		if (np->conf.auth.method == AUTH_MD5SIG)
+			tcp_md5_add_listener(c, np);
+	}
 }

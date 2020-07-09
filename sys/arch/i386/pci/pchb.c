@@ -1,4 +1,4 @@
-/*	$OpenBSD: pchb.c,v 1.90 2018/04/28 15:44:59 jasper Exp $ */
+/*	$OpenBSD: pchb.c,v 1.92 2020/05/29 04:42:24 deraadt Exp $ */
 /*	$NetBSD: pchb.c,v 1.65 2007/08/15 02:26:13 markd Exp $	*/
 
 /*
@@ -69,8 +69,6 @@
 
 #include <dev/pci/agpvar.h>
 #include <dev/pci/ppbreg.h>
-
-#include <dev/rndvar.h>
 
 #include <dev/ic/i82802reg.h>
 
@@ -185,8 +183,8 @@ pchbattach(struct device *parent, struct device *self, void *aux)
 	case PCI_VENDOR_AMD:
 		printf("\n");
 		switch (PCI_PRODUCT(pa->pa_id)) {
-		case PCI_PRODUCT_AMD_AMD64_0F_HT:
-		case PCI_PRODUCT_AMD_AMD64_10_HT:
+		case PCI_PRODUCT_AMD_0F_HT:
+		case PCI_PRODUCT_AMD_10_HT:
 			for (i = 0; i < AMD64HT_NUM_LDT; i++)
 				pchb_amd64ht_attach(self, pa, i);
 			break;

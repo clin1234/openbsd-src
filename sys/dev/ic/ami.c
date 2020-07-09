@@ -1,4 +1,4 @@
-/*	$OpenBSD: ami.c,v 1.234 2018/08/14 05:22:21 jmatthew Exp $	*/
+/*	$OpenBSD: ami.c,v 1.245 2020/07/02 15:58:17 krw Exp $	*/
 
 /*
  * Copyright (c) 2001 Michael Shalayeff
@@ -59,6 +59,7 @@
 #include <sys/malloc.h>
 #include <sys/rwlock.h>
 #include <sys/pool.h>
+#include <sys/sensors.h>
 
 #include <machine/bus.h>
 
@@ -94,16 +95,15 @@ struct cfdriver ami_cd = {
 
 void	ami_scsi_cmd(struct scsi_xfer *);
 int	ami_scsi_ioctl(struct scsi_link *, u_long, caddr_t, int);
-void	amiminphys(struct buf *bp, struct scsi_link *sl);
 
 struct scsi_adapter ami_switch = {
-	ami_scsi_cmd, amiminphys, 0, 0, ami_scsi_ioctl
+	ami_scsi_cmd, NULL, NULL, NULL, ami_scsi_ioctl
 };
 
 void	ami_scsi_raw_cmd(struct scsi_xfer *);
 
 struct scsi_adapter ami_raw_switch = {
-	ami_scsi_raw_cmd, amiminphys, 0, 0,
+	ami_scsi_raw_cmd, NULL, NULL, NULL, NULL
 };
 
 void *		ami_get_ccb(void *);
@@ -238,7 +238,7 @@ ami_allocmem(struct ami_softc *sc, size_t size)
 
 	if (bus_dmamap_create(sc->sc_dmat, size, 1, size, 0,
 	    BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW, &am->am_map) != 0)
-		goto amfree; 
+		goto amfree;
 
 	if (bus_dmamem_alloc(sc->sc_dmat, size, PAGE_SIZE, 0, &am->am_seg, 1,
 	    &nsegs, BUS_DMA_NOWAIT | BUS_DMA_ZERO) != 0)
@@ -517,12 +517,6 @@ ami_attach(struct ami_softc *sc)
 	/* TODO: fetch & print cache strategy */
 	/* TODO: fetch & print scsi and raid info */
 
-	sc->sc_link.adapter_softc = sc;
-	sc->sc_link.adapter = &ami_switch;
-	sc->sc_link.adapter_target = sc->sc_maxunits;
-	sc->sc_link.adapter_buswidth = sc->sc_maxunits;
-	sc->sc_link.pool = &sc->sc_iopool;
-
 #ifdef AMI_DEBUG
 	printf(", FW %s, BIOS v%s, %dMB RAM\n"
 	    "%s: %d channels, %d %ss, %d logical drives, "
@@ -544,7 +538,12 @@ ami_attach(struct ami_softc *sc)
 	/* lock around ioctl requests */
 	rw_init(&sc->sc_lock, NULL);
 
-	bzero(&saa, sizeof(saa));
+	sc->sc_link.adapter_softc = sc;
+	sc->sc_link.adapter = &ami_switch;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
+	sc->sc_link.adapter_buswidth = sc->sc_maxunits;
+	sc->sc_link.pool = &sc->sc_iopool;
+
 	saa.saa_sc_link = &sc->sc_link;
 
 	config_found(&sc->sc_dev, &saa, scsiprint);
@@ -586,11 +585,10 @@ ami_attach(struct ami_softc *sc)
 		rsc->sc_link.adapter = &ami_raw_switch;
 		rsc->sc_proctarget = -1;
 		/* TODO fetch it from the controller */
-		rsc->sc_link.adapter_target = 16;
+		rsc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 		rsc->sc_link.adapter_buswidth = 16;
 		rsc->sc_link.pool = &sc->sc_iopool;
 
-		bzero(&saa, sizeof(saa));
 		saa.saa_sc_link = &rsc->sc_link;
 
 		ptbus = (struct scsibus_softc *)config_found(&sc->sc_dev,
@@ -1057,7 +1055,7 @@ ami_complete(struct ami_softc *sc, struct ami_ccb *ccb, int timeout)
 		s = splbio(); /* interrupt handlers are called at their IPL */
 		ready = ami_intr(sc);
 		splx(s);
-		
+
 		if (ready == 0) {
 			if (timeout-- == 0) {
 				/* XXX */
@@ -1190,14 +1188,6 @@ ami_done_init(struct ami_softc *sc, struct ami_ccb *ccb)
 }
 
 void
-amiminphys(struct buf *bp, struct scsi_link *sl)
-{
-	if (bp->b_bcount > AMI_MAXFER)
-		bp->b_bcount = AMI_MAXFER;
-	minphys(bp);
-}
-
-void
 ami_copy_internal_data(struct scsi_xfer *xs, void *v, size_t size)
 {
 	size_t copy_cnt;
@@ -1245,7 +1235,7 @@ ami_scsi_raw_cmd(struct scsi_xfer *xs)
 
 	ccb->ccb_cmd.acc_cmd = AMI_PASSTHRU;
 	ccb->ccb_cmd.acc_passthru.apt_data = ccb->ccb_ptpa;
-	
+
 	ccb->ccb_pt->apt_param = AMI_PTPARAM(AMI_TIMEOUT_6,1,0);
 	ccb->ccb_pt->apt_channel = channel;
 	ccb->ccb_pt->apt_target = target;
@@ -1652,7 +1642,7 @@ ami_drv_pt(struct ami_softc *sc, u_int8_t ch, u_int8_t tg, u_int8_t *cmd,
 	ami_start(sc, ccb);
 
 	while (ccb->ccb_state != AMI_CCB_READY)
-		tsleep(ccb, PRIBIO, "ami_drv_pt", 0);
+		tsleep_nsec(ccb, PRIBIO, "ami_drv_pt", INFSLP);
 
 	bus_dmamap_sync(sc->sc_dmat, ccb->ccb_dmamap, 0,
 	    ccb->ccb_dmamap->dm_mapsize, BUS_DMASYNC_POSTREAD);
@@ -1804,15 +1794,16 @@ ami_mgmt(struct ami_softc *sc, u_int8_t opcode, u_int8_t par1, u_int8_t par2,
 		ami_start(sc, ccb);
 		mtx_enter(&sc->sc_cmd_mtx);
 		while (ccb->ccb_state != AMI_CCB_READY)
-			msleep(ccb, &sc->sc_cmd_mtx, PRIBIO,"ami_mgmt", 0);
+			msleep_nsec(ccb, &sc->sc_cmd_mtx, PRIBIO, "ami_mgmt",
+			    INFSLP);
 		mtx_leave(&sc->sc_cmd_mtx);
 	} else {
 		/* change state must be run with id 0xfe and MUST be polled */
 		mtx_enter(&sc->sc_cmd_mtx);
 		sc->sc_drainio = 1;
 		while (!TAILQ_EMPTY(&sc->sc_ccb_runq)) {
-			if (msleep(sc, &sc->sc_cmd_mtx, PRIBIO,
-			    "amimgmt", hz * 60) == EWOULDBLOCK) {
+			if (msleep_nsec(sc, &sc->sc_cmd_mtx, PRIBIO,
+			    "amimgmt", SEC_TO_NSEC(60)) == EWOULDBLOCK) {
 				printf("%s: drain io timeout\n", DEVNAME(sc));
 				ccb->ccb_flags |= AMI_CCB_F_ERR;
 				goto restartio;
@@ -2020,9 +2011,9 @@ ami_disk(struct ami_softc *sc, struct bioc_disk *bd,
 
 		ch = (i & 0xf0) >> 4;
 		tg = i & 0x0f;
-		if (ami_drv_inq(sc, ch, tg, 0, inqbuf)) 
+		if (ami_drv_inq(sc, ch, tg, 0, inqbuf))
 			goto bail;
-		
+
 		vendp = inqbuf->vendor;
 		bcopy(vendp, vend, sizeof vend - 1);
 
@@ -2179,7 +2170,7 @@ ami_ioctl_vol(struct ami_softc *sc, struct bioc_vol *bv)
 	bv->bv_size *= (uint64_t)512;
 
 	strlcpy(bv->bv_dev, sc->sc_hdr[i].dev, sizeof(bv->bv_dev));
-	
+
 bail:
 	free(p, M_DEVBUF, sizeof *p);
 

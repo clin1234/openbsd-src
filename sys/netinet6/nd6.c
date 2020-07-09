@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6.c,v 1.226 2018/08/03 09:11:56 florian Exp $	*/
+/*	$OpenBSD: nd6.c,v 1.233 2020/06/24 22:03:44 cheloha Exp $	*/
 /*	$KAME: nd6.c,v 1.280 2002/06/08 19:52:07 itojun Exp $	*/
 
 /*
@@ -67,8 +67,8 @@
 #define ND6_RECALC_REACHTM_INTERVAL (60 * 120) /* 2 hours */
 
 /* timer values */
-int	nd6_timer_next	= -1;	/* at which time_uptime nd6_timer runs */
-time_t	nd6_expire_next	= -1;	/* at which time_uptime nd6_expire runs */
+int	nd6_timer_next	= -1;	/* at which uptime nd6_timer runs */
+time_t	nd6_expire_next	= -1;	/* at which uptime nd6_expire runs */
 int	nd6_delay	= 5;	/* delay first probe time 5 second */
 int	nd6_umaxtries	= 3;	/* maximum unicast query */
 int	nd6_mmaxtries	= 3;	/* maximum multicast query */
@@ -177,7 +177,7 @@ nd6_option(union nd_opts *ndopts)
 	int olen;
 
 	if (!ndopts)
-		panic("ndopts == NULL in nd6_option");
+		panic("%s: ndopts == NULL", __func__);
 	if (!ndopts->nd_opts_last)
 		panic("%s: uninitialized ndopts", __func__);
 	if (!ndopts->nd_opts_search)
@@ -228,7 +228,7 @@ nd6_options(union nd_opts *ndopts)
 	int i = 0;
 
 	if (!ndopts)
-		panic("ndopts == NULL in nd6_options");
+		panic("%s: ndopts == NULL", __func__);
 	if (!ndopts->nd_opts_last)
 		panic("%s: uninitialized ndopts", __func__);
 	if (!ndopts->nd_opts_search)
@@ -303,9 +303,10 @@ skip1:
 void
 nd6_llinfo_settimer(struct llinfo_nd6 *ln, unsigned int secs)
 {
-	time_t expire = time_uptime + secs;
+	time_t expire = getuptime() + secs;
 
 	NET_ASSERT_LOCKED();
+	KASSERT(!ISSET(ln->ln_rt->rt_flags, RTF_LOCAL));
 
 	ln->ln_rt->rt_expire = expire;
 	if (!timeout_pending(&nd6_timer_to) || expire < nd6_timer_next) {
@@ -318,14 +319,14 @@ void
 nd6_timer(void *arg)
 {
 	struct llinfo_nd6 *ln, *nln;
-	time_t expire = time_uptime + nd6_gctimer;
+	time_t expire = getuptime() + nd6_gctimer;
 	int secs;
 
 	NET_LOCK();
 	TAILQ_FOREACH_SAFE(ln, &nd6_list, ln_list, nln) {
 		struct rtentry *rt = ln->ln_rt;
 
-		if (rt->rt_expire && rt->rt_expire <= time_uptime)
+		if (rt->rt_expire && rt->rt_expire <= getuptime())
 			if (nd6_llinfo_timer(rt))
 				continue;
 
@@ -333,11 +334,11 @@ nd6_timer(void *arg)
 			expire = rt->rt_expire;
 	}
 
-	secs = expire - time_uptime;
+	secs = expire - getuptime();
 	if (secs < 0)
 		secs = 0;
 	if (!TAILQ_EMPTY(&nd6_list)) {
-		nd6_timer_next = time_uptime + secs;
+		nd6_timer_next = getuptime() + secs;
 		timeout_add_sec(&nd6_timer_to, secs);
 	}
 
@@ -468,7 +469,7 @@ nd6_expire_timer_update(struct in6_ifaddr *ia6)
 
 	if (!timeout_pending(&nd6_expire_timeout) ||
 	    nd6_expire_next > expire_time) {
-		secs = expire_time - time_uptime;
+		secs = expire_time - getuptime();
 		if (secs < 0)
 			secs = 0;
 
@@ -787,7 +788,7 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 	struct llinfo_nd6 *ln = (struct llinfo_nd6 *)rt->rt_llinfo;
 	struct ifaddr *ifa;
 
-	if (ISSET(rt->rt_flags, RTF_GATEWAY|RTF_MULTICAST))
+	if (ISSET(rt->rt_flags, RTF_GATEWAY|RTF_MULTICAST|RTF_MPLS))
 		return;
 
 	if (nd6_need_cache(ifp) == 0 && (rt->rt_flags & RTF_HOST) == 0) {
@@ -1004,6 +1005,8 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 		break;
 
 	case RTM_INVALIDATE:
+		if (ln == NULL)
+			break;
 		if (!ISSET(rt->rt_flags, RTF_LOCAL))
 			nd6_invalidate(rt);
 		break;
@@ -1019,9 +1022,9 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 
 	switch (cmd) {
 	case SIOCGIFINFO_IN6:
-		NET_RLOCK();
+		NET_RLOCK_IN_IOCTL();
 		ndi->ndi = *ND_IFINFO(ifp);
-		NET_RUNLOCK();
+		NET_RUNLOCK_IN_IOCTL();
 		return (0);
 	case SIOCGNBRINFO_IN6:
 	{
@@ -1029,7 +1032,7 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		struct in6_addr nb_addr = nbi->addr; /* make local for safety */
 		time_t expire;
 
-		NET_RLOCK();
+		NET_RLOCK_IN_IOCTL();
 		/*
 		 * XXX: KAME specific hack for scoped addresses
 		 *      XXXX: for other scopes than link-local?
@@ -1046,13 +1049,13 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		if (rt == NULL ||
 		    (ln = (struct llinfo_nd6 *)rt->rt_llinfo) == NULL) {
 			rtfree(rt);
-			NET_RUNLOCK();
+			NET_RUNLOCK_IN_IOCTL();
 			return (EINVAL);
 		}
 		expire = ln->ln_rt->rt_expire;
 		if (expire != 0) {
-			expire -= time_uptime;
-			expire += time_second;
+			expire -= getuptime();
+			expire += gettime();
 		}
 
 		nbi->state = ln->ln_state;
@@ -1061,7 +1064,7 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		nbi->expire = expire;
 
 		rtfree(rt);
-		NET_RUNLOCK();
+		NET_RUNLOCK_IN_IOCTL();
 		return (0);
 	}
 	}
@@ -1089,9 +1092,9 @@ nd6_cache_lladdr(struct ifnet *ifp, struct in6_addr *from, char *lladdr,
 	int newstate = 0;
 
 	if (!ifp)
-		panic("ifp == NULL in nd6_cache_lladdr");
+		panic("%s: ifp == NULL", __func__);
 	if (!from)
-		panic("from == NULL in nd6_cache_lladdr");
+		panic("%s: from == NULL", __func__);
 
 	/* nothing must be updated for unspecified address */
 	if (IN6_IS_ADDR_UNSPECIFIED(from))
@@ -1109,17 +1112,11 @@ nd6_cache_lladdr(struct ifnet *ifp, struct in6_addr *from, char *lladdr,
 
 	rt = nd6_lookup(from, 0, ifp, ifp->if_rdomain);
 	if (rt == NULL) {
-#if 0
-		/* nothing must be done if there's no lladdr */
-		if (!lladdr || !lladdrlen)
-			return NULL;
-#endif
-
 		rt = nd6_lookup(from, 1, ifp, ifp->if_rdomain);
 		is_newentry = 1;
 	} else {
-		/* do nothing if static ndp is set */
-		if (rt->rt_flags & RTF_STATIC) {
+		/* do not overwrite local or static entry */
+		if (ISSET(rt->rt_flags, RTF_STATIC|RTF_LOCAL)) {
 			rtfree(rt);
 			return;
 		}
@@ -1339,7 +1336,7 @@ nd6_resolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	rt = rt_getll(rt0);
 
 	if (ISSET(rt->rt_flags, RTF_REJECT) &&
-	    (rt->rt_expire == 0 || time_uptime < rt->rt_expire)) {
+	    (rt->rt_expire == 0 || getuptime() < rt->rt_expire)) {
 		m_freem(m);
 		return (rt == rt0 ? EHOSTDOWN : EHOSTUNREACH);
 	}

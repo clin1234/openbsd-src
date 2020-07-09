@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmm.c,v 1.92 2019/05/11 19:55:14 jasper Exp $	*/
+/*	$OpenBSD: vmm.c,v 1.96 2020/04/30 03:50:53 pd Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -316,6 +316,7 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		    imsg->hdr.peerid, vmc.vmc_owner.uid);
 		vm->vm_tty = imsg->fd;
 		vm->vm_state |= VM_STATE_RECEIVED;
+		vm->vm_state |= VM_STATE_PAUSED;
 		break;
 	case IMSG_VMDOP_RECEIVE_VM_END:
 		if ((vm = vm_getbyvmid(imsg->hdr.peerid)) == NULL) {
@@ -536,10 +537,6 @@ vmm_dispatch_vm(int fd, short event, void *arg)
 			break;
 		case IMSG_VMDOP_SEND_VM_RESPONSE:
 			IMSG_SIZE_CHECK(&imsg, &vmr);
-			memcpy(&vmr, imsg.data, sizeof(vmr));
-			if (!vmr.vmr_result) {
-				vm_remove(vm, __func__);
-			}
 		case IMSG_VMDOP_PAUSE_VM_RESPONSE:
 		case IMSG_VMDOP_UNPAUSE_VM_RESPONSE:
 			for (i = 0; i < sizeof(procs); i++) {
@@ -590,7 +587,7 @@ terminate_vm(struct vm_terminate_params *vtp)
  * Opens the next available tap device, up to MAX_TAP.
  *
  * Parameters
- *  ifname: an optional buffer of at least IF_NAMESIZE bytes.
+ *  ifname: a buffer of at least IF_NAMESIZE bytes.
  *
  * Returns a file descriptor to the tap node opened, or -1 if no tap
  * devices were available.
@@ -601,16 +598,15 @@ opentap(char *ifname)
 	int i, fd;
 	char path[PATH_MAX];
 
-	strlcpy(ifname, "tap", IF_NAMESIZE);
 	for (i = 0; i < MAX_TAP; i++) {
 		snprintf(path, PATH_MAX, "/dev/tap%d", i);
 		fd = open(path, O_RDWR | O_NONBLOCK);
 		if (fd != -1) {
-			if (ifname != NULL)
-				snprintf(ifname, IF_NAMESIZE, "tap%d", i);
+			snprintf(ifname, IF_NAMESIZE, "tap%d", i);
 			return (fd);
 		}
 	}
+	strlcpy(ifname, "tap", IF_NAMESIZE);
 
 	return (-1);
 }
@@ -769,7 +765,7 @@ get_info_vm(struct privsep *ps, struct imsg *imsg, int terminate)
 	memset(&vir, 0, sizeof(vir));
 
 	/* First ioctl to see how many bytes needed (vip.vip_size) */
-	if (ioctl(env->vmd_fd, VMM_IOC_INFO, &vip) < 0)
+	if (ioctl(env->vmd_fd, VMM_IOC_INFO, &vip) == -1)
 		return (errno);
 
 	if (vip.vip_info_ct != 0)
@@ -781,7 +777,7 @@ get_info_vm(struct privsep *ps, struct imsg *imsg, int terminate)
 
 	/* Second ioctl to get the actual list */
 	vip.vip_info = info;
-	if (ioctl(env->vmd_fd, VMM_IOC_INFO, &vip) < 0) {
+	if (ioctl(env->vmd_fd, VMM_IOC_INFO, &vip) == -1) {
 		ret = errno;
 		free(info);
 		return (ret);

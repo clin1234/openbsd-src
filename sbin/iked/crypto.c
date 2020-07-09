@@ -1,4 +1,4 @@
-/*	$OpenBSD: crypto.c,v 1.22 2017/08/28 16:28:13 otto Exp $	*/
+/*	$OpenBSD: crypto.c,v 1.28 2020/05/26 20:24:31 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
@@ -83,7 +83,7 @@ static const struct {
 int	_dsa_verify_init(struct iked_dsa *, const uint8_t *, size_t);
 int	_dsa_verify_prepare(struct iked_dsa *, uint8_t **, size_t *,
 	    uint8_t **);
-int	_dsa_sign_encode(struct iked_dsa *, uint8_t *, size_t *);
+int	_dsa_sign_encode(struct iked_dsa *, uint8_t *, size_t, size_t *);
 int	_dsa_sign_ecdsa(struct iked_dsa *, uint8_t *, size_t);
 
 struct iked_hash *
@@ -92,7 +92,7 @@ hash_new(uint8_t type, uint16_t id)
 	struct iked_hash	*hash;
 	const EVP_MD		*md = NULL;
 	HMAC_CTX		*ctx = NULL;
-	int			 length = 0, fixedkey = 0, trunc = 0;
+	int			 length = 0, fixedkey = 0, trunc = 0, isaead = 0;
 
 	switch (type) {
 	case IKEV2_XFORMTYPE_PRF:
@@ -156,6 +156,14 @@ hash_new(uint8_t type, uint16_t id)
 			length = SHA512_DIGEST_LENGTH;
 			trunc = 32;
 			break;
+		case IKEV2_XFORMAUTH_AES_GCM_12:
+			length = 12;
+			isaead = 1;
+			break;
+		case IKEV2_XFORMAUTH_AES_GCM_16:
+			length = 16;
+			isaead = 1;
+			break;
 		case IKEV2_XFORMAUTH_NONE:
 		case IKEV2_XFORMAUTH_DES_MAC:
 		case IKEV2_XFORMAUTH_KPDK_MD5:
@@ -177,7 +185,7 @@ hash_new(uint8_t type, uint16_t id)
 		    print_map(id, ikev2_xformtype_map));
 		break;
 	}
-	if (md == NULL)
+	if (!isaead && md == NULL)
 		return (NULL);
 
 	if ((hash = calloc(1, sizeof(*hash))) == NULL) {
@@ -192,6 +200,10 @@ hash_new(uint8_t type, uint16_t id)
 	hash->hash_trunc = trunc;
 	hash->hash_length = length;
 	hash->hash_fixedkey = fixedkey;
+	hash->hash_isaead = isaead;
+
+	if (isaead)
+		return (hash);
 
 	if ((ctx = calloc(1, sizeof(*ctx))) == NULL) {
 		log_debug("%s: alloc hash ctx", __func__);
@@ -276,6 +288,7 @@ cipher_new(uint8_t type, uint16_t id, uint16_t id_length)
 	const EVP_CIPHER	*cipher = NULL;
 	EVP_CIPHER_CTX		*ctx = NULL;
 	int			 length = 0, fixedkey = 0, ivlength = 0;
+	int			 saltlength = 0, authid = 0;
 
 	switch (type) {
 	case IKEV2_XFORMTYPE_ENCR:
@@ -308,6 +321,36 @@ cipher_new(uint8_t type, uint16_t id, uint16_t id_length)
 			length = EVP_CIPHER_block_size(cipher);
 			ivlength = EVP_CIPHER_iv_length(cipher);
 			fixedkey = EVP_CIPHER_key_length(cipher);
+			break;
+		case IKEV2_XFORMENCR_AES_GCM_16:
+		case IKEV2_XFORMENCR_AES_GCM_12:
+			switch (id_length) {
+			case 128:
+				cipher = EVP_aes_128_gcm();
+				break;
+			case 256:
+				cipher = EVP_aes_256_gcm();
+				break;
+			default:
+				log_debug("%s: invalid key length %d"
+				    " for cipher %s", __func__, id_length,
+				    print_map(id, ikev2_xformencr_map));
+				break;
+			}
+			if (cipher == NULL)
+				break;
+			switch(id) {
+			case IKEV2_XFORMENCR_AES_GCM_16:
+				authid = IKEV2_XFORMAUTH_AES_GCM_16;
+				break;
+			case IKEV2_XFORMENCR_AES_GCM_12:
+				authid = IKEV2_XFORMAUTH_AES_GCM_12;
+				break;
+			}
+			length = EVP_CIPHER_block_size(cipher);
+			ivlength = 8;
+			saltlength = 4;
+			fixedkey = EVP_CIPHER_key_length(cipher) + saltlength;
 			break;
 		case IKEV2_XFORMENCR_DES_IV64:
 		case IKEV2_XFORMENCR_DES:
@@ -346,6 +389,8 @@ cipher_new(uint8_t type, uint16_t id, uint16_t id_length)
 	encr->encr_length = length;
 	encr->encr_fixedkey = fixedkey;
 	encr->encr_ivlength = ivlength ? ivlength : length;
+	encr->encr_saltlength = saltlength;
+	encr->encr_authid = authid;
 
 	if ((ctx = calloc(1, sizeof(*ctx))) == NULL) {
 		log_debug("%s: alloc cipher ctx", __func__);
@@ -392,6 +437,20 @@ cipher_setiv(struct iked_cipher *encr, void *iv, size_t len)
 	return (encr->encr_iv);
 }
 
+int
+cipher_settag(struct iked_cipher *encr, uint8_t *data, size_t len)
+{
+	return (EVP_CIPHER_CTX_ctrl(encr->encr_ctx,
+	    EVP_CTRL_GCM_SET_TAG, len, data) != 1);
+}
+
+int
+cipher_gettag(struct iked_cipher *encr, uint8_t *data, size_t len)
+{
+	return (EVP_CIPHER_CTX_ctrl(encr->encr_ctx,
+	    EVP_CTRL_GCM_GET_TAG, len, data) != 1);
+}
+
 void
 cipher_free(struct iked_cipher *encr)
 {
@@ -401,57 +460,99 @@ cipher_free(struct iked_cipher *encr)
 		EVP_CIPHER_CTX_cleanup(encr->encr_ctx);
 		free(encr->encr_ctx);
 	}
+	ibuf_release(encr->encr_iv);
 	ibuf_release(encr->encr_key);
 	free(encr);
 }
 
-void
+int
 cipher_init(struct iked_cipher *encr, int enc)
 {
-	EVP_CipherInit_ex(encr->encr_ctx, encr->encr_priv, NULL,
-	    ibuf_data(encr->encr_key), ibuf_data(encr->encr_iv), enc);
+	struct ibuf	*nonce = NULL;
+	int		 ret = -1;
+
+	if (EVP_CipherInit_ex(encr->encr_ctx, encr->encr_priv, NULL,
+	    NULL, NULL, enc) != 1)
+		return (-1);
+	if (encr->encr_saltlength > 0) {
+		/* For AEADs the nonce is salt + IV  (see RFC5282) */
+		nonce = ibuf_new(ibuf_data(encr->encr_key) +
+		    ibuf_size(encr->encr_key) - encr->encr_saltlength,
+		    encr->encr_saltlength);
+		if (nonce == NULL)
+			return (-1);
+		if (ibuf_add(nonce, ibuf_data(encr->encr_iv) , ibuf_size(encr->encr_iv)) != 0)
+			goto done;
+		if (EVP_CipherInit_ex(encr->encr_ctx, NULL, NULL,
+		    ibuf_data(encr->encr_key), ibuf_data(nonce), enc) != 1)
+			goto done;
+	} else
+		if (EVP_CipherInit_ex(encr->encr_ctx, NULL, NULL,
+		    ibuf_data(encr->encr_key), ibuf_data(encr->encr_iv), enc) != 1)
+			return (-1);
 	EVP_CIPHER_CTX_set_padding(encr->encr_ctx, 0);
+	ret = 0;
+ done:
+	ibuf_free(nonce);
+	return (ret);
 }
 
-void
+int
 cipher_init_encrypt(struct iked_cipher *encr)
 {
-	cipher_init(encr, 1);
+	return (cipher_init(encr, 1));
 }
 
-void
+int
 cipher_init_decrypt(struct iked_cipher *encr)
 {
-	cipher_init(encr, 0);
+	return (cipher_init(encr, 0));
 }
 
 void
+cipher_aad(struct iked_cipher *encr, void *in, size_t inlen,
+    size_t *outlen)
+{
+	int	 olen = 0;
+
+	if (EVP_CipherUpdate(encr->encr_ctx, NULL, &olen, in, inlen) != 1) {
+		ca_sslerror(__func__);
+		*outlen = 0;
+		return;
+	}
+	*outlen = (size_t)olen;
+}
+
+int
 cipher_update(struct iked_cipher *encr, void *in, size_t inlen,
     void *out, size_t *outlen)
 {
 	int	 olen;
 
 	olen = 0;
-	if (!EVP_CipherUpdate(encr->encr_ctx, out, &olen, in, inlen)) {
+	if (EVP_CipherUpdate(encr->encr_ctx, out, &olen, in, inlen) != 1) {
 		ca_sslerror(__func__);
 		*outlen = 0;
-		return;
+		return (-1);
 	}
 	*outlen = (size_t)olen;
+	return (0);
 }
 
-void
-cipher_final(struct iked_cipher *encr, void *out, size_t *outlen)
+int
+cipher_final(struct iked_cipher *encr)
 {
 	int	 olen;
 
-	olen = 0;
-	if (!EVP_CipherFinal_ex(encr->encr_ctx, out, &olen)) {
+	/*
+	 * We always have EVP_CIPH_NO_PADDING set.  This means arg
+         * out is not used and olen should always be 0.
+         */
+	if (EVP_CipherFinal_ex(encr->encr_ctx, NULL, &olen) != 1) {
 		ca_sslerror(__func__);
-		*outlen = 0;
-		return;
+		return (-1);
 	}
-	*outlen = (size_t)olen;
+	return (0);
 }
 
 size_t
@@ -576,8 +677,6 @@ dsa_free(struct iked_dsa *dsa)
 		EVP_MD_CTX_destroy((EVP_MD_CTX *)dsa->dsa_ctx);
 		if (dsa->dsa_key)
 			EVP_PKEY_free(dsa->dsa_key);
-		if (dsa->dsa_cert)
-			X509_free(dsa->dsa_cert);
 	}
 
 	ibuf_release(dsa->dsa_keydata);
@@ -608,7 +707,6 @@ dsa_setkey(struct iked_dsa *dsa, void *key, size_t keylen, uint8_t type)
 			goto sslerr;
 		if ((pkey = X509_get_pubkey(cert)) == NULL)
 			goto sslerr;
-		dsa->dsa_cert = cert;
 		dsa->dsa_key = pkey;
 		break;
 	case IKEV2_CERT_RSA_KEY:
@@ -628,7 +726,6 @@ dsa_setkey(struct iked_dsa *dsa, void *key, size_t keylen, uint8_t type)
 			goto sslerr;
 
 		RSA_free(rsa);		/* pkey now has the reference */
-		dsa->dsa_cert = NULL;
 		dsa->dsa_key = pkey;
 		break;
 	case IKEV2_CERT_ECDSA:
@@ -646,7 +743,6 @@ dsa_setkey(struct iked_dsa *dsa, void *key, size_t keylen, uint8_t type)
 			goto sslerr;
 
 		EC_KEY_free(ec);	/* pkey now has the reference */
-		dsa->dsa_cert = NULL;
 		dsa->dsa_key = pkey;
 		break;
 	default:
@@ -655,6 +751,10 @@ dsa_setkey(struct iked_dsa *dsa, void *key, size_t keylen, uint8_t type)
 		log_debug("%s: unsupported key type", __func__);
 		goto err;
 	}
+
+	if (cert != NULL)
+		X509_free(cert);
+	BIO_free(rawcert);	/* temporary for parsing */
 
 	return (dsa->dsa_keydata);
 
@@ -745,37 +845,39 @@ dsa_init(struct iked_dsa *dsa, const void *buf, size_t len)
 	}
 
 	if (dsa->dsa_sign)
-		ret = EVP_SignInit_ex(dsa->dsa_ctx, dsa->dsa_priv, NULL);
+		ret = EVP_DigestSignInit(dsa->dsa_ctx, NULL, dsa->dsa_priv,
+		    NULL, dsa->dsa_key);
 	else {
 		if ((ret = _dsa_verify_init(dsa, buf, len)) != 0)
 			return (ret);
-		ret = EVP_VerifyInit_ex(dsa->dsa_ctx, dsa->dsa_priv, NULL);
+		ret = EVP_DigestVerifyInit(dsa->dsa_ctx, NULL, dsa->dsa_priv,
+		    NULL, dsa->dsa_key);
 	}
 
-	return (ret ? 0 : -1);
+	return (ret == 1 ? 0 : -1);
 }
 
 int
 dsa_update(struct iked_dsa *dsa, const void *buf, size_t len)
 {
-	int	ret = 1;
+	int	ret;
 
 	if (dsa->dsa_hmac)
 		ret = HMAC_Update(dsa->dsa_ctx, buf, len);
 	else if (dsa->dsa_sign)
-		ret = EVP_SignUpdate(dsa->dsa_ctx, buf, len);
+		ret = EVP_DigestSignUpdate(dsa->dsa_ctx, buf, len);
 	else
-		ret = EVP_VerifyUpdate(dsa->dsa_ctx, buf, len);
+		ret = EVP_DigestVerifyUpdate(dsa->dsa_ctx, buf, len);
 
-	return (ret ? 0 : -1);
+	return (ret == 1 ? 0 : -1);
 }
 
 /* Prefix signature hash with encoded type */
 int
-_dsa_sign_encode(struct iked_dsa *dsa, uint8_t *ptr, size_t *offp)
+_dsa_sign_encode(struct iked_dsa *dsa, uint8_t *ptr, size_t len, size_t *offp)
 {
 	int		 keytype;
-	size_t		 i;
+	size_t		 i, need;
 
 	if (offp)
 		*offp = 0;
@@ -792,13 +894,17 @@ _dsa_sign_encode(struct iked_dsa *dsa, uint8_t *ptr, size_t *offp)
 	}
 	if (i >= nitems(schemes))
 		return (-1);
+	log_debug("%s: signature scheme %zd selected", __func__, i);
+	need = sizeof(ptr[0]) + schemes[i].sc_len;
 	if (ptr) {
+		if (len < need)
+			return (-1);
 		ptr[0] = schemes[i].sc_len;
 		memcpy(ptr + sizeof(ptr[0]), schemes[i].sc_oid,
 		    schemes[i].sc_len);
 	}
 	if (offp)
-		*offp = sizeof(ptr[0]) + schemes[i].sc_len;
+		*offp = need;
 	return (0);
 }
 
@@ -808,7 +914,7 @@ dsa_prefix(struct iked_dsa *dsa)
 {
 	size_t		off = 0;
 
-	if (_dsa_sign_encode(dsa, NULL, &off) < 0)
+	if (_dsa_sign_encode(dsa, NULL, 0, &off) < 0)
 		fatal("dsa_prefix: internal error");
 	return off;
 }
@@ -832,9 +938,9 @@ int
 _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 {
 	ECDSA_SIG	*obj = NULL;
-	uint8_t		*otmp = NULL, *tmp;
+	uint8_t		*tmp = NULL;
 	const uint8_t	*p;
-	unsigned int	 tmplen;
+	size_t		 tmplen;
 	int		 ret = -1;
 	int		 bnlen, off;
 
@@ -846,11 +952,11 @@ _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 	 * (b) convert buffer to ECDSA_SIG object
 	 * (c) concatenate the padded r|s BIGNUMS into 'ptr'
 	 */
-	if ((tmplen = EVP_PKEY_size(dsa->dsa_key)) == 0)
+	if (EVP_DigestSignFinal(dsa->dsa_ctx, NULL, &tmplen) != 1)
 		goto done;
-	if ((otmp = tmp = calloc(1, tmplen)) == NULL)
+	if ((tmp = calloc(1, tmplen)) == NULL)
 		goto done;
-	if (!EVP_SignFinal(dsa->dsa_ctx, tmp, &tmplen, dsa->dsa_key))
+	if (EVP_DigestSignFinal(dsa->dsa_ctx, tmp, &tmplen) != 1)
 		goto done;
 	p = tmp;
 	if (d2i_ECDSA_SIG(&obj, &p, tmplen) == NULL)
@@ -864,7 +970,7 @@ _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 	BN_bn2bin(obj->s, ptr + off);
 	ret = 0;
  done:
-	free(otmp);
+	free(tmp);
 	if (obj)
 		ECDSA_SIG_free(obj);
 	return (ret);
@@ -873,7 +979,7 @@ _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 ssize_t
 dsa_sign_final(struct iked_dsa *dsa, void *buf, size_t len)
 {
-	unsigned int	 siglen;
+	unsigned int	 hmaclen;
 	size_t		 off = 0;
 	uint8_t		*ptr = buf;
 
@@ -881,8 +987,11 @@ dsa_sign_final(struct iked_dsa *dsa, void *buf, size_t len)
 		return (-1);
 
 	if (dsa->dsa_hmac) {
-		if (!HMAC_Final(dsa->dsa_ctx, buf, &siglen))
+		if (!HMAC_Final(dsa->dsa_ctx, buf, &hmaclen))
 			return (-1);
+		if (hmaclen > INT_MAX)
+			return (-1);
+		return (ssize_t)hmaclen;
 	} else {
 		switch (dsa->dsa_method) {
 		case IKEV2_AUTH_ECDSA_256:
@@ -890,20 +999,20 @@ dsa_sign_final(struct iked_dsa *dsa, void *buf, size_t len)
 		case IKEV2_AUTH_ECDSA_521:
 			if (_dsa_sign_ecdsa(dsa, buf, len) < 0)
 				return (-1);
-			siglen = len;
-			break;
+			return (len);
 		default:
-			if (_dsa_sign_encode(dsa, ptr, &off) < 0)
+			if (_dsa_sign_encode(dsa, ptr, len, &off) < 0)
 				return (-1);
-			if (!EVP_SignFinal(dsa->dsa_ctx, ptr + off, &siglen,
-			    dsa->dsa_key))
+			if (off > len)
 				return (-1);
-			siglen += off;
-			break;
+			len -= off;
+			ptr += off;
+			if (EVP_DigestSignFinal(dsa->dsa_ctx, ptr, &len) != 1)
+				return (-1);
+			return (len + off);
 		}
 	}
-
-	return (siglen);
+	return (-1);
 }
 
 int
@@ -979,8 +1088,7 @@ dsa_verify_final(struct iked_dsa *dsa, void *buf, size_t len)
 	} else {
 		if (_dsa_verify_prepare(dsa, &ptr, &len, &freeme) < 0)
 			return (-1);
-		if (EVP_VerifyFinal(dsa->dsa_ctx, ptr, len,
-		    dsa->dsa_key) != 1) {
+		if (EVP_DigestVerifyFinal(dsa->dsa_ctx, ptr, len) != 1) {
 			free(freeme);
 			ca_sslerror(__func__);
 			return (-1);

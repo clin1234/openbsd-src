@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.c,v 1.217 2019/05/08 18:48:34 claudio Exp $ */
+/*	$OpenBSD: bgpd.c,v 1.229 2020/05/11 16:59:19 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -34,7 +34,6 @@
 #include <unistd.h>
 
 #include "bgpd.h"
-#include "mrt.h"
 #include "session.h"
 #include "log.h"
 
@@ -44,8 +43,10 @@ int		main(int, char *[]);
 pid_t		start_child(enum bgpd_process, char *, int, int, int);
 int		send_filterset(struct imsgbuf *, struct filter_set_head *);
 int		reconfigure(char *, struct bgpd_config *);
+int		send_config(struct bgpd_config *);
 int		dispatch_imsg(struct imsgbuf *, int, struct bgpd_config *);
 int		control_setup(struct bgpd_config *);
+static void	getsockpair(int [2]);
 int		imsg_send_sockets(struct imsgbuf *, struct imsgbuf *);
 
 int			 cflags;
@@ -195,6 +196,14 @@ main(int argc, char *argv[])
 	if (getpwnam(BGPD_USER) == NULL)
 		errx(1, "unknown user %s", BGPD_USER);
 
+	if ((conf = parse_config(conffile, NULL)) == NULL) {
+		log_warnx("config file %s has errors", conffile);
+		exit(1);
+	}
+
+	if (prepare_listeners(conf) == -1)
+		exit(1);
+
 	log_init(debug, LOG_DAEMON);
 	log_setverbose(cmd_opts & BGPD_OPT_VERBOSE);
 
@@ -203,12 +212,8 @@ main(int argc, char *argv[])
 
 	log_info("startup");
 
-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
-	    PF_UNSPEC, pipe_m2s) == -1)
-		fatal("socketpair");
-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
-	    PF_UNSPEC, pipe_m2r) == -1)
-		fatal("socketpair");
+	getsockpair(pipe_m2s);
+	getsockpair(pipe_m2r);
 
 	/* fork children */
 	rde_pid = start_child(PROC_RDE, saved_argv0, pipe_m2r[1], debug,
@@ -229,7 +234,7 @@ main(int argc, char *argv[])
 	imsg_init(ibuf_se, pipe_m2s[0]);
 	imsg_init(ibuf_rde, pipe_m2r[0]);
 	mrt_init(ibuf_rde, ibuf_se);
-	if ((rfd = kr_init()) == -1)
+	if (kr_init(&rfd) == -1)
 		quit = 1;
 	keyfd = pfkey_init();
 
@@ -254,8 +259,11 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 
 	if (imsg_send_sockets(ibuf_se, ibuf_rde))
 		fatal("could not establish imsg links");
-	conf = new_config();
-	quit = reconfigure(conffile, conf);
+	/* control setup needs to happen late since it sends imsgs */
+	if (control_setup(conf) == -1)
+		quit = 1;
+	if (send_config(conf) != 0)
+		quit = 1;
 	if (pftable_clear_all() != 0)
 		quit = 1;
 
@@ -329,9 +337,12 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 				error = 0;
 				break;
 			case 2:
+				log_info("previous reload still running");
 				error = CTL_RES_PENDING;
 				break;
 			default:	/* parse error */
+				log_warnx("config file %s has errors, "
+				    "not reloading", conffile);
 				error = CTL_RES_PARSE_ERROR;
 				break;
 			}
@@ -367,7 +378,7 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 	kr_shutdown(conf->fib_priority, conf->default_tableid);
 	pftable_clear_all();
 
-	TAILQ_FOREACH(p, &conf->peers, entry)
+	RB_FOREACH(p, peer_head, &conf->peers)
 		pfkey_remove(p);
 
 	while ((rr = SIMPLEQ_FIRST(&ribnames)) != NULL) {
@@ -460,6 +471,30 @@ int
 reconfigure(char *conffile, struct bgpd_config *conf)
 {
 	struct bgpd_config	*new_conf;
+
+	if (reconfpending)
+		return (2);
+
+	log_info("rereading config");
+	if ((new_conf = parse_config(conffile, &conf->peers)) == NULL)
+		return (1);
+
+	merge_config(conf, new_conf);
+
+	if (prepare_listeners(conf) == -1) {
+		return (1);
+	}
+
+	if (control_setup(conf) == -1) {
+		return (1);
+	}
+
+	return send_config(conf);
+}
+
+int
+send_config(struct bgpd_config *conf)
+{
 	struct peer		*p;
 	struct filter_rule	*r;
 	struct listen_addr	*la;
@@ -469,30 +504,7 @@ reconfigure(char *conffile, struct bgpd_config *conf)
 	struct prefixset	*ps;
 	struct prefixset_item	*psi, *npsi;
 
-	if (reconfpending) {
-		log_info("previous reload still running");
-		return (2);
-	}
 	reconfpending = 2;	/* one per child */
-
-	log_info("rereading config");
-	if ((new_conf = parse_config(conffile, &conf->peers)) == NULL) {
-		log_warnx("config file %s has errors, not reloading",
-		    conffile);
-		reconfpending = 0;
-		return (1);
-	}
-	merge_config(conf, new_conf);
-
-	if (prepare_listeners(conf) == -1) {
-		reconfpending = 0;
-		return (1);
-	}
-
-	if (control_setup(conf) == -1) {
-		reconfpending = 0;
-		return (1);
-	}
 
 	expand_networks(conf);
 
@@ -532,7 +544,7 @@ reconfigure(char *conffile, struct bgpd_config *conf)
 	}
 
 	/* send peer list to the SE */
-	TAILQ_FOREACH(p, &conf->peers, entry) {
+	RB_FOREACH(p, peer_head, &conf->peers) {
 		if (imsg_compose(ibuf_se, IMSG_RECONF_PEER, p->conf.id, 0, -1,
 		    &p->conf, sizeof(p->conf)) == -1)
 			return (-1);
@@ -614,12 +626,12 @@ reconfigure(char *conffile, struct bgpd_config *conf)
 	}
 
 	/* as-sets for filters in the RDE */
-	while ((aset = SIMPLEQ_FIRST(conf->as_sets)) != NULL) {
+	while ((aset = SIMPLEQ_FIRST(&conf->as_sets)) != NULL) {
 		struct ibuf *wbuf;
 		u_int32_t *as;
 		size_t i, l, n;
 
-		SIMPLEQ_REMOVE_HEAD(conf->as_sets, entry);
+		SIMPLEQ_REMOVE_HEAD(&conf->as_sets, entry);
 
 		as = set_get(aset->set, &n);
 		if ((wbuf = imsg_create(ibuf_rde, IMSG_RECONF_AS_SET, 0, 0,
@@ -648,10 +660,10 @@ reconfigure(char *conffile, struct bgpd_config *conf)
 	/* filters for the RDE */
 	while ((r = TAILQ_FIRST(conf->filters)) != NULL) {
 		TAILQ_REMOVE(conf->filters, r, entry);
+		if (send_filterset(ibuf_rde, &r->set) == -1)
+			return (-1);
 		if (imsg_compose(ibuf_rde, IMSG_RECONF_FILTER, 0, 0, -1,
 		    r, sizeof(struct filter_rule)) == -1)
-			return (-1);
-		if (send_filterset(ibuf_rde, &r->set) == -1)
 			return (-1);
 		filterset_free(&r->set);
 		free(r);
@@ -673,18 +685,18 @@ reconfigure(char *conffile, struct bgpd_config *conf)
 			return (-1);
 
 		/* export targets */
+		if (send_filterset(ibuf_rde, &vpn->export) == -1)
+			return (-1);
 		if (imsg_compose(ibuf_rde, IMSG_RECONF_VPN_EXPORT, 0, 0,
 		    -1, NULL, 0) == -1)
-			return (-1);
-		if (send_filterset(ibuf_rde, &vpn->export) == -1)
 			return (-1);
 		filterset_free(&vpn->export);
 
 		/* import targets */
+		if (send_filterset(ibuf_rde, &vpn->import) == -1)
+			return (-1);
 		if (imsg_compose(ibuf_rde, IMSG_RECONF_VPN_IMPORT, 0, 0,
 		    -1, NULL, 0) == -1)
-			return (-1);
-		if (send_filterset(ibuf_rde, &vpn->import) == -1)
 			return (-1);
 		filterset_free(&vpn->import);
 
@@ -743,6 +755,14 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			    conf->fib_priority))
 				rv = -1;
 			break;
+		case IMSG_KROUTE_FLUSH:
+			if (idx != PFD_PIPE_ROUTE)
+				log_warnx("route request not from RDE");
+			else if (imsg.hdr.len != IMSG_HEADER_SIZE)
+				log_warnx("wrong imsg len");
+			else if (kr_flush(imsg.hdr.peerid))
+				rv = -1;
+			break;
 		case IMSG_NEXTHOP_ADD:
 			if (idx != PFD_PIPE_ROUTE)
 				log_warnx("nexthop request not from RDE");
@@ -792,18 +812,15 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 				rv = -1;
 			break;
 		case IMSG_PFKEY_RELOAD:
-			if (idx != PFD_PIPE_SESSION)
+			if (idx != PFD_PIPE_SESSION) {
 				log_warnx("pfkey reload request not from SE");
-			else if ((p = getpeerbyid(conf, imsg.hdr.peerid)) ==
-			    NULL)
-				log_warnx("pfkey reload: no such peer: id=%u",
-				    imsg.hdr.peerid);
-			else {
-				pfkey_remove(p);
-				if (pfkey_establish(p) == -1) {
+				break;
+			}
+			p = getpeerbyid(conf, imsg.hdr.peerid);
+			if (p != NULL) {
+				if (pfkey_establish(p) == -1)
 					log_peer_warnx(&p->conf,
 					    "pfkey setup failed");
-				}
 			}
 			break;
 		case IMSG_CTL_RELOAD:
@@ -812,6 +829,10 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			else {
 				reconfig = 1;
 				reconfpid = imsg.hdr.pid;
+				if (imsg.hdr.len == IMSG_HEADER_SIZE +
+				    REASON_LEN && ((char *)imsg.data)[0])
+					log_info("reload due to: %s",
+					    log_reason(imsg.data));
 			}
 			break;
 		case IMSG_CTL_FIB_COUPLE:
@@ -1075,18 +1096,51 @@ handle_pollfd(struct pollfd *pfd, struct imsgbuf *i)
 	return (0);
 }
 
+static void
+getsockpair(int pipe[2])
+{
+	int bsize, i;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
+	    PF_UNSPEC, pipe) == -1)
+		fatal("socketpair");
+
+	for (i = 0; i < 2; i++) {
+		for (bsize = MAX_SOCK_BUF; bsize >= 16 * 1024; bsize /= 2) {
+			if (setsockopt(pipe[i], SOL_SOCKET, SO_RCVBUF,
+			    &bsize, sizeof(bsize)) == -1) {
+				if (errno != ENOBUFS)
+					fatal("setsockopt(SO_RCVBUF, %d)",
+					    bsize);
+				log_warn("setsockopt(SO_RCVBUF, %d)", bsize);
+				continue;
+			}
+			break;
+		}
+	}
+	for (i = 0; i < 2; i++) {
+		for (bsize = MAX_SOCK_BUF; bsize >= 16 * 1024; bsize /= 2) {
+			if (setsockopt(pipe[i], SOL_SOCKET, SO_SNDBUF,
+			    &bsize, sizeof(bsize)) == -1) {
+				if (errno != ENOBUFS)
+					fatal("setsockopt(SO_SNDBUF, %d)",
+					    bsize);
+				log_warn("setsockopt(SO_SNDBUF, %d)", bsize);
+				continue;
+			}
+			break;
+		}
+	}
+}
+
 int
 imsg_send_sockets(struct imsgbuf *se, struct imsgbuf *rde)
 {
 	int pipe_s2r[2];
 	int pipe_s2r_ctl[2];
 
-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
-	     PF_UNSPEC, pipe_s2r) == -1)
-		return (-1);
-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
-	     PF_UNSPEC, pipe_s2r_ctl) == -1)
-		return (-1);
+	getsockpair(pipe_s2r);
+	getsockpair(pipe_s2r_ctl);
 
 	if (imsg_compose(se, IMSG_SOCKET_CONN, 0, 0, pipe_s2r[0],
 	    NULL, 0) == -1)

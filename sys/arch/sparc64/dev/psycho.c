@@ -1,4 +1,4 @@
-/*	$OpenBSD: psycho.c,v 1.75 2017/05/25 03:19:39 dlg Exp $	*/
+/*	$OpenBSD: psycho.c,v 1.77 2020/07/06 13:33:08 pirofti Exp $	*/
 /*	$NetBSD: psycho.c,v 1.39 2001/10/07 20:30:41 eeh Exp $	*/
 
 /*
@@ -127,7 +127,7 @@ extern struct sparc_pci_chipset _sparc_pci_chipset;
 u_int stick_get_timecount(struct timecounter *);
 
 struct timecounter stick_timecounter = {
-	stick_get_timecount, NULL, ~0u, 0, "stick", 1000, NULL
+	stick_get_timecount, NULL, ~0u, 0, "stick", 1000, NULL, 0
 };
 
 /*
@@ -902,7 +902,7 @@ psycho_iommu_init(struct psycho_softc *sc, int tsbsize)
 		panic("couldn't malloc iommu name");
 	snprintf(name, 32, "%s dvma", sc->sc_dev.dv_xname);
 
-	iommu_init(name, is, tsbsize, iobase);
+	iommu_init(name, &iommu_hw_default, is, tsbsize, iobase);
 }
 
 /*

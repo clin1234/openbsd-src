@@ -1,4 +1,4 @@
-.\" $OpenBSD: urtwn.4,v 1.46 2019/03/29 17:16:35 jmc Exp $
+.\" $OpenBSD: urtwn.4,v 1.48 2020/05/26 06:22:05 jsg Exp $
 .\"
 .\" Copyright (c) 2010 Damien Bergamini <damien.bergamini@free.fr>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: March 29 2019 $
+.Dd $Mdocdate: May 26 2020 $
 .Dt URTWN 4
 .Os
 .Sh NAME
@@ -64,12 +64,18 @@ The
 .Nm
 driver can be configured to use
 Wired Equivalent Privacy (WEP) or
-Wi-Fi Protected Access (WPA-PSK and WPA2-PSK).
-WPA is the current encryption standard for wireless networks.
-It is strongly recommended that WEP
-not be used as the sole mechanism
-to secure wireless communication,
-due to serious weaknesses in it.
+Wi-Fi Protected Access (WPA1 and WPA2).
+WPA2 is the current encryption standard for wireless networks.
+It is strongly recommended that neither WEP nor WPA1
+are used as the sole mechanism to secure wireless communication,
+due to serious weaknesses.
+WPA1 is disabled by default and may be enabled using the option
+.Qq Cm wpaprotos Ar wpa1,wpa2 .
+For standard WPA networks which use pre-shared keys (PSK),
+keys are configured using the
+.Qq Cm wpakey
+option.
+WPA-Enterprise networks require use of the wpa_supplicant package.
 .Pp
 The
 .Nm
@@ -134,6 +140,8 @@ The following adapters should work:
 .It TP-LINK TL-WN725N v2
 .It TP-LINK TL-WN821N v4
 .It TP-LINK TL-WN821N v5
+.It TP-LINK TL-WN822N v4
+.It TP-LINK TL-WN822N v5
 .It TRENDnet TEW-648UBM
 .El
 .Sh EXAMPLES

@@ -1,4 +1,4 @@
-/*	$OpenBSD: mount.h,v 1.144 2019/04/02 13:07:28 visa Exp $	*/
+/*	$OpenBSD: mount.h,v 1.147 2020/01/18 08:40:19 visa Exp $	*/
 /*	$NetBSD: mount.h,v 1.48 1996/02/18 11:55:47 fvdl Exp $	*/
 
 /*
@@ -331,8 +331,6 @@ struct statfs {
  * array of operations and an instance record.  The file systems are
  * put on a doubly linked list.
  */
-LIST_HEAD(vnodelst, vnode);
-
 struct mount {
 	TAILQ_ENTRY(mount) mnt_list;		/* mount list */
 	SLIST_ENTRY(mount) mnt_dounmount;	/* unmount work queue */
@@ -340,7 +338,7 @@ struct mount {
 	struct vfsconf  *mnt_vfc;               /* configuration info */
 	struct vnode	*mnt_vnodecovered;	/* vnode we mounted on */
 	struct vnode    *mnt_syncer;            /* syncer vnode */
-	struct vnodelst	mnt_vnodelist;		/* list of vnodes this mount */
+	TAILQ_HEAD(, vnode) mnt_vnodelist;	/* list of vnodes this mount */
 	struct rwlock   mnt_lock;               /* mount structure lock */
 	int		mnt_flag;		/* flags */
 	struct statfs	mnt_stat;		/* cache of filesystem stats */
@@ -403,6 +401,10 @@ struct mount {
 #define MNT_WANTRDWR	0x02000000	/* want upgrade to read/write */
 #define MNT_SOFTDEP     0x04000000      /* soft dependencies being done */
 #define MNT_DOOMED	0x08000000	/* device behind filesystem is gone */
+
+#ifdef _KERNEL
+#define MNT_OP_FLAGS	(MNT_UPDATE | MNT_RELOAD | MNT_FORCE | MNT_WANTRDWR)
+#endif
 
 /*
  * Flags for various system call interfaces.
@@ -543,6 +545,17 @@ struct vfsops {
 #define VFS_CHECKEXP(MP, NAM, EXFLG, CRED) \
 	(*(MP)->mnt_op->vfs_checkexp)(MP, NAM, EXFLG, CRED)
 
+/* Set up the filesystem operations for vnodes. */
+extern	const struct vfsops ffs_vfsops;
+extern	const struct vfsops mfs_vfsops;
+extern	const struct vfsops msdosfs_vfsops;
+extern	const struct vfsops nfs_vfsops;
+extern	const struct vfsops cd9660_vfsops;
+extern	const struct vfsops ext2fs_vfsops;
+extern	const struct vfsops ntfs_vfsops;
+extern	const struct vfsops udf_vfsops;
+extern	const struct vfsops fusefs_vfsops;
+extern	const struct vfsops tmpfs_vfsops;
 
 #include <net/radix.h>
 #include <sys/socket.h>		/* XXX for AF_MAX */

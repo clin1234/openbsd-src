@@ -1,4 +1,4 @@
-.TH "nsd.conf" "5" "Mar 25, 2019" "NLnet Labs" "nsd 4.1.27"
+.TH "nsd.conf" "5" "Apr 16, 2020" "NLnet Labs" "nsd 4.3.1"
 .\" Copyright (c) 2001\-2008, NLnet Labs. All rights reserved.
 .\" See LICENSE for the license.
 .SH "NAME"
@@ -100,23 +100,13 @@ with a colon ':'. An attribute is followed by its containing
 attributes, or a value. 
 .P
 At the top level only 
-.B server:
+.BR server: ,
+.BR key: ,
+.BR pattern: ,
+.BR zone: ,
 and
-.B key: 
-and 
-.B pattern:
-and
-.B zone: 
-are allowed. These are followed by their attributes or the start of 
-a new 
-.B server:
-or 
-.B key: 
-or
-.B pattern:
-or
-.B zone: 
-clause. The 
+.B remote-control:
+are allowed. These are followed by their attributes or a new top-level keyword. The
 .B zone:
 attribute is followed by zone options. The 
 .B server: 
@@ -148,11 +138,16 @@ clause. There may only be one
 .B server: 
 clause.
 .TP
-.B ip\-address:\fR <ip4 or ip6>[@port]
-NSD will bind to the listed ip\-address. Can be give multiple times 
+.B ip\-address:\fR <ip4 or ip6>[@port] [servers]
+NSD will bind to the listed ip\-address. Can be given multiple times 
 to bind multiple ip\-addresses. Optionally, a port number can be given.
-If none are given NSD listens to the wildcard interface. Same as commandline option 
+If none are given NSD listens to the wildcard interface. Same as commandline option
 .BR \-a.
+To limit which NSD server(s) listen on the given interface, specify one or
+more servers separated by whitespace after <ip>[@port]. Ranges can be used as
+a shorthand to specify multiple consecutive servers. By default every server
+will listen.
+.BR
 For servers with multiple IP addresses that can be used to send traffic
 to the internet, list them one by one, or the source address of replies
 could be wrong.  This is because if the udp socket associates a source
@@ -161,7 +156,7 @@ send to the internet, and it picks the wrong one.  Typically needed for
 anycast instances.  Use ip-transparent to be able to list addresses that
 turn on later (typical for certain load-balancing).
 .TP
-.B interface:\fR <ip4 or ip6>[@port]
+.B interface:\fR <ip4 or ip6>[@port] [servers] [setfib]
 Same as ip\-address (for easy of compatibility with unbound.conf).
 .TP
 .B ip\-transparent:\fR <yes or no>
@@ -180,6 +175,17 @@ stack.  Only really useful if you also configure a server\-count higher
 than 1 (such as, equal to the number of cpus).  The default is no. 
 It works on Linux, but does not work on FreeBSD, and likely does not
 work on other systems.
+.TP
+.B bindtodevice:\fR <yes or no>
+Use the SO_BINDTODEVICE socket option to bind the socket to the device to
+ensure responses go out the same interface the corresponding query came in on
+and skip interface selection by the kernel.
+.TP
+.B send\-buffer\-size:\fR <number>
+Set the send buffer size for query-servicing sockets.  Set to 0 to use the default settings.
+.TP
+.B receive\-buffer\-size:\fR <number>
+Set the receive buffer size for query-servicing sockets.  Set to 0 to use the default settings.
 .TP
 .B debug\-mode:\fR <yes or no>
 Turns on debugging mode for nsd, does not fork a daemon process. 
@@ -217,6 +223,7 @@ Returns the specified identity when asked for CH TXT ID.SERVER.
 Default is the name as returned by gethostname(3). Same as 
 commandline option 
 .BR \-i .
+See hide\-identity to set the server to not respond to such queries.
 .TP
 .B version:\fR <string>
 Returns the specified version string when asked for CH TXT version.server,
@@ -239,10 +246,30 @@ Start this many NSD servers. Default is 1. Same as commandline
 option 
 .BR \-N .
 .TP
+.B cpu\-affinity:\fR <number> <number> ...
+Overall CPU affinity for NSD server(s). Default is no affinity.
+.BR \-n .
+.TP
+.B server\-N\-cpu\-affinity:\fR <number>
+Bind NSD server specified by N to a specific core. Default is to have affinity
+set to every core specified in cpu\-affinity. This setting only takes effect
+if cpu\-affinity is enabled.
+.BR \-n
+.TP
+.B xfrd\-cpu\-affinity:\fR <number>
+Bind xfrd to a specific core. Default is to have affinity set to every core
+specified in cpu\-affinity. This setting only takes effect if cpu\-affinity is
+enabled.
+.BR \-n
+.TP
 .B tcp\-count:\fR <number>
 The maximum number of concurrent, active TCP connections by each server. 
 Default is 100. Same as commandline option
 .BR \-n .
+.TP
+.B tcp\-reject\-overflow:\fR <yes or no>
+If set to yes, TCP connections made beyond the maximum set by tcp-count will
+be dropped immediately (accepted and closed).  Default is no.
 .TP
 .B tcp\-query\-count:\fR <number>
 The maximum number of queries served on a single TCP connection.
@@ -279,6 +306,8 @@ Use the pid file instead of the platform specific default, usually
 .IR @pidfile@. 
 Same as commandline option 
 .BR \-P .
+With "" there is no pidfile, for some startup management setups,
+where a pidfile is not useful to have.
 .TP
 .B port:\fR <number>
 Answer queries on the specified port. Default is 53. Same as 
@@ -359,6 +388,17 @@ And notify refusal, and axfr request refusals.
 Prevent NSD from replying with the version string on CHAOS class 
 queries.  Default is no.
 .TP
+.B hide\-identity:\fR <yes or no>
+Prevent NSD from replying with the identity string on CHAOS class 
+queries.  Default is no.
+.TP
+.B drop\-updates:\fR <yes or no>
+If set to yes, drop received packets with the UPDATE opcode.
+.TP
+.B use\-systemd:\fR <yes or no>
+This option is deprecated and ignored.  If compiled with libsystemd,
+NSD signals readiness to systemd and use of the option is not necessary.
+.TP
 .B log\-time\-ascii:\fR <yes or no>
 Log time in ascii, if "no" then in seconds epoch.  Default is yes.
 This chooses the format when logging to file.  The printout via syslog
@@ -376,6 +416,11 @@ This is different from the \-\-enable-minimal-responses configure time option,
 that reduces packets, but exactly to the fragmentation length, the nsd.conf
 option reduces packets as small as possible.
 The default is yes.
+.TP
+.B confine\-to\-zone:\fR <yes or no>
+If set to yes, additional information will not be added to the response if the
+apex zone of the additional information does not match the apex zone of the
+initial query (E.G. CNAME resolution). Default is no. 
 .TP
 .B refuse\-any:\fR <yes or no>
 Refuse queries of type ANY.  This is useful to stop query floods trying
@@ -436,6 +481,38 @@ whitelisted. Default @ratelimit_default@ (with a suggested 2000 qps). With the r
 specific queries to receive this qps limit instead of the normal limit.
 With the value 0 the rate is unlimited.
 .\" rrlend
+.TP
+.B tls\-service\-key:\fR <filename>
+If enabled, the server provides TLS service on TCP sockets with the TLS
+service port number.  The port number (853) is configured with tls\-port.
+To turn it on, create an interface: option line in config with @port
+appended to the IP-address.  This creates the extra socket on which the
+DNS over TLS service is provided.
+.IP
+The file is the private key for the TLS session. The public certificate is
+in the tls-service-pem file. Default is "", turned off. Requires a
+restart (a reload is not enough) if changed, because the private key is
+read while root permissions are held and before chroot (if any).
+.TP
+.B tls\-service\-pem:\fR <filename>
+The public key certificate pem file for the tls service. Default is "", turned off.
+.TP
+.B tls\-service\-ocsp:\fR <filename>
+The ocsp pem file for the tls service, for OCSP stapling.  Default is "",
+turned off.  An external process prepares and updates the OCSP stapling data.
+Like this,
+.RS 9
+openssl ocsp -no_nonce \\
+   -respout /path/to/ocsp.pem \\
+   -CAfile /path/to/ca_and_any_intermediate.pem \\
+   -issuer /path/to/direct_issuer.pem \\
+   -cert /path/to/cert.pem \\
+   -url "$( openssl x509 -noout -text -in /path/to/cert.pem | grep 'OCSP - URI:' | cut -d: -f2,3 )"
+.RE
+.TP
+.B tls\-port:\fR <number>
+The port number on which to provide TCP TLS service, default is 853, only
+interfaces configured with that port number as @number get DNS over TLS service.
 .SS "Remote Control"
 The
 .B remote\-control:

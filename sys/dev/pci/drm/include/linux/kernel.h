@@ -9,8 +9,6 @@
 #include <sys/stdarg.h>
 #include <sys/malloc.h>
 
-#include <ddb/db_var.h>
-
 #include <linux/types.h>
 #include <linux/compiler.h>
 #include <linux/bitops.h>
@@ -37,8 +35,6 @@
 #define U32_MAX		UINT32_MAX
 #define U64_C(x)	UINT64_C(x)
 #define U64_MAX		UINT64_MAX
-
-#define IS_ALIGNED(x, y)	(((x) & ((y) - 1)) == 0)
 
 #define ARRAY_SIZE nitems
 
@@ -68,6 +64,7 @@
 
 #define mult_frac(x, n, d) (((x) * (n)) / (d))
 
+#define roundup2(x, y) (((x) + ((y) - 1)) & (~((__typeof(x))(y) - 1)))
 #define round_up(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
 #define round_down(x, y) (((x) / (y)) * (y)) /* y is power of two */
 #define rounddown(x, y) (((x) / (y)) * (y)) /* arbitary y */
@@ -77,6 +74,9 @@
 #define DIV_ROUND_DOWN_ULL(x, y)	DIV_ROUND_DOWN(x, y)
 #define DIV_ROUND_CLOSEST(x, y)	(((x) + ((y) / 2)) / (y))
 #define DIV_ROUND_CLOSEST_ULL(x, y)	DIV_ROUND_CLOSEST(x, y)
+
+#define IS_ALIGNED(x, y)	(((x) & ((y) - 1)) == 0)
+#define PTR_ALIGN(x, y)		((__typeof(x))roundup2((unsigned long)(x), (y)))
 
 static inline char *
 kasprintf(int flags, const char *fmt, ...)
@@ -89,10 +89,10 @@ kasprintf(int flags, const char *fmt, ...)
 	len = vsnprintf(NULL, 0, fmt, ap);
 	va_end(ap);
 
-	buf = malloc(len, M_DRM, flags);
+	buf = malloc(len + 1, M_DRM, flags);
 	if (buf) {
 		va_start(ap, fmt);
-		vsnprintf(buf, len, fmt, ap);
+		vsnprintf(buf, len + 1, fmt, ap);
 		va_end(ap);
 	}
 
@@ -107,19 +107,31 @@ kvasprintf(int flags, const char *fmt, va_list ap)
 
 	len = vsnprintf(NULL, 0, fmt, ap);
 
-	buf = malloc(len, M_DRM, flags);
+	buf = malloc(len + 1, M_DRM, flags);
 	if (buf) {
-		vsnprintf(buf, len, fmt, ap);
+		vsnprintf(buf, len + 1, fmt, ap);
 	}
 
 	return buf;
 }
 
 static inline int
+vscnprintf(char *buf, size_t size, const char *fmt, va_list ap)
+{
+	int nc;
+
+	nc = vsnprintf(buf, size, fmt, ap);
+	if (nc > (size - 1))
+		return (size - 1);
+	else
+		return nc;
+}
+
+static inline int
 _in_dbg_master(void)
 {
 #ifdef DDB
-	return (db_is_active);
+	return (db_active);
 #endif
 	return (0);
 }
@@ -131,8 +143,13 @@ _in_dbg_master(void)
 
 #define add_taint(x, y)
 #define TAINT_MACHINE_CHECK	0
+#define TAINT_WARN		1
 #define LOCKDEP_STILL_OK	0
 
 #define u64_to_user_ptr(x)	((void *)(uintptr_t)(x))
+
+#define _RET_IP_		__builtin_return_address(0)
+
+#define STUB() do { printf("%s: stub\n", __func__); } while(0)
 
 #endif

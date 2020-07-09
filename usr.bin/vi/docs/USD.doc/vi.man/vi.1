@@ -1,4 +1,4 @@
-.\"	$OpenBSD: vi.1,v 1.75 2018/02/12 01:10:46 schwarze Exp $
+.\"	$OpenBSD: vi.1,v 1.78 2020/04/30 10:40:21 millert Exp $
 .\"
 .\" Copyright (c) 1994
 .\"     The Regents of the University of California.  All rights reserved.
@@ -14,7 +14,7 @@
 .\"
 .\"     @(#)vi.1	8.51 (Berkeley) 10/10/96
 .\"
-.Dd $Mdocdate: February 12 2018 $
+.Dd $Mdocdate: April 30 2020 $
 .Dt VI 1
 .Os
 .Sh NAME
@@ -1606,6 +1606,11 @@ and
 characters to move forward to the next
 .Ar shiftwidth
 column boundary.
+If the
+.Cm expandtab
+option is set, only insert
+.Aq space
+characters.
 .Pp
 .It Aq Cm erase
 .It Aq Cm control-H
@@ -2089,7 +2094,8 @@ in a line, not just the first.
 .Op option? ...
 .Op Ar all
 .Xc
-Display or set editor options.
+Display or set the editor options described in
+.Sx SET OPTIONS .
 .Pp
 .It Cm sh Ns Op Cm ell
 Run a shell program.
@@ -2273,9 +2279,11 @@ This feature is only available in
 not in
 .Nm ex .
 .Sh SET OPTIONS
-There are a large number of options that may be set
-.Pq or unset
-to change the editor's behavior.
+There are a large number of options that can
+change the editor's behavior,
+using the
+.Cm set
+command.
 This section describes the options, their abbreviations and their
 default values.
 .Pp
@@ -2340,6 +2348,16 @@ key mapping.
 .Nm ex
 only.
 Announce error messages with a bell.
+.It Cm expandtab , et Bq off
+Expand
+.Aq tab
+characters to
+.Aq space
+when inserting, replacing or shifting text, autoindenting,
+indenting with
+.Aq Ic control-T ,
+or outdenting with
+.Aq Ic control-D .
 .It Cm exrc , ex Bq off
 Read the startup files in the local directory.
 .It Cm extended Bq off
@@ -2456,8 +2474,9 @@ Define additional section boundaries for the
 and
 .Cm ]]
 commands.
-.It Cm secure Bq off
+.It Cm secure
 Turns off all access to external programs.
+Once set this option can't be disabled.
 .It Cm shell , sh Bq "environment variable SHELL, or /bin/sh"
 Select the shell used by the editor.
 .It Cm shellmeta Bq ~{[*?$`'\&"\e

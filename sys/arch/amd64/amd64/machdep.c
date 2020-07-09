@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.257 2019/05/12 22:23:38 guenther Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.267 2020/06/03 06:54:04 dlg Exp $	*/
 /*	$NetBSD: machdep.c,v 1.3 2003/05/07 22:58:18 fvdl Exp $	*/
 
 /*-
@@ -277,6 +277,7 @@ cpu_startup(void)
 
 	printf("%s", version);
 	startclocks();
+	rtcinit();
 
 	printf("real mem = %lu (%luMB)\n", ptoa((psize_t)physmem),
 	    ptoa((psize_t)physmem)/1024/1024);
@@ -314,7 +315,10 @@ cpu_startup(void)
 
 #ifndef SMALL_KERNEL
 	cpu_ucode_setup();
+	cpu_ucode_apply(&cpu_info_primary);
 #endif
+	cpu_tsx_disable(&cpu_info_primary);
+
 	/* enter the IDT and trampoline code in the u-k maps */
 	enter_shared_special_pages();
 
@@ -1362,6 +1366,8 @@ map_tramps(void)
 typedef void (vector)(void);
 extern vector *IDTVEC(exceptions)[];
 
+paddr_t early_pte_pages;
+
 void
 init_x86_64(paddr_t first_avail)
 {
@@ -1369,6 +1375,15 @@ init_x86_64(paddr_t first_avail)
 	bios_memmap_t *bmp;
 	int x, ist;
 	uint64_t max_dm_size = ((uint64_t)512 * NUM_L4_SLOT_DIRECT) << 30;
+
+	/*
+	 * locore0 mapped 3 pages for use before the pmap is initialized
+	 * starting at first_avail. These pages are currently used by
+	 * efifb to create early-use VAs for the framebuffer before efifb
+	 * is attached.
+	 */
+	early_pte_pages = first_avail;
+	first_avail += 3 * NBPG;
 
 	cpu_init_msrs(&cpu_info_primary);
 
@@ -1378,11 +1393,6 @@ init_x86_64(paddr_t first_avail)
 	x86_bus_space_init();
 
 	i8254_startclock();
-
-	/*
-	 * Attach the glass console early in case we need to display a panic.
-	 */
-	cninit();
 
 	/*
 	 * Initialize PAGE_SIZE-dependent variables.
@@ -1405,6 +1415,8 @@ init_x86_64(paddr_t first_avail)
 		getbootinfo(bootinfo, bootinfo_size);
 	} else
 		panic("invalid /boot");
+
+	cninit();
 
 /*
  * Memory on the AMD64 port is described by three different things.
@@ -1719,6 +1731,7 @@ init_x86_64(paddr_t first_avail)
 	cpu_init_idt();
 
 	intr_default_setup();
+
 	fpuinit(&cpu_info_primary);
 
 	softintr_init();
@@ -1911,8 +1924,6 @@ getbootinfo(char *bootinfo, int bootinfo_size)
 	bios_ddb_t *bios_ddb;
 	bios_bootduid_t *bios_bootduid;
 	bios_bootsr_t *bios_bootsr;
-	int docninit = 0;
-
 #undef BOOTINFO_DEBUG
 #ifdef BOOTINFO_DEBUG
 	printf("bootargv:");
@@ -1967,9 +1978,6 @@ getbootinfo(char *bootinfo, int bootinfo_size)
 					comconsaddr = consaddr;
 					comconsrate = cdp->conspeed;
 					comconsiot = X86_BUS_SPACE_IO;
-
-					/* Probe the serial port this time. */
-					docninit++;
 				}
 #endif
 #ifdef BOOTINFO_DEBUG
@@ -2007,8 +2015,6 @@ getbootinfo(char *bootinfo, int bootinfo_size)
 
 		case BOOTARG_EFIINFO:
 			bios_efiinfo = (bios_efiinfo_t *)q->ba_arg;
-			if (bios_efiinfo->fb_addr != 0)
-				docninit++;
 			break;
 
 		case BOOTARG_UCODE:
@@ -2023,8 +2029,6 @@ getbootinfo(char *bootinfo, int bootinfo_size)
 			break;
 		}
 	}
-	if (docninit > 0)
-		cninit();
 #ifdef BOOTINFO_DEBUG
 	printf("\n");
 #endif

@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.88 2018/06/20 08:53:49 espie Exp $
+# $OpenBSD: Makefile,v 1.90 2020/02/17 13:06:45 espie Exp $
 
 .include <bsd.own.mk>
 
@@ -24,6 +24,7 @@ PACKAGES= \
     OpenBSD/Getopt.pm \
     OpenBSD/Handle.pm \
     OpenBSD/IdCache.pm \
+    OpenBSD/InstalledInfo.pm \
     OpenBSD/Interactive.pm \
     OpenBSD/LibSpec.pm \
     OpenBSD/LibSpec/Build.pm \
@@ -89,6 +90,7 @@ LIBBASE=/usr/libdata/perl5
 
 PODS= \
     OpenBSD::md5 \
+    OpenBSD::style \
     OpenBSD::Getopt \
     OpenBSD::IdCache \
     OpenBSD::Intro \

@@ -40,6 +40,7 @@ const (
 	ProtocolTLSv10 ProtocolVersion = C.TLS_PROTOCOL_TLSv1_0
 	ProtocolTLSv11 ProtocolVersion = C.TLS_PROTOCOL_TLSv1_1
 	ProtocolTLSv12 ProtocolVersion = C.TLS_PROTOCOL_TLSv1_2
+	ProtocolTLSv13 ProtocolVersion = C.TLS_PROTOCOL_TLSv1_3
 	ProtocolsAll   ProtocolVersion = C.TLS_PROTOCOLS_ALL
 )
 
@@ -47,6 +48,7 @@ var protocolNames = map[ProtocolVersion]string{
 	ProtocolTLSv10: "TLSv1",
 	ProtocolTLSv11: "TLSv1.1",
 	ProtocolTLSv12: "TLSv1.2",
+	ProtocolTLSv13: "TLSv1.3",
 	ProtocolsAll:   "all",
 }
 
@@ -254,6 +256,16 @@ func (t *TLS) ConnCipher() (string, error) {
 		return "", errors.New("no connection cipher")
 	}
 	return C.GoString(cipher), nil
+}
+
+// ConnCipherStrength returns the strength in bits for the symmetric
+// cipher that is used for the connection.
+func (t *TLS) ConnCipherStrength() (int, error) {
+	strength := C.tls_conn_cipher_strength(t.ctx)
+	if strength == 0 {
+		return 0, errors.New("no connection cipher strength")
+	}
+	return int(strength), nil
 }
 
 // Connect attempts to establish an TLS connection to the specified host on

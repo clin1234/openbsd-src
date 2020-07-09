@@ -7,6 +7,7 @@
 #include <sys/malloc.h>
 #include <sys/device.h>
 #include <linux/types.h>
+#include <linux/gfp.h>
 
 #ifndef __DECONST
 #define __DECONST(type, var)	((type)(__uintptr_t)(const void *)(var))
@@ -33,6 +34,13 @@ request_firmware(const struct firmware **fw, const char *name,
 		*fw = f;
 		return 0;
 	}
+}
+
+static inline int
+request_firmware_direct(const struct firmware **fw, const char *name,
+    struct device *device)
+{
+	return request_firmware(fw, name, device);
 }
 
 #define request_firmware_nowait(a, b, c, d, e, f, g) -EINVAL

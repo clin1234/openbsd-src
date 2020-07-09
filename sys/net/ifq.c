@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifq.c,v 1.31 2019/04/16 04:04:19 dlg Exp $ */
+/*	$OpenBSD: ifq.c,v 1.41 2020/07/07 00:00:03 dlg Exp $ */
 
 /*
  * Copyright (c) 2015 David Gwynne <dlg@openbsd.org>
@@ -17,18 +17,24 @@
  */
 
 #include "bpfilter.h"
+#include "kstat.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/socket.h>
 #include <sys/mbuf.h>
 #include <sys/proc.h>
+#include <sys/sysctl.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
 
 #if NBPFILTER > 0
 #include <net/bpf.h>
+#endif
+
+#if NKSTAT > 0
+#include <sys/kstat.h>
 #endif
 
 /*
@@ -187,6 +193,52 @@ ifq_barrier_task(void *p)
  * ifqueue mbuf queue API
  */
 
+#if NKSTAT > 0
+struct ifq_kstat_data {
+	struct kstat_kv kd_packets;
+	struct kstat_kv kd_bytes;
+	struct kstat_kv kd_qdrops;
+	struct kstat_kv kd_errors;
+	struct kstat_kv kd_qlen;
+	struct kstat_kv kd_maxqlen;
+	struct kstat_kv kd_oactive;
+};
+
+static const struct ifq_kstat_data ifq_kstat_tpl = {
+	KSTAT_KV_UNIT_INITIALIZER("packets",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("bytes",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_BYTES),
+	KSTAT_KV_UNIT_INITIALIZER("qdrops",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("errors",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("qlen",
+	    KSTAT_KV_T_UINT32, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("maxqlen",
+	    KSTAT_KV_T_UINT32, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_INITIALIZER("oactive", KSTAT_KV_T_BOOL),
+};
+
+int
+ifq_kstat_copy(struct kstat *ks, void *dst)
+{
+	struct ifqueue *ifq = ks->ks_softc;
+	struct ifq_kstat_data *kd = dst;
+
+	*kd = ifq_kstat_tpl;
+	kstat_kv_u64(&kd->kd_packets) = ifq->ifq_packets;
+	kstat_kv_u64(&kd->kd_bytes) = ifq->ifq_bytes;
+	kstat_kv_u64(&kd->kd_qdrops) = ifq->ifq_qdrops;
+	kstat_kv_u64(&kd->kd_errors) = ifq->ifq_errors;
+	kstat_kv_u32(&kd->kd_qlen) = ifq->ifq_len;
+	kstat_kv_u32(&kd->kd_maxqlen) = ifq->ifq_maxlen;
+	kstat_kv_bool(&kd->kd_oactive) = ifq->ifq_oactive;
+
+	return (0);
+}
+#endif
+
 void
 ifq_init(struct ifqueue *ifq, struct ifnet *ifp, unsigned int idx)
 {
@@ -221,6 +273,18 @@ ifq_init(struct ifqueue *ifq, struct ifnet *ifp, unsigned int idx)
 		ifq_set_maxlen(ifq, IFQ_MAXLEN);
 
 	ifq->ifq_idx = idx;
+
+#if NKSTAT > 0
+	/* XXX xname vs driver name and unit */
+	ifq->ifq_kstat = kstat_create(ifp->if_xname, 0,
+	    "txq", ifq->ifq_idx, KSTAT_T_KV, 0);
+	KASSERT(ifq->ifq_kstat != NULL);
+	kstat_set_mutex(ifq->ifq_kstat, &ifq->ifq_mtx);
+	ifq->ifq_kstat->ks_softc = ifq;
+	ifq->ifq_kstat->ks_datalen = sizeof(ifq_kstat_tpl);
+	ifq->ifq_kstat->ks_copy = ifq_kstat_copy;
+	kstat_install(ifq->ifq_kstat);
+#endif
 }
 
 void
@@ -263,6 +327,10 @@ void
 ifq_destroy(struct ifqueue *ifq)
 {
 	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+
+#if NKSTAT > 0
+	kstat_destroy(ifq->ifq_kstat);
+#endif
 
 	NET_ASSERT_UNLOCKED();
 	if (!task_del(ifq->ifq_softnet, &ifq->ifq_bundle))
@@ -388,6 +456,45 @@ ifq_dequeue(struct ifqueue *ifq)
 }
 
 int
+ifq_deq_sleep(struct ifqueue *ifq, struct mbuf **mp, int nbio, int priority,
+    const char *wmesg, volatile unsigned int *sleeping,
+    volatile unsigned int *alive)
+{
+	struct mbuf *m;
+	void *cookie;
+	int error = 0;
+
+	ifq_deq_enter(ifq);
+	if (ifq->ifq_len == 0 && nbio)
+		error = EWOULDBLOCK;
+	else {
+		for (;;) {
+			m = ifq->ifq_ops->ifqop_deq_begin(ifq, &cookie);
+			if (m != NULL) {
+				ifq->ifq_ops->ifqop_deq_commit(ifq, m, cookie);
+				ifq->ifq_len--;
+				*mp = m;
+				break;
+			}
+
+			(*sleeping)++;
+			error = msleep_nsec(ifq, &ifq->ifq_mtx,
+			    priority, wmesg, INFSLP);
+			(*sleeping)--;
+			if (error != 0)
+				break;
+			if (!(*alive)) {
+				error = ENXIO;
+				break;
+			}
+		}
+	}
+	ifq_deq_leave(ifq);
+
+	return (error);
+}
+
+int
 ifq_hdatalen(struct ifqueue *ifq)
 {
 	struct mbuf *m;
@@ -396,7 +503,7 @@ ifq_hdatalen(struct ifqueue *ifq)
 	m = ifq_deq_begin(ifq);
 	if (m != NULL) {
 		len = m->m_pkthdr.len;
-		ifq_deq_commit(ifq, m);
+		ifq_deq_rollback(ifq, m);
 	}
 
 	return (len);
@@ -465,6 +572,45 @@ ifq_mfreeml(struct ifqueue *ifq, struct mbuf_list *ml)
  * ifiq
  */
 
+#if NKSTAT > 0
+struct ifiq_kstat_data {
+	struct kstat_kv kd_packets;
+	struct kstat_kv kd_bytes;
+	struct kstat_kv kd_qdrops;
+	struct kstat_kv kd_errors;
+	struct kstat_kv kd_qlen;
+};
+
+static const struct ifiq_kstat_data ifiq_kstat_tpl = {
+	KSTAT_KV_UNIT_INITIALIZER("packets",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("bytes",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_BYTES),
+	KSTAT_KV_UNIT_INITIALIZER("qdrops",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("errors",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("qlen",
+	    KSTAT_KV_T_UINT32, KSTAT_KV_U_PACKETS),
+};
+
+int
+ifiq_kstat_copy(struct kstat *ks, void *dst)
+{
+	struct ifiqueue *ifiq = ks->ks_softc;
+	struct ifiq_kstat_data *kd = dst;
+
+	*kd = ifiq_kstat_tpl;
+	kstat_kv_u64(&kd->kd_packets) = ifiq->ifiq_packets;
+	kstat_kv_u64(&kd->kd_bytes) = ifiq->ifiq_bytes;
+	kstat_kv_u64(&kd->kd_qdrops) = ifiq->ifiq_qdrops;
+	kstat_kv_u64(&kd->kd_errors) = ifiq->ifiq_errors;
+	kstat_kv_u32(&kd->kd_qlen) = ml_len(&ifiq->ifiq_ml);
+
+	return (0);
+}
+#endif
+
 static void	ifiq_process(void *);
 
 void
@@ -485,11 +631,27 @@ ifiq_init(struct ifiqueue *ifiq, struct ifnet *ifp, unsigned int idx)
 	ifiq->ifiq_errors = 0;
 
 	ifiq->ifiq_idx = idx;
+
+#if NKSTAT > 0
+	/* XXX xname vs driver name and unit */
+	ifiq->ifiq_kstat = kstat_create(ifp->if_xname, 0,
+	    "rxq", ifiq->ifiq_idx, KSTAT_T_KV, 0);
+	KASSERT(ifiq->ifiq_kstat != NULL);
+	kstat_set_mutex(ifiq->ifiq_kstat, &ifiq->ifiq_mtx);
+	ifiq->ifiq_kstat->ks_softc = ifiq;
+	ifiq->ifiq_kstat->ks_datalen = sizeof(ifiq_kstat_tpl);
+	ifiq->ifiq_kstat->ks_copy = ifiq_kstat_copy;
+	kstat_install(ifiq->ifiq_kstat);
+#endif
 }
 
 void
 ifiq_destroy(struct ifiqueue *ifiq)
 {
+#if NKSTAT > 0
+	kstat_destroy(ifiq->ifiq_kstat);
+#endif
+
 	NET_ASSERT_UNLOCKED();
 	if (!task_del(ifiq->ifiq_softnet, &ifiq->ifiq_task))
 		taskq_barrier(ifiq->ifiq_softnet);
@@ -606,6 +768,46 @@ ifiq_process(void *arg)
 	if_input_process(ifiq->ifiq_if, &ml);
 }
 
+int
+net_ifiq_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, 
+    void *newp, size_t newlen)
+{
+	int error = EOPNOTSUPP;
+/* pressure is disabled for 6.6-release */
+#if 0
+	int val;
+
+	if (namelen != 1)
+		return (EISDIR);
+
+	switch (name[0]) {
+	case NET_LINK_IFRXQ_PRESSURE_RETURN:
+		val = ifiq_pressure_return;
+		error = sysctl_int(oldp, oldlenp, newp, newlen, &val);
+		if (error != 0)
+			return (error);
+		if (val < 1 || val > ifiq_pressure_drop)
+			return (EINVAL);
+		ifiq_pressure_return = val;
+		break;
+	case NET_LINK_IFRXQ_PRESSURE_DROP:
+		val = ifiq_pressure_drop;
+		error = sysctl_int(oldp, oldlenp, newp, newlen, &val);
+		if (error != 0)
+			return (error);
+		if (ifiq_pressure_return > val)
+			return (EINVAL);
+		ifiq_pressure_drop = val;
+		break;
+	default:
+		error = EOPNOTSUPP;
+		break;
+	}
+#endif
+
+	return (error);
+}
+
 /*
  * priq implementation
  */
@@ -615,8 +817,8 @@ priq_idx(unsigned int nqueues, const struct mbuf *m)
 {
 	unsigned int flow = 0;
 
-	if (ISSET(m->m_pkthdr.ph_flowid, M_FLOWID_VALID))
-		flow = m->m_pkthdr.ph_flowid & M_FLOWID_MASK;
+	if (ISSET(m->m_pkthdr.csum_flags, M_FLOWID))
+		flow = m->m_pkthdr.ph_flowid;
 
 	return (flow % nqueues);
 }

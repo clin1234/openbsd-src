@@ -1,4 +1,4 @@
-/*	$OpenBSD: ikev2_msg.c,v 1.55 2019/05/11 16:30:23 patrick Exp $	*/
+/*	$OpenBSD: ikev2_msg.c,v 1.69 2020/07/08 21:35:35 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -28,6 +28,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <syslog.h>
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
@@ -50,6 +51,8 @@ void	 ikev2_msg_retransmit_timeout(struct iked *, void *);
 int	 ikev2_check_frag_oversize(struct iked_sa *sa, struct ibuf *buf);
 int	 ikev2_send_encrypted_fragments(struct iked *env, struct iked_sa *sa,
 	    struct ibuf *in,uint8_t exchange, uint8_t firstpayload, int response);
+int	 ikev2_msg_encrypt_prepare(struct iked_sa *, struct ikev2_payload *,
+	    struct ibuf*, struct ibuf *, struct ike_header *, uint8_t, int);
 
 void
 ikev2_msg_cb(int fd, short event, void *arg)
@@ -78,7 +81,7 @@ ikev2_msg_cb(int fd, short event, void *arg)
 		return;
 
 	if (socket_getport((struct sockaddr *)&msg.msg_local) ==
-	    IKED_NATT_PORT) {
+	    env->sc_nattport) {
 		if (memcmp(&natt, buf, sizeof(natt)) != 0)
 			return;
 		msg.msg_natt = 1;
@@ -94,6 +97,7 @@ ikev2_msg_cb(int fd, short event, void *arg)
 		return;
 
 	TAILQ_INIT(&msg.msg_proposals);
+	SLIST_INIT(&msg.msg_certreqs);
 	msg.msg_fd = fd;
 
 	if (hdr.ike_version == IKEV1_VERSION)
@@ -181,6 +185,8 @@ ikev2_msg_copy(struct iked *env, struct iked_message *msg)
 void
 ikev2_msg_cleanup(struct iked *env, struct iked_message *msg)
 {
+	struct iked_certreq	*cr;
+
 	if (msg == msg->msg_parent) {
 		ibuf_release(msg->msg_nonce);
 		ibuf_release(msg->msg_ke);
@@ -199,6 +205,11 @@ ikev2_msg_cleanup(struct iked *env, struct iked_message *msg)
 		msg->msg_cookie2 = NULL;
 
 		config_free_proposals(&msg->msg_proposals, 0);
+		while ((cr = SLIST_FIRST(&msg->msg_certreqs))) {
+			ibuf_release(cr->cr_data);
+			SLIST_REMOVE_HEAD(&msg->msg_certreqs, cr_entry);
+			free(cr);
+		}
 	}
 
 	if (msg->msg_data != NULL) {
@@ -211,16 +222,6 @@ int
 ikev2_msg_valid_ike_sa(struct iked *env, struct ike_header *oldhdr,
     struct iked_message *msg)
 {
-#if 0
-	/* XXX Disabled, see comment below */
-	struct iked_message		 resp;
-	struct ike_header		*hdr;
-	struct ikev2_payload		*pld;
-	struct ikev2_notify		*n;
-	struct ibuf			*buf;
-	struct iked_sa			 sa;
-#endif
-
 	if (msg->msg_sa != NULL && msg->msg_policy != NULL) {
 		if (msg->msg_sa->sa_state == IKEV2_STATE_CLOSED)
 			return (-1);
@@ -239,62 +240,6 @@ ikev2_msg_valid_ike_sa(struct iked *env, struct ike_header *oldhdr,
 		}
 		return (0);
 	}
-
-#if 0
-	/*
-	 * XXX Sending INVALID_IKE_SPIs notifications is disabled
-	 * XXX because it is not mandatory and ignored by most
-	 * XXX implementations.  We might want to enable it in
-	 * XXX combination with a rate-limitation to avoid DoS situations.
-	 */
-
-	/* Fail without error message */
-	if (msg->msg_response || msg->msg_policy == NULL)
-		return (-1);
-
-	/* Invalid IKE SA, return notification */
-	if ((buf = ikev2_msg_init(env, &resp,
-	    &msg->msg_peer, msg->msg_peerlen,
-	    &msg->msg_local, msg->msg_locallen, 1)) == NULL)
-		goto done;
-
-	resp.msg_fd = msg->msg_fd;
-
-	bzero(&sa, sizeof(sa));
-	if ((oldhdr->ike_flags & IKEV2_FLAG_INITIATOR) == 0)
-		sa.sa_hdr.sh_initiator = 1;
-	sa.sa_hdr.sh_ispi = betoh64(oldhdr->ike_ispi);
-	sa.sa_hdr.sh_rspi = betoh64(oldhdr->ike_rspi);
-
-	resp.msg_msgid = betoh32(oldhdr->ike_msgid);
-
-	/* IKE header */
-	if ((hdr = ikev2_add_header(buf, &sa, resp.msg_msgid,
-	    IKEV2_PAYLOAD_NOTIFY, IKEV2_EXCHANGE_INFORMATIONAL,
-	    IKEV2_FLAG_RESPONSE)) == NULL)
-		goto done;
-
-	/* SA payload */
-	if ((pld = ikev2_add_payload(buf)) == NULL)
-		goto done;
-	if ((n = ibuf_advance(buf, sizeof(*n))) == NULL)
-		goto done;
-	n->n_protoid = IKEV2_SAPROTO_IKE;
-	n->n_spisize = 0;
-	n->n_type = htobe16(IKEV2_N_INVALID_IKE_SPI);
-
-	if (ikev2_next_payload(pld, sizeof(*n), IKEV2_PAYLOAD_NONE) == -1)
-		goto done;
-
-	if (ikev2_set_header(hdr, ibuf_size(buf) - sizeof(*hdr)) == -1)
-		goto done;
-
-	(void)ikev2_pld_parse(env, hdr, &resp, 0);
-	(void)ikev2_msg_send(env, &resp);
-
- done:
-	ikev2_msg_cleanup(env, &resp);
-#endif
 
 	/* Always fail */
 	return (-1);
@@ -315,16 +260,18 @@ ikev2_msg_send(struct iked *env, struct iked_message *msg)
 	    msg->msg_offset, sizeof(*hdr))) == NULL)
 		return (-1);
 
-	isnatt = (msg->msg_natt || (msg->msg_sa && msg->msg_sa->sa_natt));
+	isnatt = (msg->msg_natt || (sa && sa->sa_natt));
 
 	exchange = hdr->ike_exchange;
 	flags = hdr->ike_flags;
-	log_info("%s: %s %s from %s to %s msgid %u, %ld bytes%s", __func__,
+	logit(exchange == IKEV2_EXCHANGE_INFORMATIONAL ?  LOG_DEBUG : LOG_INFO,
+	    "%ssend %s %s %u peer %s local %s, %ld bytes%s",
+	    SPI_IH(hdr),
 	    print_map(exchange, ikev2_exchange_map),
-	    (flags & IKEV2_FLAG_RESPONSE) ? "response" : "request",
-	    print_host((struct sockaddr *)&msg->msg_local, NULL, 0),
-	    print_host((struct sockaddr *)&msg->msg_peer, NULL, 0),
+	    (flags & IKEV2_FLAG_RESPONSE) ? "res" : "req",
 	    betoh32(hdr->ike_msgid),
+	    print_host((struct sockaddr *)&msg->msg_peer, NULL, 0),
+	    print_host((struct sockaddr *)&msg->msg_local, NULL, 0),
 	    ibuf_length(buf), isnatt ? ", NAT-T" : "");
 
 	if (isnatt) {
@@ -337,19 +284,18 @@ ikev2_msg_send(struct iked *env, struct iked_message *msg)
 	if (sendtofrom(msg->msg_fd, ibuf_data(buf), ibuf_size(buf), 0,
 	    (struct sockaddr *)&msg->msg_peer, msg->msg_peerlen,
 	    (struct sockaddr *)&msg->msg_local, msg->msg_locallen) == -1) {
-		if (errno == EADDRNOTAVAIL) {
-			sa_state(env, msg->msg_sa, IKEV2_STATE_CLOSING);
-			timer_del(env, &msg->msg_sa->sa_timer);
-			timer_set(env, &msg->msg_sa->sa_timer,
-			    ikev2_ike_sa_timeout, msg->msg_sa);
-			timer_add(env, &msg->msg_sa->sa_timer,
+		log_warn("%s: sendtofrom", __func__);
+		if (sa != NULL && errno == EADDRNOTAVAIL) {
+			sa_state(env, sa, IKEV2_STATE_CLOSING);
+			timer_del(env, &sa->sa_timer);
+			timer_set(env, &sa->sa_timer,
+			    ikev2_ike_sa_timeout, sa);
+			timer_add(env, &sa->sa_timer,
 			    IKED_IKE_SA_DELETE_TIMEOUT);
 		}
-		log_warn("%s: sendtofrom", __func__);
-		return (-1);
 	}
 
-	if (!sa)
+	if (sa == NULL)
 		return (0);
 
 	if ((m = ikev2_msg_copy(env, msg)) == NULL) {
@@ -383,8 +329,46 @@ ikev2_msg_id(struct iked *env, struct iked_sa *sa)
 	return (id);
 }
 
+/*
+ * Calculate the final sizes of the IKEv2 header and the encrypted payload
+ * header.  This must be done before encryption to make sure the correct
+ * headers are authenticated.
+ */
+int
+ikev2_msg_encrypt_prepare(struct iked_sa *sa, struct ikev2_payload *pld,
+    struct ibuf *buf, struct ibuf *e, struct ike_header *hdr,
+    uint8_t firstpayload, int fragmentation)
+{
+	size_t	 len, ivlen, encrlen, integrlen, blocklen, pldlen, outlen;
+
+	if (sa == NULL ||
+	    sa->sa_encr == NULL ||
+	    sa->sa_integr == NULL) {
+		log_debug("%s: invalid SA", __func__);
+		return (-1);
+	}
+
+	len = ibuf_size(e);
+	blocklen = cipher_length(sa->sa_encr);
+	integrlen = hash_length(sa->sa_integr);
+	ivlen = cipher_ivlength(sa->sa_encr);
+	encrlen = roundup(len + 1, blocklen);
+	outlen = cipher_outlength(sa->sa_encr, encrlen);
+	pldlen = ivlen + outlen + integrlen;
+
+	if (ikev2_next_payload(pld,
+	    pldlen + (fragmentation ? sizeof(struct ikev2_frag_payload) : 0),
+	    firstpayload) == -1)
+		return (-1);
+	if (ikev2_set_header(hdr, ibuf_size(buf) + pldlen - sizeof(*hdr)) == -1)
+		return (-1);
+
+	return (0);
+}
+
 struct ibuf *
-ikev2_msg_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf *src)
+ikev2_msg_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf *src,
+    struct ibuf *aad)
 {
 	size_t			 len, ivlen, encrlen, integrlen, blocklen,
 				    outlen;
@@ -431,7 +415,10 @@ ikev2_msg_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf *src)
 
 	cipher_setkey(sa->sa_encr, encr->buf, ibuf_length(encr));
 	cipher_setiv(sa->sa_encr, NULL, 0);	/* XXX ivlen */
-	cipher_init_encrypt(sa->sa_encr);
+	if (cipher_init_encrypt(sa->sa_encr) == -1) {
+		log_info("%s: error initiating cipher.", __func__);
+		goto done;
+	}
 
 	if ((dst = ibuf_dup(sa->sa_encr->encr_iv)) == NULL)
 		goto done;
@@ -441,8 +428,22 @@ ikev2_msg_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf *src)
 		goto done;
 
 	outlen = ibuf_size(out);
-	cipher_update(sa->sa_encr,
-	    ibuf_data(src), encrlen, ibuf_data(out), &outlen);
+
+	/* Add AAD for AEAD ciphers */
+	if (sa->sa_integr->hash_isaead)
+		cipher_aad(sa->sa_encr, ibuf_data(aad),
+		    ibuf_length(aad), &outlen);
+
+	if (cipher_update(sa->sa_encr, ibuf_data(src), encrlen,
+	    ibuf_data(out), &outlen) == -1) {
+		log_info("%s: error updating cipher.", __func__);
+		goto done;
+	}
+
+	if (cipher_final(sa->sa_encr) == -1) {
+		log_info("%s: encryption failed.", __func__);
+		goto done;
+	}
 
 	if (outlen && ibuf_add(dst, ibuf_data(out), outlen) != 0)
 		goto done;
@@ -477,18 +478,13 @@ ikev2_msg_integr(struct iked *env, struct iked_sa *sa, struct ibuf *src)
 	print_hex(ibuf_data(src), 0, ibuf_size(src));
 
 	if (sa == NULL ||
+	    sa->sa_encr == NULL ||
 	    sa->sa_integr == NULL) {
 		log_debug("%s: invalid SA", __func__);
 		return (-1);
 	}
 
-	if (sa->sa_hdr.sh_initiator)
-		integr = sa->sa_key_iauth;
-	else
-		integr = sa->sa_key_rauth;
-
 	integrlen = hash_length(sa->sa_integr);
-
 	log_debug("%s: integrity checksum length %zu", __func__,
 	    integrlen);
 
@@ -498,21 +494,33 @@ ikev2_msg_integr(struct iked *env, struct iked_sa *sa, struct ibuf *src)
 	if ((tmp = ibuf_new(NULL, hash_keylength(sa->sa_integr))) == NULL)
 		goto done;
 
-	hash_setkey(sa->sa_integr, ibuf_data(integr), ibuf_size(integr));
-	hash_init(sa->sa_integr);
-	hash_update(sa->sa_integr, ibuf_data(src),
-	    ibuf_size(src) - integrlen);
-	hash_final(sa->sa_integr, ibuf_data(tmp), &tmplen);
+	if (!sa->sa_integr->hash_isaead) {
+		if (sa->sa_hdr.sh_initiator)
+			integr = sa->sa_key_iauth;
+		else
+			integr = sa->sa_key_rauth;
 
-	if (tmplen != integrlen) {
-		log_debug("%s: hash failure", __func__);
-		goto done;
+		hash_setkey(sa->sa_integr, ibuf_data(integr),
+		    ibuf_size(integr));
+		hash_init(sa->sa_integr);
+		hash_update(sa->sa_integr, ibuf_data(src),
+		    ibuf_size(src) - integrlen);
+		hash_final(sa->sa_integr, ibuf_data(tmp), &tmplen);
+
+		if (tmplen != integrlen) {
+			log_debug("%s: hash failure", __func__);
+			goto done;
+		}
+	} else {
+		/* Append AEAD tag */
+		if (cipher_gettag(sa->sa_encr, ibuf_data(tmp), ibuf_size(tmp)))
+			goto done;
 	}
 
 	if ((ptr = ibuf_seek(src,
 	    ibuf_size(src) - integrlen, integrlen)) == NULL)
 		goto done;
-	memcpy(ptr, ibuf_data(tmp), tmplen);
+	memcpy(ptr, ibuf_data(tmp), integrlen);
 
 	print_hex(ibuf_data(tmp), 0, ibuf_size(tmp));
 
@@ -529,7 +537,7 @@ ikev2_msg_decrypt(struct iked *env, struct iked_sa *sa,
 {
 	ssize_t			 ivlen, encrlen, integrlen, blocklen,
 				    outlen, tmplen;
-	uint8_t			 pad = 0, *ptr;
+	uint8_t			 pad = 0, *ptr, *integrdata;
 	struct ibuf		*integr, *encr, *tmp = NULL, *out = NULL;
 	off_t			 ivoff, encroff, integroff;
 
@@ -572,25 +580,30 @@ ikev2_msg_decrypt(struct iked *env, struct iked_sa *sa,
 	/*
 	 * Validate packet checksum
 	 */
-	if ((tmp = ibuf_new(NULL, ibuf_length(integr))) == NULL)
-		goto done;
+	if (!sa->sa_integr->hash_isaead) {
+		if ((tmp = ibuf_new(NULL, ibuf_length(integr))) == NULL)
+			goto done;
 
-	hash_setkey(sa->sa_integr, integr->buf, ibuf_length(integr));
-	hash_init(sa->sa_integr);
-	hash_update(sa->sa_integr, ibuf_data(msg),
-	    ibuf_size(msg) - integrlen);
-	hash_final(sa->sa_integr, tmp->buf, &tmplen);
+		hash_setkey(sa->sa_integr, integr->buf, ibuf_length(integr));
+		hash_init(sa->sa_integr);
+		hash_update(sa->sa_integr, ibuf_data(msg),
+		    ibuf_size(msg) - integrlen);
+		hash_final(sa->sa_integr, tmp->buf, &tmplen);
 
-	if (memcmp(tmp->buf, ibuf_data(src) + integroff, integrlen) != 0) {
-		log_debug("%s: integrity check failed", __func__);
-		goto done;
+		integrdata = ibuf_seek(src, integroff, integrlen);
+		if (integrdata == NULL)
+			goto done;
+		if (memcmp(tmp->buf, integrdata, integrlen) != 0) {
+			log_debug("%s: integrity check failed", __func__);
+			goto done;
+		}
+
+		log_debug("%s: integrity check succeeded", __func__);
+		print_hex(tmp->buf, 0, tmplen);
+
+		ibuf_release(tmp);
+		tmp = NULL;
 	}
-
-	log_debug("%s: integrity check succeeded", __func__);
-	print_hex(tmp->buf, 0, tmplen);
-
-	ibuf_release(tmp);
-	tmp = NULL;
 
 	/*
 	 * Decrypt the payload and strip any padding
@@ -602,18 +615,50 @@ ikev2_msg_decrypt(struct iked *env, struct iked_sa *sa,
 
 	cipher_setkey(sa->sa_encr, encr->buf, ibuf_length(encr));
 	cipher_setiv(sa->sa_encr, ibuf_data(src) + ivoff, ivlen);
-	cipher_init_decrypt(sa->sa_encr);
+	if (cipher_init_decrypt(sa->sa_encr) == -1) {
+		log_info("%s: error initiating cipher.", __func__);
+		goto done;
+	}
+
+	/* Set AEAD tag */
+	if (sa->sa_integr->hash_isaead) {
+		integrdata = ibuf_seek(src, integroff, integrlen);
+		if (integrdata == NULL)
+			goto done;
+		if (cipher_settag(sa->sa_encr, integrdata, integrlen)) {
+			log_info("%s: failed to set tag.", __func__);
+			goto done;
+		}
+	}
 
 	if ((out = ibuf_new(NULL, cipher_outlength(sa->sa_encr,
 	    encrlen))) == NULL)
 		goto done;
 
+	/*
+	 * Add additional authenticated data for AEAD ciphers
+	 */
+	if (sa->sa_integr->hash_isaead) {
+		log_debug("%s: AAD length %zu", __func__, ibuf_length(msg) - ibuf_length(src));
+		print_hex(ibuf_data(msg), 0, ibuf_length(msg) - ibuf_length(src));
+		cipher_aad(sa->sa_encr, ibuf_data(msg),
+		    ibuf_length(msg) - ibuf_length(src), &outlen);
+	}
+
 	if ((outlen = ibuf_length(out)) != 0) {
-		cipher_update(sa->sa_encr, ibuf_data(src) + encroff, encrlen,
-		    ibuf_data(out), &outlen);
+		if (cipher_update(sa->sa_encr, ibuf_data(src) + encroff,
+		    encrlen, ibuf_data(out), &outlen) == -1) {
+			log_info("%s: error updating cipher.", __func__);
+			goto done;
+		}
 
 		ptr = ibuf_seek(out, outlen - 1, 1);
 		pad = *ptr;
+	}
+
+	if (cipher_final(sa->sa_encr) == -1) {
+		log_info("%s: decryption failed.", __func__);
+		goto done;
 	}
 
 	log_debug("%s: decrypted payload length %zd/%zd padding %d",
@@ -639,6 +684,13 @@ ikev2_check_frag_oversize(struct iked_sa *sa, struct ibuf *buf) {
 	sa_family_t	sa_fam;
 	size_t		max;
 	size_t		ivlen, integrlen, blocklen;
+
+	if (sa == NULL ||
+	    sa->sa_encr == NULL ||
+	    sa->sa_integr == NULL) {
+		log_debug("%s: invalid SA", __func__);
+		return (-1);
+	}
 
 	sa_fam = ((struct sockaddr *)&sa->sa_local.addr)->sa_family;
 
@@ -684,17 +736,15 @@ ikev2_msg_send_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf **ep,
 	if ((pld = ikev2_add_payload(buf)) == NULL)
 		goto done;
 
+	if (ikev2_msg_encrypt_prepare(sa, pld, buf, e, hdr, firstpayload, 0) == -1)
+		goto done;
+
 	/* Encrypt message and add as an E payload */
-	if ((e = ikev2_msg_encrypt(env, sa, e)) == NULL) {
+	if ((e = ikev2_msg_encrypt(env, sa, e, buf)) == NULL) {
 		log_debug("%s: encryption failed", __func__);
 		goto done;
 	}
 	if (ibuf_cat(buf, e) != 0)
-		goto done;
-	if (ikev2_next_payload(pld, ibuf_size(e), firstpayload) == -1)
-		goto done;
-
-	if (ikev2_set_header(hdr, ibuf_size(buf) - sizeof(*hdr)) == -1)
 		goto done;
 
 	/* Add integrity checksum (HMAC) */
@@ -724,17 +774,24 @@ int
 ikev2_send_encrypted_fragments(struct iked *env, struct iked_sa *sa,
     struct ibuf *in, uint8_t exchange, uint8_t firstpayload, int response) {
 	struct iked_message		 resp;
-	struct ibuf			*buf, *e;
+	struct ibuf			*buf, *e = NULL;
 	struct ike_header		*hdr;
 	struct ikev2_payload		*pld;
 	struct ikev2_frag_payload	*frag;
 	sa_family_t			 sa_fam;
 	size_t				 ivlen, integrlen, blocklen;
-	size_t 				 max_len, left,  offset=0;;
+	size_t 				 max_len, left,  offset=0;
 	size_t				 frag_num = 1, frag_total;
 	uint8_t				*data;
 	uint32_t			 msgid;
 	int 				 ret = -1;
+
+	if (sa == NULL ||
+	    sa->sa_encr == NULL ||
+	    sa->sa_integr == NULL) {
+		log_debug("%s: invalid SA", __func__);
+		goto done;
+	}
 
 	sa_fam = ((struct sockaddr *)&sa->sa_local.addr)->sa_family;
 
@@ -782,21 +839,19 @@ ikev2_send_encrypted_fragments(struct iked *env, struct iked_sa *sa,
 
 		/* Encrypt message and add as an E payload */
 		data = ibuf_seek(in, offset, 0);
-		if((e=ibuf_new(data, MIN(left, max_len))) == NULL) {
+		if ((e = ibuf_new(data, MIN(left, max_len))) == NULL) {
 			goto done;
 		}
-		if ((e = ikev2_msg_encrypt(env, sa, e)) == NULL) {
+
+		if (ikev2_msg_encrypt_prepare(sa, pld, buf, e, hdr,
+		    firstpayload, 1) == -1)
+			goto done;
+
+		if ((e = ikev2_msg_encrypt(env, sa, e, buf)) == NULL) {
 			log_debug("%s: encryption failed", __func__);
 			goto done;
 		}
 		if (ibuf_cat(buf, e) != 0)
-			goto done;
-
-		if (ikev2_next_payload(pld, ibuf_size(e) + sizeof(*frag),
-		    firstpayload) == -1)
-			goto done;
-
-		if (ikev2_set_header(hdr, ibuf_size(buf) - sizeof(*hdr)) == -1)
 			goto done;
 
 		/* Add integrity checksum (HMAC) */
@@ -1140,6 +1195,41 @@ ikev2_msg_lookup(struct iked *env, struct iked_msgqueue *queue,
 	return (m);
 }
 
+void
+ikev2_msg_lookup_dispose_all(struct iked *env, struct iked_msgqueue *queue,
+    struct iked_message *msg, struct ike_header *hdr)
+{
+	struct iked_message	*m = NULL, *tmp = NULL;
+
+	TAILQ_FOREACH_SAFE(m, queue, msg_entry, tmp) {
+		if (m->msg_msgid == msg->msg_msgid &&
+		    m->msg_exchange == hdr->ike_exchange) {
+			TAILQ_REMOVE(queue, m, msg_entry);
+			timer_del(env, &m->msg_timer);
+			ikev2_msg_cleanup(env, m);
+			free(m);
+		}
+	}
+}
+
+int
+ikev2_msg_lookup_retransmit_all(struct iked *env, struct iked_msgqueue *queue,
+    struct iked_message *msg, struct ike_header *hdr, struct iked_sa *sa)
+{
+	struct iked_message	*m = NULL, *tmp = NULL;
+	int count = 0;
+
+	TAILQ_FOREACH_SAFE(m, queue, msg_entry, tmp) {
+		if (m->msg_msgid == msg->msg_msgid &&
+		    m->msg_exchange == hdr->ike_exchange) {
+			if (ikev2_msg_retransmit_response(env, sa, m))
+				return -1;
+			count++;
+		}
+	}
+	return count;
+}
+
 int
 ikev2_msg_retransmit_response(struct iked *env, struct iked_sa *sa,
     struct iked_message *msg)
@@ -1151,6 +1241,12 @@ ikev2_msg_retransmit_response(struct iked *env, struct iked_sa *sa,
 		log_warn("%s: sendtofrom", __func__);
 		return (-1);
 	}
+	log_info("%sretransmit %s res %u local %s peer %s",
+	    SPI_SA(sa, NULL),
+	    print_map(msg->msg_exchange, ikev2_exchange_map),
+	    msg->msg_msgid,
+	    print_host((struct sockaddr *)&msg->msg_local, NULL, 0),
+	    print_host((struct sockaddr *)&msg->msg_peer, NULL, 0));
 
 	timer_add(env, &msg->msg_timer, IKED_RESPONSE_TIMEOUT);
 	return (0);
@@ -1178,15 +1274,24 @@ ikev2_msg_retransmit_timeout(struct iked *env, void *arg)
 		    (struct sockaddr *)&msg->msg_local,
 		    msg->msg_locallen) == -1) {
 			log_warn("%s: sendtofrom", __func__);
+			ikev2_ike_sa_setreason(sa, "retransmit failed");
 			sa_free(env, sa);
 			return;
 		}
 		/* Exponential timeout */
 		timer_add(env, &msg->msg_timer,
 		    IKED_RETRANSMIT_TIMEOUT * (2 << (msg->msg_tries++)));
+		log_info("%sretransmit %d %s req %u peer %s local %s",
+		    SPI_SA(sa, NULL),
+		    msg->msg_tries,
+		    print_map(msg->msg_exchange, ikev2_exchange_map),
+		    msg->msg_msgid,
+		    print_host((struct sockaddr *)&msg->msg_peer, NULL, 0),
+		    print_host((struct sockaddr *)&msg->msg_local, NULL, 0));
 	} else {
-		log_debug("%s: retransmit limit reached for msgid %u",
+		log_debug("%s: retransmit limit reached for req %u",
 		    __func__, msg->msg_msgid);
+		ikev2_ike_sa_setreason(sa, "retransmit limit reached");
 		sa_free(env, sa);
 	}
 }

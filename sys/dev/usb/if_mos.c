@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mos.c,v 1.39 2018/07/03 00:47:49 kevlo Exp $	*/
+/*	$OpenBSD: if_mos.c,v 1.41 2020/06/09 07:43:39 gerhard Exp $	*/
 
 /*
  * Copyright (c) 2008 Johann Christian Rode <jcrode@gmx.net>
@@ -784,10 +784,6 @@ mos_detach(struct device *self, int flags)
 		    sc->mos_dev.dv_xname);
 #endif
 
-	if (--sc->mos_refcnt >= 0) {
-		/* Wait for processes to go away. */
-		usb_detach_wait(&sc->mos_dev);
-	}
 	splx(s);
 
 	return (0);
@@ -1101,6 +1097,7 @@ mos_encap(struct mos_softc *sc, struct mbuf *m, int idx)
 	/* Transmit */
 	err = usbd_transfer(c->mos_xfer);
 	if (err != USBD_IN_PROGRESS) {
+		c->mos_mbuf = NULL;
 		mos_stop(sc);
 		return(EIO);
 	}
@@ -1124,16 +1121,15 @@ mos_start(struct ifnet *ifp)
 	if (ifq_is_oactive(&ifp->if_snd))
 		return;
 
-	m_head = ifq_deq_begin(&ifp->if_snd);
+	m_head = ifq_dequeue(&ifp->if_snd);
 	if (m_head == NULL)
 		return;
 
 	if (mos_encap(sc, m_head, 0)) {
-		ifq_deq_rollback(&ifp->if_snd, m_head);
+		m_freem(m_head);
 		ifq_set_oactive(&ifp->if_snd);
 		return;
 	}
-	ifq_deq_commit(&ifp->if_snd, m_head);
 
 	/*
 	 * If there's a BPF listener, bounce a copy of this frame

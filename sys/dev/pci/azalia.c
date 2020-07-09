@@ -1,4 +1,4 @@
-/*	$OpenBSD: azalia.c,v 1.249 2019/05/09 14:50:46 bcook Exp $	*/
+/*	$OpenBSD: azalia.c,v 1.257 2020/06/09 03:36:05 jsg Exp $	*/
 /*	$NetBSD: azalia.c,v 1.20 2006/05/07 08:31:44 kent Exp $	*/
 
 /*-
@@ -252,7 +252,10 @@ int	azalia_open(void *, int);
 void	azalia_close(void *);
 int	azalia_set_params(void *, int, int, audio_params_t *,
 	audio_params_t *);
-int	azalia_round_blocksize(void *, int);
+unsigned int azalia_set_blksz(void *, int,
+	struct audio_params *, struct audio_params *, unsigned int);
+unsigned int azalia_set_nblks(void *, int,
+	struct audio_params *, unsigned int, unsigned int);
 int	azalia_halt_output(void *);
 int	azalia_halt_input(void *);
 int	azalia_set_port(void *, mixer_ctrl_t *);
@@ -290,7 +293,7 @@ struct audio_hw_if azalia_hw_if = {
 	azalia_open,
 	azalia_close,
 	azalia_set_params,
-	azalia_round_blocksize,
+	NULL,			/* round_blocksize */
 	NULL,			/* commit_settings */
 	NULL,			/* init_output */
 	NULL,			/* init_input */
@@ -308,7 +311,11 @@ struct audio_hw_if azalia_hw_if = {
 	azalia_round_buffersize,
 	azalia_get_props,
 	azalia_trigger_output,
-	azalia_trigger_input
+	azalia_trigger_input,
+	NULL,			/* copy_output */
+	NULL,			/* underrun */
+	azalia_set_blksz,
+	azalia_set_nblks
 };
 
 static const char *pin_devices[16] = {
@@ -453,6 +460,7 @@ azalia_configure_pci(azalia_t *az)
 	case PCI_PRODUCT_INTEL_100SERIES_LP_HDA:
 	case PCI_PRODUCT_INTEL_200SERIES_HDA:
 	case PCI_PRODUCT_INTEL_200SERIES_U_HDA:
+	case PCI_PRODUCT_INTEL_300SERIES_U_HDA:
 	case PCI_PRODUCT_INTEL_C600_HDA:
 	case PCI_PRODUCT_INTEL_C610_HDA:
 	case PCI_PRODUCT_INTEL_BSW_HDA:
@@ -466,6 +474,11 @@ azalia_configure_pci(azalia_t *az)
 	}
 }
 
+const struct pci_matchid azalia_pci_devices[] = {
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_200SERIES_U_HDA },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_300SERIES_U_HDA }
+};
+
 int
 azalia_pci_match(struct device *parent, void *match, void *aux)
 {
@@ -475,7 +488,8 @@ azalia_pci_match(struct device *parent, void *match, void *aux)
 	if (PCI_CLASS(pa->pa_class) == PCI_CLASS_MULTIMEDIA
 	    && PCI_SUBCLASS(pa->pa_class) == PCI_SUBCLASS_MULTIMEDIA_HDAUDIO)
 		return 1;
-	return 0;
+	return pci_matchbyid((struct pci_attach_args *)aux, azalia_pci_devices,
+	    nitems(azalia_pci_devices));
 }
 
 void
@@ -520,8 +534,9 @@ azalia_pci_attach(struct device *parent, struct device *self, void *aux)
 	/* disable MSI for AMD Summit Ridge/Raven Ridge HD Audio */
 	if (PCI_VENDOR(sc->pciid) == PCI_VENDOR_AMD) {
 		switch (PCI_PRODUCT(sc->pciid)) {
-		case PCI_PRODUCT_AMD_AMD64_17_HDA:
-		case PCI_PRODUCT_AMD_AMD64_17_1X_HDA:
+		case PCI_PRODUCT_AMD_17_HDA:
+		case PCI_PRODUCT_AMD_17_1X_HDA:
+		case PCI_PRODUCT_AMD_HUDSON2_HDA:
 			pa->pa_flags &= ~PCI_FLAGS_MSI_ENABLED;
 		}
 	}
@@ -1407,7 +1422,7 @@ azalia_resume_codec(codec_t *this)
 	}
 	DELAY(100);
 
-	if (this->qrks & AZ_QRK_WID_DOLBY_ATMOS)
+	if (this->qrks & AZ_QRK_DOLBY_ATMOS)
 		azalia_codec_init_dolby_atmos(this);
 
 	FOR_EACH_WIDGET(this, i) {
@@ -1551,7 +1566,7 @@ azalia_codec_init(codec_t *this)
 		return ENOMEM;
 	}
 
-	if (this->qrks & AZ_QRK_WID_DOLBY_ATMOS)
+	if (this->qrks & AZ_QRK_DOLBY_ATMOS)
 		azalia_codec_init_dolby_atmos(this);
 
 	/* query the base parameters */
@@ -2220,7 +2235,12 @@ azalia_codec_select_spkrdac(codec_t *this)
 		for (i = 0; i < w->nconnections; i++) {
 			conv = azalia_codec_find_defdac(this,
 			    w->connections[i], 1);
-			if (conv == this->spkr_dac) {
+			if (this->qrks & AZ_QRK_ROUTE_SPKR2_DAC) {
+				if (conv != this->spkr_dac) {
+					conn = i;
+					break;
+				}
+			} else if (conv == this->spkr_dac) {
 				conn = i;
 				break;
 			}
@@ -3956,25 +3976,31 @@ azalia_set_params(void *v, int smode, int umode, audio_params_t *p,
 	return (0);
 }
 
-int
-azalia_round_blocksize(void *v, int blk)
+unsigned int
+azalia_set_blksz(void *v, int mode,
+	struct audio_params *p, struct audio_params *r, unsigned int blksz)
 {
-	azalia_t *az;
-	size_t size;
+	int mult;
 
-	blk &= ~0x7f;		/* must be multiple of 128 */
-	if (blk <= 0)
-		blk = 128;
+	/* must be multiple of 128 bytes */
+	mult = audio_blksz_bytes(mode, p, r, 128);
+
+	blksz -= blksz % mult;
+	if (blksz == 0)
+		blksz = mult;
+
+	return blksz;
+}
+
+unsigned int
+azalia_set_nblks(void *v, int mode,
+	struct audio_params *params, unsigned int blksz, unsigned int nblks)
+{
 	/* number of blocks must be <= HDA_BDL_MAX */
-	az = v;
-	size = az->pstream.buffer.size;
-	if (size > HDA_BDL_MAX * blk) {
-		blk = size / HDA_BDL_MAX;
-		if (blk & 0x7f)
-			blk = (blk + 0x7f) & ~0x7f;
-	}
-	DPRINTFN(1,("%s: resultant block size = %d\n", __func__, blk));
-	return blk;
+	if (nblks > HDA_BDL_MAX)
+		nblks = HDA_BDL_MAX;
+
+	return nblks;
 }
 
 int

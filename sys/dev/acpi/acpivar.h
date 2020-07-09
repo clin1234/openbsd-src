@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpivar.h,v 1.99 2018/08/25 09:39:20 kettenis Exp $	*/
+/*	$OpenBSD: acpivar.h,v 1.109 2020/05/14 13:07:10 kettenis Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -43,6 +43,7 @@ extern int acpi_debug;
 #endif
 
 extern int acpi_hasprocfvs;
+extern int acpi_haspci;
 
 struct klist;
 struct acpiec_softc;
@@ -64,6 +65,13 @@ struct acpi_attach_args {
 	struct aml_node *aaa_node;
 	const char	*aaa_dev;
 	const char	*aaa_cdev;
+	uint64_t	 aaa_addr[4];
+	uint64_t	 aaa_size[4];
+	bus_space_tag_t	 aaa_bst[4];
+	int		 aaa_naddr;
+	uint32_t	 aaa_irq[4];
+	uint32_t	 aaa_irq_flags[4];
+	int		 aaa_nirq;
 };
 
 struct acpi_mem_map {
@@ -172,7 +180,7 @@ struct gpe_block {
 	int  (*handler)(struct acpi_softc *, int, void *);
 	void *arg;
 	int   active;
-	int   edge;
+	int   flags;
 };
 
 struct acpi_devlist {
@@ -208,7 +216,8 @@ struct acpi_softc {
 
 	bus_space_tag_t		sc_iot;
 	bus_space_tag_t		sc_memt;
-	bus_dma_tag_t		sc_dmat;
+	bus_dma_tag_t		sc_cc_dmat;
+	bus_dma_tag_t		sc_ci_dmat;
 
 	/*
 	 * First-level ACPI tables
@@ -264,7 +273,8 @@ struct acpi_softc {
 
 	struct timeout		sc_dev_timeout;
 
-	int			sc_revision;
+	int			sc_major;
+	int			sc_minor;
 
 	int			sc_pse;		/* passive cooling enabled */
 
@@ -277,9 +287,10 @@ extern struct acpi_softc *acpi_softc;
 #define	SCFLAG_OWRITE	0x0000002
 #define	SCFLAG_OPEN	(SCFLAG_OREAD|SCFLAG_OWRITE)
 
-#define GPE_NONE  0x00
-#define GPE_LEVEL 0x01
-#define GPE_EDGE  0x02
+#define GPE_NONE	0x00
+#define GPE_LEVEL	0x01
+#define GPE_EDGE	0x02
+#define GPE_DIRECT	0x04
 
 struct acpi_table {
 	int	offset;
@@ -329,8 +340,7 @@ int	 acpi_sleep_cpu(struct acpi_softc *, int);
 void	 acpi_sleep_mp(void);
 void	 acpi_sleep_pm(struct acpi_softc *, int);
 void	 acpi_resume_pm(struct acpi_softc *, int);
-void	 acpi_resume_clocks(struct acpi_softc *);
-void	 acpi_resume_cpu(struct acpi_softc *);
+void	 acpi_resume_cpu(struct acpi_softc *, int);
 void	 acpi_resume_mp(void);
 void	 acpi_sleep_walk(struct acpi_softc *, int);
 
@@ -368,7 +378,9 @@ void	acpi_sleep(int, char *);
 int	acpi_matchcls(struct acpi_attach_args *, int, int, int);
 int	acpi_matchhids(struct acpi_attach_args *, const char *[], const char *);
 int	acpi_parsehid(struct aml_node *, void *, char *, char *, size_t);
+int64_t	acpi_getsta(struct acpi_softc *sc, struct aml_node *);
 
+int	acpi_getprop(struct aml_node *, const char *, void *, int);
 uint32_t acpi_getpropint(struct aml_node *, const char *, uint32_t);
 
 int	acpi_record_event(struct acpi_softc *, u_int);

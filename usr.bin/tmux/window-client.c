@@ -1,4 +1,4 @@
-/* $OpenBSD: window-client.c,v 1.22 2019/05/12 08:58:09 nicm Exp $ */
+/* $OpenBSD: window-client.c,v 1.29 2020/06/01 09:43:01 nicm Exp $ */
 
 /*
  * Copyright (c) 2017 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -37,18 +37,20 @@ static void		 window_client_key(struct window_mode_entry *,
 #define WINDOW_CLIENT_DEFAULT_COMMAND "detach-client -t '%%'"
 
 #define WINDOW_CLIENT_DEFAULT_FORMAT \
-	"session #{session_name} " \
-	"(#{client_width}x#{client_height}, #{t:client_activity})"
+	"#{t/p:client_activity}: session #{session_name}"
 
-#define WINDOW_CLIENT_MENU \
-	"Detach,d,|" \
-	"Detach Tagged,D,|" \
-	"|" \
-	"Tag,t,|" \
-	"Tag All,C-t,|" \
-	"Tag None,T,|" \
-	"|" \
-	"Cancel,q,"
+static const struct menu_item window_client_menu_items[] = {
+	{ "Detach", 'd', NULL },
+	{ "Detach Tagged", 'D', NULL },
+	{ "", KEYC_NONE, NULL },
+	{ "Tag", 't', NULL },
+	{ "Tag All", '\024', NULL },
+	{ "Tag None", 'T', NULL },
+	{ "", KEYC_NONE, NULL },
+	{ "Cancel", 'q', NULL },
+
+	{ NULL, KEYC_NONE, NULL }
+};
 
 const struct window_mode window_client_mode = {
 	.name = "client-mode",
@@ -72,6 +74,7 @@ static const char *window_client_sort_list[] = {
 	"creation",
 	"activity"
 };
+static struct mode_tree_sort_criteria *window_client_sort;
 
 struct window_client_itemdata {
 	struct client	*c;
@@ -107,60 +110,48 @@ window_client_free_item(struct window_client_itemdata *item)
 }
 
 static int
-window_client_cmp_name(const void *a0, const void *b0)
+window_client_cmp(const void *a0, const void *b0)
 {
-	const struct window_client_itemdata *const *a = a0;
-	const struct window_client_itemdata *const *b = b0;
+	const struct window_client_itemdata *const	*a = a0;
+	const struct window_client_itemdata *const	*b = b0;
+	const struct window_client_itemdata		*itema = *a;
+	const struct window_client_itemdata		*itemb = *b;
+	struct client					*ca = itema->c;
+	struct client					*cb = itemb->c;
+	int						 result = 0;
 
-	return (strcmp((*a)->c->name, (*b)->c->name));
-}
+	switch (window_client_sort->field) {
+	case WINDOW_CLIENT_BY_SIZE:
+		result = ca->tty.sx - cb->tty.sx;
+		if (result == 0)
+			result = ca->tty.sy - cb->tty.sy;
+		break;
+	case WINDOW_CLIENT_BY_CREATION_TIME:
+		if (timercmp(&ca->creation_time, &cb->creation_time, >))
+			result = -1;
+		else if (timercmp(&ca->creation_time, &cb->creation_time, <))
+			result = 1;
+		break;
+	case WINDOW_CLIENT_BY_ACTIVITY_TIME:
+		if (timercmp(&ca->activity_time, &cb->activity_time, >))
+			result = -1;
+		else if (timercmp(&ca->activity_time, &cb->activity_time, <))
+			result = 1;
+		break;
+	}
 
-static int
-window_client_cmp_size(const void *a0, const void *b0)
-{
-	const struct window_client_itemdata *const *a = a0;
-	const struct window_client_itemdata *const *b = b0;
+	/* Use WINDOW_CLIENT_BY_NAME as default order and tie breaker. */
+	if (result == 0)
+		result = strcmp(ca->name, cb->name);
 
-	if ((*a)->c->tty.sx < (*b)->c->tty.sx)
-		return (-1);
-	if ((*a)->c->tty.sx > (*b)->c->tty.sx)
-		return (1);
-	if ((*a)->c->tty.sy < (*b)->c->tty.sy)
-		return (-1);
-	if ((*a)->c->tty.sy > (*b)->c->tty.sy)
-		return (1);
-	return (strcmp((*a)->c->name, (*b)->c->name));
-}
-
-static int
-window_client_cmp_creation_time(const void *a0, const void *b0)
-{
-	const struct window_client_itemdata *const *a = a0;
-	const struct window_client_itemdata *const *b = b0;
-
-	if (timercmp(&(*a)->c->creation_time, &(*b)->c->creation_time, >))
-		return (-1);
-	if (timercmp(&(*a)->c->creation_time, &(*b)->c->creation_time, <))
-		return (1);
-	return (strcmp((*a)->c->name, (*b)->c->name));
-}
-
-static int
-window_client_cmp_activity_time(const void *a0, const void *b0)
-{
-	const struct window_client_itemdata *const *a = a0;
-	const struct window_client_itemdata *const *b = b0;
-
-	if (timercmp(&(*a)->c->activity_time, &(*b)->c->activity_time, >))
-		return (-1);
-	if (timercmp(&(*a)->c->activity_time, &(*b)->c->activity_time, <))
-		return (1);
-	return (strcmp((*a)->c->name, (*b)->c->name));
+	if (window_client_sort->reversed)
+		result = -result;
+	return (result);
 }
 
 static void
-window_client_build(void *modedata, u_int sort_type, __unused uint64_t *tag,
-    const char *filter)
+window_client_build(void *modedata, struct mode_tree_sort_criteria *sort_crit,
+    __unused uint64_t *tag, const char *filter)
 {
 	struct window_client_modedata	*data = modedata;
 	struct window_client_itemdata	*item;
@@ -175,7 +166,7 @@ window_client_build(void *modedata, u_int sort_type, __unused uint64_t *tag,
 	data->item_size = 0;
 
 	TAILQ_FOREACH(c, &clients, entry) {
-		if (c->session == NULL || (c->flags & (CLIENT_DETACHING)))
+		if (c->session == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS))
 			continue;
 
 		item = window_client_add_item(data);
@@ -184,24 +175,9 @@ window_client_build(void *modedata, u_int sort_type, __unused uint64_t *tag,
 		c->references++;
 	}
 
-	switch (sort_type) {
-	case WINDOW_CLIENT_BY_NAME:
-		qsort(data->item_list, data->item_size, sizeof *data->item_list,
-		    window_client_cmp_name);
-		break;
-	case WINDOW_CLIENT_BY_SIZE:
-		qsort(data->item_list, data->item_size, sizeof *data->item_list,
-		    window_client_cmp_size);
-		break;
-	case WINDOW_CLIENT_BY_CREATION_TIME:
-		qsort(data->item_list, data->item_size, sizeof *data->item_list,
-		    window_client_cmp_creation_time);
-		break;
-	case WINDOW_CLIENT_BY_ACTIVITY_TIME:
-		qsort(data->item_list, data->item_size, sizeof *data->item_list,
-		    window_client_cmp_activity_time);
-		break;
-	}
+	window_client_sort = sort_crit;
+	qsort(data->item_list, data->item_size, sizeof *data->item_list,
+	    window_client_cmp);
 
 	for (i = 0; i < data->item_size; i++) {
 		item = data->item_list[i];
@@ -233,7 +209,7 @@ window_client_draw(__unused void *modedata, void *itemdata,
 	struct window_pane		*wp;
 	u_int				 cx = s->cx, cy = s->cy, lines, at;
 
-	if (c->session == NULL || (c->flags & (CLIENT_DEAD|CLIENT_DETACHING)))
+	if (c->session == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS))
 		return;
 	wp = c->session->curw->window->active;
 
@@ -295,8 +271,8 @@ window_client_init(struct window_mode_entry *wme,
 		data->command = xstrdup(args->argv[0]);
 
 	data->data = mode_tree_start(wp, args, window_client_build,
-	    window_client_draw, NULL, window_client_menu, data,
-	    WINDOW_CLIENT_MENU, window_client_sort_list,
+	    window_client_draw, NULL, window_client_menu, NULL, data,
+	    window_client_menu_items, window_client_sort_list,
 	    nitems(window_client_sort_list), &s);
 	mode_tree_zoom(data->data, args);
 
@@ -336,7 +312,7 @@ window_client_resize(struct window_mode_entry *wme, u_int sx, u_int sy)
 }
 
 static void
-window_client_do_detach(void* modedata, void *itemdata,
+window_client_do_detach(void *modedata, void *itemdata,
     __unused struct client *c, key_code key)
 {
 	struct window_client_modedata	*data = modedata;

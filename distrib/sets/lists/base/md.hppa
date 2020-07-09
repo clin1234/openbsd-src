@@ -69,11 +69,11 @@
 ./usr/lib/crtbeginS.o
 ./usr/lib/crtend.o
 ./usr/lib/crtendS.o
-./usr/lib/gcc-lib/hppa-unknown-openbsd6.5
-./usr/lib/gcc-lib/hppa-unknown-openbsd6.5/4.2.1
-./usr/lib/gcc-lib/hppa-unknown-openbsd6.5/4.2.1/collect2
-./usr/lib/gcc-lib/hppa-unknown-openbsd6.5/4.2.1/libgcc.a
-./usr/lib/gcc-lib/hppa-unknown-openbsd6.5/4.2.1/specs
+./usr/lib/gcc-lib/hppa-unknown-openbsd6.7
+./usr/lib/gcc-lib/hppa-unknown-openbsd6.7/4.2.1
+./usr/lib/gcc-lib/hppa-unknown-openbsd6.7/4.2.1/collect2
+./usr/lib/gcc-lib/hppa-unknown-openbsd6.7/4.2.1/libgcc.a
+./usr/lib/gcc-lib/hppa-unknown-openbsd6.7/4.2.1/specs
 ./usr/lib/libstdc++.so.57.0
 ./usr/libdata/perl5/hppa-openbsd
 ./usr/libdata/perl5/hppa-openbsd/.packlist
@@ -312,6 +312,7 @@
 ./usr/libdata/perl5/hppa-openbsd/OpenBSD
 ./usr/libdata/perl5/hppa-openbsd/OpenBSD/MkTemp.pm
 ./usr/libdata/perl5/hppa-openbsd/OpenBSD/Pledge.pm
+./usr/libdata/perl5/hppa-openbsd/OpenBSD/Unveil.pm
 ./usr/libdata/perl5/hppa-openbsd/POSIX.pm
 ./usr/libdata/perl5/hppa-openbsd/POSIX.pod
 ./usr/libdata/perl5/hppa-openbsd/PerlIO
@@ -323,9 +324,7 @@
 ./usr/libdata/perl5/hppa-openbsd/Scalar
 ./usr/libdata/perl5/hppa-openbsd/Scalar/Util.pm
 ./usr/libdata/perl5/hppa-openbsd/Socket.pm
-./usr/libdata/perl5/hppa-openbsd/Storable
 ./usr/libdata/perl5/hppa-openbsd/Storable.pm
-./usr/libdata/perl5/hppa-openbsd/Storable/Limit.pm
 ./usr/libdata/perl5/hppa-openbsd/Sub
 ./usr/libdata/perl5/hppa-openbsd/Sub/Util.pm
 ./usr/libdata/perl5/hppa-openbsd/Sys
@@ -345,7 +344,6 @@
 ./usr/libdata/perl5/hppa-openbsd/Unicode/Collate.pm
 ./usr/libdata/perl5/hppa-openbsd/Unicode/Collate/Locale.pm
 ./usr/libdata/perl5/hppa-openbsd/Unicode/Normalize.pm
-./usr/libdata/perl5/hppa-openbsd/arybase.pm
 ./usr/libdata/perl5/hppa-openbsd/attributes.pm
 ./usr/libdata/perl5/hppa-openbsd/auto
 ./usr/libdata/perl5/hppa-openbsd/auto/B
@@ -432,6 +430,8 @@
 ./usr/libdata/perl5/hppa-openbsd/auto/OpenBSD/MkTemp/MkTemp.so
 ./usr/libdata/perl5/hppa-openbsd/auto/OpenBSD/Pledge
 ./usr/libdata/perl5/hppa-openbsd/auto/OpenBSD/Pledge/Pledge.so
+./usr/libdata/perl5/hppa-openbsd/auto/OpenBSD/Unveil
+./usr/libdata/perl5/hppa-openbsd/auto/OpenBSD/Unveil/Unveil.so
 ./usr/libdata/perl5/hppa-openbsd/auto/POSIX
 ./usr/libdata/perl5/hppa-openbsd/auto/POSIX/POSIX.so
 ./usr/libdata/perl5/hppa-openbsd/auto/PerlIO
@@ -457,7 +457,6 @@
 ./usr/libdata/perl5/hppa-openbsd/auto/Term
 ./usr/libdata/perl5/hppa-openbsd/auto/Term/ReadKey
 ./usr/libdata/perl5/hppa-openbsd/auto/Term/ReadKey/ReadKey.so
-./usr/libdata/perl5/hppa-openbsd/auto/Term/ReadKey/autosplit.ix
 ./usr/libdata/perl5/hppa-openbsd/auto/Tie
 ./usr/libdata/perl5/hppa-openbsd/auto/Tie/Hash
 ./usr/libdata/perl5/hppa-openbsd/auto/Tie/Hash/NamedCapture
@@ -472,8 +471,6 @@
 ./usr/libdata/perl5/hppa-openbsd/auto/Unicode/Collate/Collate.so
 ./usr/libdata/perl5/hppa-openbsd/auto/Unicode/Normalize
 ./usr/libdata/perl5/hppa-openbsd/auto/Unicode/Normalize/Normalize.so
-./usr/libdata/perl5/hppa-openbsd/auto/arybase
-./usr/libdata/perl5/hppa-openbsd/auto/arybase/arybase.so
 ./usr/libdata/perl5/hppa-openbsd/auto/attributes
 ./usr/libdata/perl5/hppa-openbsd/auto/attributes/attributes.so
 ./usr/libdata/perl5/hppa-openbsd/auto/mro

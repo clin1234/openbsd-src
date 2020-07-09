@@ -1,4 +1,4 @@
-/*	$OpenBSD: com.c,v 1.169 2018/05/14 19:25:54 kettenis Exp $	*/
+/*	$OpenBSD: com.c,v 1.172 2020/03/09 04:38:46 yasuoka Exp $	*/
 /*	$NetBSD: com.c,v 1.82.4.1 1996/06/02 09:08:00 mrg Exp $	*/
 
 /*
@@ -186,14 +186,14 @@ com_detach(struct device *self, int flags)
 	mn |= 0x80;
 	vdevgone(maj, mn, mn, VCHR);
 
+	timeout_del(&sc->sc_dtr_tmo);
+	timeout_del(&sc->sc_diag_tmo);
+	softintr_disestablish(sc->sc_si);
+
 	/* Detach and free the tty. */
 	if (sc->sc_tty) {
 		ttyfree(sc->sc_tty);
 	}
-
-	timeout_del(&sc->sc_dtr_tmo);
-	timeout_del(&sc->sc_diag_tmo);
-	softintr_disestablish(sc->sc_si);
 
 	return (0);
 }
@@ -395,7 +395,7 @@ comopen(dev_t dev, int flag, int mode, struct proc *p)
 			    (!ISSET(tp->t_cflag, CLOCAL) &&
 				!ISSET(tp->t_state, TS_CARR_ON))) {
 				SET(tp->t_state, TS_WOPEN);
-				error = ttysleep(tp, &tp->t_rawq, TTIPRI | PCATCH, ttopen, 0);
+				error = ttysleep(tp, &tp->t_rawq, TTIPRI | PCATCH, ttopen);
 				/*
 				 * If TS_WOPEN has been reset, that means the cua device
 				 * has been closed.  We don't want to fail in that case,
@@ -821,7 +821,7 @@ comparam(struct tty *tp, struct termios *t)
 
 				++sc->sc_halt;
 				error = ttysleep(tp, &tp->t_outq,
-				    TTOPRI | PCATCH, "comprm", 0);
+				    TTOPRI | PCATCH, "comprm");
 				--sc->sc_halt;
 				if (error) {
 					comstart(tp);
@@ -1498,8 +1498,8 @@ com_attach_subr(struct com_softc *sc)
 			if (cdevsw[maj].d_open == comopen)
 				break;
 
-		if (maj < nchrdev && cn_tab->cn_dev == NODEV)
-			cn_tab->cn_dev = makedev(maj, sc->sc_dev.dv_unit);
+		KASSERT(maj < nchrdev);
+		cn_tab->cn_dev = makedev(maj, sc->sc_dev.dv_unit);
 
 		printf("%s: console\n", sc->sc_dev.dv_xname);
 	}

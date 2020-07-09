@@ -23,10 +23,14 @@ struct nsd;
 typedef struct nsd_options nsd_options_type;
 typedef struct pattern_options pattern_options_type;
 typedef struct zone_options zone_options_type;
+typedef struct range_option range_option_type;
 typedef struct ip_address_option ip_address_option_type;
+typedef struct cpu_option cpu_option_type;
+typedef struct cpu_map_option cpu_map_option_type;
 typedef struct acl_options acl_options_type;
 typedef struct key_options key_options_type;
 typedef struct config_parser_state config_parser_state_type;
+
 /*
  * Options global for nsd.
  */
@@ -61,9 +65,13 @@ struct nsd_options {
 
 	int ip_transparent;
 	int ip_freebind;
+	int send_buffer_size;
+	int receive_buffer_size;
 	int debug_mode;
 	int verbosity;
 	int hide_version;
+	int hide_identity;
+	int drop_updates;
 	int do_ip4;
 	int do_ip6;
 	const char* database;
@@ -71,7 +79,11 @@ struct nsd_options {
 	const char* version;
 	const char* logfile;
 	int server_count;
+	struct cpu_option* cpu_affinity;
+	struct cpu_map_option* service_cpu_affinity;
 	int tcp_count;
+	int tcp_reject_overflow;
+	int confine_to_zone;
 	int tcp_query_count;
 	int tcp_timeout;
 	int tcp_mss;
@@ -97,7 +109,16 @@ struct nsd_options {
 	int refuse_any;
 	int reuseport;
 
-        /** remote control section. enable toggle. */
+	/* private key file for TLS */
+	char* tls_service_key;
+	/* ocsp stapling file for TLS */
+	char* tls_service_ocsp;
+	/* certificate file for TLS */
+	char* tls_service_pem;
+	/* TLS dedicated port */
+	const char* tls_port;
+
+	/** remote control section. enable toggle. */
 	int control_enable;
 	/** the interfaces the remote control should listen on */
 	struct ip_address_option* control_interface;
@@ -145,9 +166,29 @@ struct nsd_options {
 	region_type* region;
 };
 
+struct range_option {
+	struct range_option* next;
+	int first;
+	int last;
+};
+
 struct ip_address_option {
 	struct ip_address_option* next;
 	char* address;
+	struct range_option* servers;
+	int dev;
+	int fib;
+};
+
+struct cpu_option {
+	struct cpu_option* next;
+	int cpu;
+};
+
+struct cpu_map_option {
+	struct cpu_map_option* next;
+	int service;
+	int cpu;
 };
 
 /*
@@ -285,17 +326,11 @@ struct config_parser_state {
 	const char* chroot;
 	int line;
 	int errors;
-	int server_settings_seen;
 	struct nsd_options* opt;
-	struct pattern_options* current_pattern;
-	struct zone_options* current_zone;
-	struct key_options* current_key;
-	struct ip_address_option* current_ip_address_option;
-	struct acl_options* current_allow_notify;
-	struct acl_options* current_request_xfr;
-	struct acl_options* current_notify;
-	struct acl_options* current_provide_xfr;
-	struct acl_options* current_outgoing_interface;
+	struct pattern_options *pattern;
+	struct zone_options *zone;
+	struct key_options *key;
+	struct ip_address_option *ip;
 	void (*err)(void*,const char*);
 	void* err_arg;
 };
@@ -377,7 +412,8 @@ int acl_addr_matches_host(struct acl_options* acl, struct acl_options* host);
 int acl_addr_matches(struct acl_options* acl, struct query* q);
 int acl_key_matches(struct acl_options* acl, struct query* q);
 int acl_addr_match_mask(uint32_t* a, uint32_t* b, uint32_t* mask, size_t sz);
-int acl_addr_match_range(uint32_t* minval, uint32_t* x, uint32_t* maxval, size_t sz);
+int acl_addr_match_range_v6(uint32_t* minval, uint32_t* x, uint32_t* maxval, size_t sz);
+int acl_addr_match_range_v4(uint32_t* minval, uint32_t* x, uint32_t* maxval, size_t sz);
 
 /* returns true if acls are both from the same host */
 int acl_same_host(struct acl_options* a, struct acl_options* b);
@@ -398,8 +434,8 @@ const char* config_make_zonefile(struct zone_options* zone, struct nsd* nsd);
 #define ZONEC_PCT_COUNT 100000 /* elements before pct check is done */
 
 /* parsing helpers */
-void c_error(const char* msg);
-void c_error_msg(const char* fmt, ...) ATTR_FORMAT(printf, 1, 2);
+void c_error(const char* msg, ...) ATTR_FORMAT(printf, 1,2);
+int c_wrap(void);
 struct acl_options* parse_acl_info(region_type* region, char* ip,
 	const char* key);
 /* true if ipv6 address, false if ipv4 */
@@ -413,6 +449,6 @@ void nsd_options_destroy(struct nsd_options* opt);
 /* replace occurrences of one with two in buf, pass length of buffer */
 void replace_str(char* buf, size_t len, const char* one, const char* two);
 /* apply pattern to the existing pattern in the parser */
-void config_apply_pattern(const char* name);
+void config_apply_pattern(struct pattern_options *dest, const char* name);
 
 #endif /* OPTIONS_H */

@@ -1,10 +1,10 @@
-.\" $OpenBSD: MAKEDEV.8,v 1.110 2019/05/10 11:28:38 sthen Exp $
+.\" $OpenBSD: MAKEDEV.8,v 1.116 2020/07/06 06:13:10 dlg Exp $
 .\"
 .\" THIS FILE AUTOMATICALLY GENERATED.  DO NOT EDIT.
 .\" generated from:
 .\"
-.\"	OpenBSD: etc.i386/MAKEDEV.md,v 1.85 2019/05/10 11:27:23 sthen Exp 
-.\"	OpenBSD: MAKEDEV.common,v 1.102 2019/04/14 10:23:36 jsg Exp 
+.\"	OpenBSD: etc.i386/MAKEDEV.md,v 1.91 2020/07/06 06:11:27 dlg Exp 
+.\"	OpenBSD: MAKEDEV.common,v 1.111 2020/07/06 06:11:26 dlg Exp 
 .\"	OpenBSD: MAKEDEV.man,v 1.9 2017/06/06 08:11:23 tb Exp 
 .\"	OpenBSD: MAKEDEV.mansub,v 1.2 2004/02/20 19:13:01 miod Exp 
 .\"
@@ -23,7 +23,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: May 10 2019 $
+.Dd $Mdocdate: July 6 2020 $
 .Dt MAKEDEV 8 i386
 .Os
 .Sh NAME
@@ -178,6 +178,9 @@ Generic USB devices, see
 .It Ar uhid*
 Generic HID devices, see
 .Xr uhid 4 .
+.It Ar fido
+fido/* nodes, see
+.Xr fido 4 .
 .It Ar ulpt*
 Printer devices, see
 .Xr ulpt 4 .
@@ -206,6 +209,9 @@ Video frame grabbers, see
 .It Ar bpf
 Berkeley Packet Filter, see
 .Xr bpf 4 .
+.It Ar dt
+Dynamic Tracer, see
+.Xr dt 4 .
 .It Ar diskmap
 Disk mapper, see
 .Xr diskmap 4 .
@@ -221,9 +227,6 @@ Userland Filesystem, see
 .It Ar gpio*
 General Purpose Input/Output, see
 .Xr gpio 4 .
-.It Ar gpr*
-GPR400 smartcard reader, see
-.Xr gpr 4 .
 .It Ar hotplug
 devices hot plugging, see
 .Xr hotplug 4 .
@@ -251,6 +254,9 @@ Packet Filter, see
 .It Ar pppx*
 PPP Multiplexer, see
 .Xr pppx 4 .
+.It Ar pppac*
+PPP Access Concentrator, see
+.Xr pppac 4 .
 .It Ar radio*
 FM tuner devices, see
 .Xr radio 4 .
@@ -287,6 +293,9 @@ paravirtual device tree root, see
 .It Ar switch*
 Switch driver, see
 .Xr switch 4 .
+.It Ar kstat
+Kernel Statistics, see
+.Xr kstat 4 .
 .El
 .Sh FILES
 .Bl -tag -width /dev -compact

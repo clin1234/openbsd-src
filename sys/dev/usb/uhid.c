@@ -1,4 +1,4 @@
-/*	$OpenBSD: uhid.c,v 1.71 2018/05/01 18:14:46 landry Exp $ */
+/*	$OpenBSD: uhid.c,v 1.80 2020/05/13 08:13:42 mpi Exp $ */
 /*	$NetBSD: uhid.c,v 1.57 2003/03/11 16:44:00 augustss Exp $	*/
 
 /*
@@ -35,6 +35,8 @@
  * HID spec: http://www.usb.org/developers/devclass_docs/HID1_11.pdf
  */
 
+#include "fido.h"
+
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -57,6 +59,7 @@
 #include <dev/usb/usbdi_util.h>
 
 #include <dev/usb/uhidev.h>
+#include <dev/usb/uhid.h>
 
 #ifdef UHID_DEBUG
 #define DPRINTF(x)	do { if (uhiddebug) printf x; } while (0)
@@ -67,33 +70,7 @@ int	uhiddebug = 0;
 #define DPRINTFN(n,x)
 #endif
 
-struct uhid_softc {
-	struct uhidev sc_hdev;
-
-	u_char *sc_obuf;
-
-	struct clist sc_q;
-	struct selinfo sc_rsel;
-	u_char sc_state;		/* driver state */
-#define	UHID_ASLP	0x01		/* waiting for device data */
-
-	int sc_refcnt;
-};
-
-#define	UHIDUNIT(dev)	(minor(dev))
-#define	UHID_CHUNK	128	/* chunk size for read */
-#define	UHID_BSIZE	1020	/* buffer size */
-
-void uhid_intr(struct uhidev *, void *, u_int len);
-
-int uhid_do_read(struct uhid_softc *, struct uio *uio, int);
-int uhid_do_write(struct uhid_softc *, struct uio *uio, int);
-int uhid_do_ioctl(struct uhid_softc*, u_long, caddr_t, int,
-			 struct proc *);
-
-int uhid_match(struct device *, void *, void *); 
-void uhid_attach(struct device *, struct device *, void *); 
-int uhid_detach(struct device *, int); 
+int uhid_match(struct device *, void *, void *);
 
 struct cfdriver uhid_cd = { 
 	NULL, "uhid", DV_DULL 
@@ -105,6 +82,28 @@ const struct cfattach uhid_ca = {
 	uhid_attach, 
 	uhid_detach, 
 };
+
+struct uhid_softc *
+uhid_lookup(dev_t dev)
+{
+	struct uhid_softc *sc = NULL;
+	struct cdevsw *cdev;
+	struct cfdriver *cd;
+
+	cdev = &cdevsw[major(dev)];
+	if (cdev->d_open == uhidopen)
+		cd = &uhid_cd;
+#if NFIDO > 0
+	else if (cdev->d_open == fidoopen)
+		cd = &fido_cd;
+#endif
+	else
+		return (NULL);
+	if (UHIDUNIT(dev) < cd->cd_ndevs)
+		sc = cd->cd_devs[UHIDUNIT(dev)];
+
+	return (sc);
+}
 
 int
 uhid_match(struct device *parent, void *match, void *aux)
@@ -169,6 +168,10 @@ uhid_detach(struct device *self, int flags)
 	mn = self->dv_unit;
 	vdevgone(maj, mn, mn, VCHR);
 
+	s = splusb();
+	klist_invalidate(&sc->sc_rsel.si_note);
+	splx(s);
+
 	return (0);
 }
 
@@ -201,13 +204,16 @@ uhid_intr(struct uhidev *addr, void *data, u_int len)
 int
 uhidopen(dev_t dev, int flag, int mode, struct proc *p)
 {
+	return (uhid_do_open(dev, flag, mode, p));
+}
+
+int
+uhid_do_open(dev_t dev, int flag, int mode, struct proc *p)
+{
 	struct uhid_softc *sc;
 	int error;
 
-	if (UHIDUNIT(dev) >= uhid_cd.cd_ndevs)
-		return (ENXIO);
-	sc = uhid_cd.cd_devs[UHIDUNIT(dev)];
-	if (sc == NULL)
+	if ((sc = uhid_lookup(dev)) == NULL)
 		return (ENXIO);
 
 	DPRINTF(("uhidopen: sc=%p\n", sc));
@@ -231,7 +237,8 @@ uhidclose(dev_t dev, int flag, int mode, struct proc *p)
 {
 	struct uhid_softc *sc;
 
-	sc = uhid_cd.cd_devs[UHIDUNIT(dev)];
+	if ((sc = uhid_lookup(dev)) == NULL)
+		return (ENXIO);
 
 	DPRINTF(("uhidclose: sc=%p\n", sc));
 
@@ -260,7 +267,7 @@ uhid_do_read(struct uhid_softc *sc, struct uio *uio, int flag)
 		}
 		sc->sc_state |= UHID_ASLP;
 		DPRINTFN(5, ("uhidread: sleep on %p\n", &sc->sc_q));
-		error = tsleep(&sc->sc_q, PZERO | PCATCH, "uhidrea", 0);
+		error = tsleep_nsec(&sc->sc_q, PZERO|PCATCH, "uhidrea", INFSLP);
 		DPRINTFN(5, ("uhidread: woke, error=%d\n", error));
 		if (usbd_is_dying(sc->sc_hdev.sc_udev))
 			error = EIO;
@@ -295,7 +302,8 @@ uhidread(dev_t dev, struct uio *uio, int flag)
 	struct uhid_softc *sc;
 	int error;
 
-	sc = uhid_cd.cd_devs[UHIDUNIT(dev)];
+	if ((sc = uhid_lookup(dev)) == NULL)
+		return (ENXIO);
 
 	sc->sc_refcnt++;
 	error = uhid_do_read(sc, uio, flag);
@@ -317,9 +325,13 @@ uhid_do_write(struct uhid_softc *sc, struct uio *uio, int flag)
 
 	size = sc->sc_hdev.sc_osize;
 	error = 0;
-	if (uio->uio_resid != size)
-		return (EINVAL);
-	error = uiomove(sc->sc_obuf, size, uio);
+	if (uio->uio_resid > size)
+		return (EMSGSIZE);
+	else if (uio->uio_resid < size) {
+		/* don't leak kernel memory to the USB device */
+		memset(sc->sc_obuf + uio->uio_resid, 0, size - uio->uio_resid);
+	}
+	error = uiomove(sc->sc_obuf, uio->uio_resid, uio);
 	if (!error) {
 		if (uhidev_set_report(sc->sc_hdev.sc_parent,
 		    UHID_OUTPUT_REPORT, sc->sc_hdev.sc_report_id, sc->sc_obuf,
@@ -336,7 +348,8 @@ uhidwrite(dev_t dev, struct uio *uio, int flag)
 	struct uhid_softc *sc;
 	int error;
 
-	sc = uhid_cd.cd_devs[UHIDUNIT(dev)];
+	if ((sc = uhid_lookup(dev)) == NULL)
+		return (ENXIO);
 
 	sc->sc_refcnt++;
 	error = uhid_do_write(sc, uio, flag);
@@ -386,7 +399,8 @@ uhidioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 	struct uhid_softc *sc;
 	int error;
 
-	sc = uhid_cd.cd_devs[UHIDUNIT(dev)];
+	if ((sc = uhid_lookup(dev)) == NULL)
+		return (ENXIO);
 
 	sc->sc_refcnt++;
 	error = uhid_do_ioctl(sc, cmd, addr, flag, p);
@@ -402,10 +416,11 @@ uhidpoll(dev_t dev, int events, struct proc *p)
 	int revents = 0;
 	int s;
 
-	sc = uhid_cd.cd_devs[UHIDUNIT(dev)];
+	if ((sc = uhid_lookup(dev)) == NULL)
+		return (POLLERR);
 
 	if (usbd_is_dying(sc->sc_hdev.sc_udev))
-		return (POLLERR);
+		return (POLLHUP);
 
 	s = splusb();
 	if (events & (POLLOUT | POLLWRNORM))
@@ -432,7 +447,7 @@ filt_uhidrdetach(struct knote *kn)
 	int s;
 
 	s = splusb();
-	SLIST_REMOVE(&sc->sc_rsel.si_note, kn, knote, kn_selnext);
+	klist_remove(&sc->sc_rsel.si_note, kn);
 	splx(s);
 }
 
@@ -445,11 +460,12 @@ filt_uhidread(struct knote *kn, long hint)
 	return (kn->kn_data > 0);
 }
 
-struct filterops uhidread_filtops =
-	{ 1, NULL, filt_uhidrdetach, filt_uhidread };
-
-struct filterops uhid_seltrue_filtops =
-	{ 1, NULL, filt_uhidrdetach, filt_seltrue };
+const struct filterops uhidread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_uhidrdetach,
+	.f_event	= filt_uhidread,
+};
 
 int
 uhidkqfilter(dev_t dev, struct knote *kn)
@@ -458,10 +474,11 @@ uhidkqfilter(dev_t dev, struct knote *kn)
 	struct klist *klist;
 	int s;
 
-	sc = uhid_cd.cd_devs[UHIDUNIT(dev)];
+	if ((sc = uhid_lookup(dev)) == NULL)
+		return (ENXIO);
 
 	if (usbd_is_dying(sc->sc_hdev.sc_udev))
-		return (EIO);
+		return (ENXIO);
 
 	switch (kn->kn_filter) {
 	case EVFILT_READ:
@@ -470,9 +487,7 @@ uhidkqfilter(dev_t dev, struct knote *kn)
 		break;
 
 	case EVFILT_WRITE:
-		klist = &sc->sc_rsel.si_note;
-		kn->kn_fop = &uhid_seltrue_filtops;
-		break;
+		return (seltrue_kqfilter(dev, kn));
 
 	default:
 		return (EINVAL);
@@ -481,7 +496,7 @@ uhidkqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = (void *)sc;
 
 	s = splusb();
-	SLIST_INSERT_HEAD(klist, kn, kn_selnext);
+	klist_insert(klist, kn);
 	splx(s);
 
 	return (0);

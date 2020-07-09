@@ -1,4 +1,4 @@
-#	$OpenBSD: 4.4BSD.dist,v 1.310 2019/05/11 07:18:15 deraadt Exp $
+#	$OpenBSD: 4.4BSD.dist,v 1.315 2020/06/29 17:26:24 deraadt Exp $
 
 /set type=dir uname=root gname=wheel mode=0755
 
@@ -89,6 +89,8 @@ etc
     ppp
     ..
     rc.d
+    ..
+    rpki
     ..
     skel
         .ssh			uname=root mode=0700
@@ -506,6 +508,8 @@ usr
                 ..
                 octeon
                 ..
+                powerpc64
+                ..
                 sgi
                 ..
                 sparc64
@@ -514,6 +518,8 @@ usr
 
             # ./usr/share/man/man5
             man5
+                sparc64
+                ..
             ..
             man6
             ..
@@ -543,6 +549,8 @@ usr
                 macppc
                 ..
                 octeon
+                ..
+                powerpc64
                 ..
                 sgi
                 ..
@@ -607,6 +615,10 @@ var
     ..
     crash			mode=770
     ..
+    cache			mode=755
+        rpki-client		uname=_rpki-client gname=wheel mode=0755
+        ..
+    ..
 
     # ./var/cron
     cron			mode=0555
@@ -623,6 +635,8 @@ var
         ldap			mode=0700
         ..
         ns
+        ..
+        rpki-client		uname=_rpki-client mode=0755
         ..
         pkg
         ..

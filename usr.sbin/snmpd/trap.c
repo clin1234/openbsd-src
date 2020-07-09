@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.32 2018/04/15 11:57:29 mpf Exp $	*/
+/*	$OpenBSD: trap.c,v 1.35 2020/06/30 17:11:49 martijn Exp $	*/
 
 /*
  * Copyright (c) 2008 Reyk Floeter <reyk@openbsd.org>
@@ -52,96 +52,6 @@ trap_init(void)
 }
 
 int
-trap_agentx(struct agentx_handle *h, struct agentx_pdu *pdu, int *idx,
-    char **varcpy, int *vcpylen)
-{
-	struct agentx_varbind_hdr	 vbhdr;
-	u_int32_t			 d;
-	struct ber_oid			 o, oid;
-	struct ber_oid			 uptime = OID(MIB_sysUpTime);
-	struct ber_oid			 trapoid = OID(MIB_snmpTrapOID);
-	struct ber_element		*varbind, *iter;
-	int				 x = 0, state = 0;
-	int				 ret = AGENTX_ERR_NONE;
-	int				 seensysuptime, seentrapoid;
-	size_t				 len = 0;
-	char				*v = NULL;
-
-	*varcpy = NULL;
-	varbind = NULL;
-	iter = NULL;
-	seensysuptime = seentrapoid = 0;
-
-	if (pdu->hdr->flags & AGENTX_NON_DEFAULT_CONTEXT) {
-		ret = AGENTX_ERR_UNSUPPORTED_CONTEXT;
-		goto done;
-	}
-
-	if ((v = malloc(pdu->hdr->length)) == NULL ||
-	    snmp_agentx_copy_raw(pdu, v, pdu->hdr->length) == -1) {
-		ret = AGENTX_ERR_PROCESSING_ERROR;
-		goto done;
-	}
-
-	while (pdu->datalen > sizeof(struct agentx_hdr)) {
-		x++;
-
-		if (snmp_agentx_read_vbhdr(pdu, &vbhdr) == -1) {
-			ret = AGENTX_ERR_PARSE_ERROR;
-			goto done;
-		}
-
-		if (state < 2) {
-			if (snmp_agentx_read_oid(pdu, (struct snmp_oid *)&oid) == -1) {
-				ret = AGENTX_ERR_PARSE_ERROR;
-				goto done;
-			}
-			if (state == 0 && ber_oid_cmp(&oid, &uptime) == 0) {
-				if (snmp_agentx_read_int(pdu, &d) == -1) {
-					ret = AGENTX_ERR_PARSE_ERROR;
-					goto done;
-				}
-				state = 1;
-				continue;
-			} else if (ber_oid_cmp(&oid, &trapoid) == 0) {
-				if (snmp_agentx_read_oid(pdu,
-				    (struct snmp_oid *)&o) == -1) {
-					ret = AGENTX_ERR_PARSE_ERROR;
-					goto done;
-				}
-				state = 2;
-				continue;
-			} else {
-				ret = AGENTX_ERR_PROCESSING_ERROR;
-				goto done;
-			}
-		}
-
-		ret = varbind_convert(pdu, &vbhdr, &varbind, &iter);
-		if (ret != AGENTX_ERR_NONE)
-			goto done;
-	}
-
-	if (varbind != NULL)
-		len = ber_calc_len(varbind);
-	log_debug("trap_agentx: from packetid %d len %zu elements %d",
-	    pdu->hdr->packetid, len, x);
-
-	trap_send(&o, varbind);
-
-	*varcpy = v;
-	*vcpylen = pdu->hdr->length;
-
-	return (AGENTX_ERR_NONE);
- done:
-	if (varbind != NULL)
-		ber_free_elements(varbind);
-	free(v);
-	*idx = x;
-	return (ret);
-}
-
-int
 trap_send(struct ber_oid *oid, struct ber_element *elm)
 {
 	int			 ret = 0, s;
@@ -174,13 +84,13 @@ trap_send(struct ber_oid *oid, struct ber_element *elm)
 	ob.o_flags = OID_TABLE;
 
 	/* Add mandatory varbind elements */
-	trap = ber_add_sequence(NULL);
-	c = ber_printf_elements(trap, "{Odt}{OO}",
+	trap = ober_add_sequence(NULL);
+	c = ober_printf_elements(trap, "{Odt}{OO}",
 	    &uptime, smi_getticks(),
 	    BER_CLASS_APPLICATION, SNMP_T_TIMETICKS,
 	    &trapoid, oid);
 	if (elm != NULL)
-		ber_link_elements(c, elm);
+		ober_link_elements(c, elm);
 
 	bzero(&ber, sizeof(ber));
 
@@ -211,17 +121,17 @@ trap_send(struct ber_oid *oid, struct ber_element *elm)
 		    tr->sa_community : snmpd_env->sc_trcommunity;
 
 		/* SNMP header */
-		root = ber_add_sequence(NULL);
-		b = ber_printf_elements(root, "ds{tddd",
+		root = ober_add_sequence(NULL);
+		b = ober_printf_elements(root, "ds{tddd",
 		    SNMP_V2, cmn, BER_CLASS_CONTEXT, SNMP_C_TRAPV2,
 		    arc4random(), 0, 0);
-		ber_link_elements(b, trap);
+		ober_link_elements(b, trap);
 
 #ifdef DEBUG
 		smi_debug_elements(root);
 #endif
-		len = ber_write_elements(&ber, root);
-		if (ber_get_writebuf(&ber, (void *)&ptr) > 0 &&
+		len = ober_write_elements(&ber, root);
+		if (ober_get_writebuf(&ber, (void *)&ptr) > 0 &&
 		    sendto(s, ptr, len, 0, (struct sockaddr *)&tr->ss,
 		    tr->ss.ss_len) != -1) {
 			snmpd_env->sc_stats.snmp_outpkts++;
@@ -229,13 +139,13 @@ trap_send(struct ber_oid *oid, struct ber_element *elm)
 		}
 
 		close(s);
-		ber_unlink_elements(b);
-		ber_free_elements(root);
+		ober_unlink_elements(b);
+		ober_free_elements(root);
 	}
 
  done:
-	ber_free_elements(trap);
-	ber_free(&ber);
+	ober_free_elements(trap);
+	ober_free(&ber);
 
 	return (ret);
 }

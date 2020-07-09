@@ -1,10 +1,8 @@
-#	$OpenBSD: RAMDISK,v 1.118 2018/09/22 10:12:42 stsp Exp $
+#	$OpenBSD: RAMDISK,v 1.120 2020/01/24 04:44:14 krw Exp $
 
 machine		macppc powerpc
 maxusers	4
 
-option		TIMEZONE=0
-option		DST=0
 option		SMALL_KERNEL
 option		NO_PROPOLICE
 option		BOOT_CONFIG
@@ -118,7 +116,6 @@ ukphy*		at mii?			# generic unknown PHYs
 
 bm*		at macobio?		# bmac ethernet
 mc*		at macobio?		# MACE ethernet
-mesh*		at macobio? flags 0xffff# MESH SCSI
 adb*		at macobio?		# Apple Desktop Bus
 wi*		at macobio?		# Apple Airport 802.11DS
 macgpio*	at macobio?		# GPIO, PMU interrupt router.

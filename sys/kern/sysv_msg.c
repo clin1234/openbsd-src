@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysv_msg.c,v 1.34 2018/12/05 15:42:45 mpi Exp $	*/
+/*	$OpenBSD: sysv_msg.c,v 1.37 2020/06/24 22:03:42 cheloha Exp $	*/
 /*	$NetBSD: sysv_msg.c,v 1.19 1996/02/09 19:00:18 christos Exp $	*/
 /*
  * Copyright (c) 2009 Bret S. Lambert <blambert@openbsd.org>
@@ -131,7 +131,8 @@ msgctl1(struct proc *p, int msqid, int cmd, caddr_t buf,
 		/* lose interest in the queue and wait for others to too */
 		if (--que->que_references > 0) {
 			wakeup(que);
-			tsleep(&que->que_references, PZERO, "msgqrm", 0);
+			tsleep_nsec(&que->que_references, PZERO, "msgqrm",
+			    INFSLP);
 		}
 
 		que_free(que);
@@ -167,7 +168,7 @@ msgctl1(struct proc *p, int msqid, int cmd, caddr_t buf,
 		    (que->msqid_ds.msg_perm.mode & ~0777) |
 		    (tmp.msg_perm.mode & 0777);
 		que->msqid_ds.msg_qbytes = tmp.msg_qbytes;
-		que->msqid_ds.msg_ctime = time_second;
+		que->msqid_ds.msg_ctime = gettime();
 		break;
 
 	case IPC_STAT:
@@ -273,7 +274,7 @@ sys_msgsnd(struct proc *p, void *v, register_t *retval)
 			maxmsgs = 1;
 
 		que->que_flags |= MSGQ_WRITERS;
-		if ((error = tsleep(que, PZERO|PCATCH, "msgwait", 0)))
+		if ((error = tsleep_nsec(que, PZERO|PCATCH, "msgwait", INFSLP)))
 			goto out;
 
 		if (que->que_flags & MSGQ_DYING) {
@@ -344,7 +345,7 @@ sys_msgrcv(struct proc *p, void *v, register_t *retval)
 		}
 
 		que->que_flags |= MSGQ_READERS;
-		if ((error = tsleep(que, PZERO|PCATCH, "msgwait", 0)))
+		if ((error = tsleep_nsec(que, PZERO|PCATCH, "msgwait", INFSLP)))
 			goto out;
 
 		/* make sure the queue still alive */
@@ -413,7 +414,7 @@ que_create(key_t key, struct ucred *cred, int mode)
 	que->msqid_ds.msg_perm.mode = mode & 0777;
 	que->msqid_ds.msg_perm.seq = ++sequence & 0x7fff;
 	que->msqid_ds.msg_qbytes = msginfo.msgmnb;
-	que->msqid_ds.msg_ctime = time_second;
+	que->msqid_ds.msg_ctime = gettime();
 
 	TAILQ_INIT(&que->que_msgs);
 
@@ -548,7 +549,7 @@ msg_enqueue(struct que *que, struct msg *msg, struct proc *p)
 	que->msqid_ds.msg_cbytes += msg->msg_len;
 	que->msqid_ds.msg_qnum++;
 	que->msqid_ds.msg_lspid = p->p_p->ps_pid;
-	que->msqid_ds.msg_stime = time_second;
+	que->msqid_ds.msg_stime = gettime();
 
 	TAILQ_INSERT_TAIL(&que->que_msgs, msg, msg_next);
 }
@@ -559,7 +560,7 @@ msg_dequeue(struct que *que, struct msg *msg, struct proc *p)
 	que->msqid_ds.msg_cbytes -= msg->msg_len;
 	que->msqid_ds.msg_qnum--;
 	que->msqid_ds.msg_lrpid = p->p_p->ps_pid;
-	que->msqid_ds.msg_rtime = time_second;
+	que->msqid_ds.msg_rtime = gettime();
 
 	TAILQ_REMOVE(&que->que_msgs, msg, msg_next);
 }
@@ -588,7 +589,7 @@ msg_copyin(struct msg *msg, const char *ubuf, size_t len, struct proc *p)
 		return (error);
 	}
 
-	if (msg->msg_type < 0) {
+	if (msg->msg_type < 1) {
 		msg_free(msg);
 		return (EINVAL);
 	}

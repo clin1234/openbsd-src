@@ -1,4 +1,4 @@
-/*	$OpenBSD: relayd.h,v 1.255 2019/05/13 09:54:07 reyk Exp $	*/
+/*	$OpenBSD: relayd.h,v 1.261 2020/05/14 17:27:39 pvk Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -137,13 +137,19 @@ struct ctl_relaytable {
 	u_int32_t	 flags;
 };
 
-struct ctl_relayfd {
-	objid_t		 relayid;
-	int		 type;
+enum fd_type {
+	RELAY_FD_CERT	= 1,
+	RELAY_FD_CACERT	= 2,
+	RELAY_FD_CAFILE	= 3,
+	RELAY_FD_KEY	= 4,
+	RELAY_FD_OCSP	= 5
 };
-#define RELAY_FD_CERT	1
-#define RELAY_FD_CACERT	2
-#define RELAY_FD_CAFILE	3
+
+struct ctl_relayfd {
+	objid_t		 id;
+	objid_t		 relayid;
+	enum fd_type	 type;
+};
 
 struct ctl_script {
 	objid_t		 host;
@@ -498,7 +504,8 @@ struct table_config {
 	char			 name[TABLE_NAME_SIZE];
 	size_t			 name_len;
 	char			 path[PATH_MAX];
-	char			 exbuf[64];
+	unsigned char		 exbinbuf[128];
+	char			 exbuf[256];
 	char			 digest[41]; /* length of sha1 digest * 2 */
 	u_int8_t		 digest_type;
 	enum forwardmode	 fwdmode;
@@ -511,6 +518,7 @@ struct table {
 	int			 skipped;
 	struct hostlist		 hosts;
 	struct tls_config	*tls_cfg;
+	struct ibuf		*sendbinbuf;
 	char			*sendbuf;
 };
 TAILQ_HEAD(tablelist, table);
@@ -521,8 +529,9 @@ enum table_check {
 	CHECK_TCP		= 2,
 	CHECK_HTTP_CODE		= 3,
 	CHECK_HTTP_DIGEST	= 4,
-	CHECK_SEND_EXPECT	= 5,
-	CHECK_SCRIPT		= 6
+	CHECK_BINSEND_EXPECT	= 5,
+	CHECK_SEND_EXPECT	= 6,
+	CHECK_SCRIPT		= 7
 };
 
 struct rdr_config {
@@ -686,15 +695,16 @@ TAILQ_HEAD(relay_rules, relay_rule);
 #define TLSFLAG_TLSV1_0				0x02
 #define TLSFLAG_TLSV1_1				0x04
 #define TLSFLAG_TLSV1_2				0x08
-#define TLSFLAG_TLSV1				0x0e
+#define TLSFLAG_TLSV1_3				0x10
+#define TLSFLAG_TLSV1				0x1e
 #define TLSFLAG_VERSION				0x1f
 #define TLSFLAG_CIPHER_SERVER_PREF		0x20
 #define TLSFLAG_CLIENT_RENEG			0x40
 #define TLSFLAG_DEFAULT				\
-	(TLSFLAG_TLSV1_2|TLSFLAG_CIPHER_SERVER_PREF)
+	(TLSFLAG_TLSV1_2|TLSFLAG_TLSV1_3|TLSFLAG_CIPHER_SERVER_PREF)
 
 #define TLSFLAG_BITS						\
-	"\06\01sslv3\02tlsv1.0\03tlsv1.1\04tlsv1.2"	\
+	"\06\01sslv3\02tlsv1.0\03tlsv1.1\04tlsv1.2\05tlsv1.3"	\
 	"\06cipher-server-preference\07client-renegotiation"
 
 #define TLSCIPHERS_DEFAULT	"HIGH:!aNULL"
@@ -708,6 +718,12 @@ struct relay_ticket_key {
 #define	TLS_SESSION_LIFETIME	(2 * 3600)
 
 #define HTTPFLAG_WEBSOCKETS	0x01
+
+struct keyname {
+	TAILQ_ENTRY(keyname)	 entry;
+	char			*name;
+};
+TAILQ_HEAD(keynamelist, keyname);
 
 struct protocol {
 	objid_t			 id;
@@ -727,6 +743,7 @@ struct protocol {
 	char			 tlscacert[PATH_MAX];
 	char			 tlscakey[PATH_MAX];
 	char			*tlscapass;
+	struct keynamelist	 tlscerts;
 	char			 name[MAX_NAME_SIZE];
 	int			 tickets;
 	enum prototype		 type;
@@ -764,6 +781,17 @@ struct ca_pkey {
 };
 TAILQ_HEAD(ca_pkeylist, ca_pkey);
 
+struct relay_cert {
+	objid_t			 cert_id;
+	objid_t			 cert_relayid;
+	int			 cert_fd;
+	int			 cert_key_fd;
+	int			 cert_ocsp_fd;
+	EVP_PKEY		*cert_pkey;
+	TAILQ_ENTRY(relay_cert)	 cert_entry;
+};
+TAILQ_HEAD(relaycertlist, relay_cert);
+
 struct relay_config {
 	objid_t			 id;
 	u_int32_t		 flags;
@@ -778,7 +806,6 @@ struct relay_config {
 	struct timeval		 timeout;
 	enum forwardmode	 fwdmode;
 	union hashkey		 hashkey;
-	off_t			 tls_key_len;
 	off_t			 tls_cakey_len;
 };
 
@@ -803,10 +830,8 @@ struct relay {
 	struct tls_config	*rl_tls_client_cfg;
 	struct tls		*rl_tls_ctx;
 
-	int			rl_tls_cert_fd;
-	int			rl_tls_ca_fd;
-	int			rl_tls_cacert_fd;
-	char			*rl_tls_key;
+	int			 rl_tls_ca_fd;
+	int			 rl_tls_cacert_fd;
 	EVP_PKEY		*rl_tls_pkey;
 	X509			*rl_tls_cacertx509;
 	char			*rl_tls_cakey;
@@ -1088,6 +1113,7 @@ struct relayd {
 	struct routerlist	*sc_rts;
 	struct netroutelist	*sc_routes;
 	struct ca_pkeylist	*sc_pkeys;
+	struct relaycertlist	*sc_certs;
 	struct sessionlist	 sc_sessions;
 	char			 sc_demote_group[IFNAMSIZ];
 	u_int16_t		 sc_id;
@@ -1147,6 +1173,9 @@ const char *print_host(struct sockaddr_storage *, char *, size_t);
 const char *print_time(struct timeval *, struct timeval *, char *, size_t);
 const char *printb_flags(const u_int32_t, const char *);
 void	 getmonotime(struct timeval *);
+struct ibuf	*string2binary(const char *);
+void		 print_hex(uint8_t *, off_t, size_t);
+void		 print_debug(const char *, ...);
 
 /* pfe.c */
 void	 pfe(struct privsep *, struct privsep_proc *);
@@ -1183,8 +1212,6 @@ void	 relay(struct privsep *, struct privsep_proc *);
 int	 relay_privinit(struct relay *);
 void	 relay_notify_done(struct host *, const char *);
 int	 relay_session_cmp(struct rsession *, struct rsession *);
-char	*relay_load_fd(int, off_t *);
-int	 relay_load_certfiles(struct relay *);
 void	 relay_close(struct rsession *, const char *, int);
 int	 relay_reset_event(struct rsession *, struct ctl_relay_event *);
 void	 relay_natlook(int, short, void *);
@@ -1298,6 +1325,11 @@ struct relay	*relay_findbyname(struct relayd *, const char *);
 struct relay	*relay_findbyaddr(struct relayd *, struct relay_config *);
 EVP_PKEY	*pkey_find(struct relayd *, char *hash);
 struct ca_pkey	*pkey_add(struct relayd *, EVP_PKEY *, char *hash);
+struct relay_cert *cert_add(struct relayd *, objid_t);
+struct relay_cert *cert_find(struct relayd *, objid_t);
+char		*relay_load_fd(int, off_t *);
+int		 relay_load_certfiles(struct relayd *, struct relay *,
+		    const char *);
 int		 expand_string(char *, size_t, const char *, const char *);
 void		 translate_string(char *);
 void		 purge_key(char **, off_t);

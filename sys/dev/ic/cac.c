@@ -1,4 +1,4 @@
-/*	$OpenBSD: cac.c,v 1.55 2015/09/01 05:46:00 deraadt Exp $	*/
+/*	$OpenBSD: cac.c,v 1.61 2020/06/27 14:29:45 krw Exp $	*/
 /*	$NetBSD: cac.c,v 1.15 2000/11/08 19:20:35 ad Exp $	*/
 
 /*
@@ -96,10 +96,9 @@ struct cfdriver cac_cd = {
 };
 
 void    cac_scsi_cmd(struct scsi_xfer *);
-void	cacminphys(struct buf *bp, struct scsi_link *sl);
 
 struct scsi_adapter cac_switch = {
-	cac_scsi_cmd, cacminphys, 0, 0,
+	cac_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
 void	*cac_ccb_alloc(void *);
@@ -239,14 +238,13 @@ cac_init(struct cac_softc *sc, int startfw)
 
 	sc->sc_link.adapter_softc = sc;
 	sc->sc_link.adapter = &cac_switch;
-	sc->sc_link.adapter_target = cinfo.num_drvs;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.adapter_buswidth = cinfo.num_drvs;
 	sc->sc_link.openings = CAC_MAX_CCBS / sc->sc_nunits;
 	if (sc->sc_link.openings < 4 )
 		sc->sc_link.openings = 4;
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	config_found(&sc->sc_dv, &saa, scsiprint);
@@ -559,14 +557,6 @@ cac_get_dinfo(sc, target)
 	}
 
 	return (0);
-}
-
-void
-cacminphys(struct buf *bp, struct scsi_link *sl)
-{
-	if (bp->b_bcount > CAC_MAX_XFER)
-		bp->b_bcount = CAC_MAX_XFER;
-	minphys(bp);
 }
 
 void

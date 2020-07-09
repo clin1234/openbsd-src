@@ -1,4 +1,4 @@
-# $OpenBSD: RAMDISK,v 1.87 2019/05/11 14:43:27 patrick Exp $
+# $OpenBSD: RAMDISK,v 1.131 2020/06/25 12:44:09 patrick Exp $
 #
 # GENERIC machine description file
 #
@@ -21,8 +21,6 @@
 machine		arm64
 maxusers	4
 
-option		TIMEZONE=0	# time zone to adjust RTC time by
-option		DST=0		# daylight saving time used by RTC
 option		PCIVERBOSE
 option		USBVERBOSE
 option		SMALL_KERNEL
@@ -98,6 +96,7 @@ plrtc*		at fdt?
 pluart*		at fdt?
 psci*		at fdt? early 1
 syscon*		at fdt? early 1
+pwmfan*		at fdt?
 
 virtio*		at fdt?
 virtio*		at pci?
@@ -114,23 +113,55 @@ wsdisplay*	at simplefb?
 imxccm*		at fdt? early 1
 imxiomuxc*	at fdt? early 1
 imxanatop*	at fdt? early 1
+imxsrc*		at fdt? early 1
+imxehci*	at fdt?
+usb*		at imxehci?
 imxgpc*		at fdt?
 imxgpio*	at fdt?
 fec*		at fdt?
 imxuart*	at fdt?
 imxiic*		at fdt?
 iic*		at imxiic?
+bdpmic*		at iic?
 imxesdhc*	at fdt?
 sdmmc*		at imxesdhc?
-imxsrc*		at fdt?
+imxpciephy*	at fdt?
 
-# Raspberry Pi 3
-bcmaux*		at fdt?
-bcmintc*	at fdt?
+# Raspberry Pi 3/4
+bcmaux*		at fdt? early 1
+bcmbsc*		at fdt?
+iic*		at bcmbsc?
+bcmclock*	at fdt? early 1
+bcmdmac*	at fdt? early 1
 bcmdog*		at fdt?
+bcmgpio*	at fdt? early 1
+bcmintc*	at fdt? early 1
+bcmirng*	at fdt?
+bcmmbox*	at fdt? early 1
+bcmpcie*	at fdt?
+pci*		at bcmpcie?
 bcmrng*		at fdt?
+bcmsdhost*	at fdt?
+sdmmc*		at bcmsdhost?
+bse*		at fdt?
+bse*		at acpi?
 dwctwo*		at fdt?
 usb*		at dwctwo?
+
+# Amlogic SoCs
+amlclock*	at fdt? early 1
+amldwusb*	at fdt?
+amliic*		at fdt?
+iic*		at amliic?
+amlmmc*		at fdt?
+sdmmc*		at amlmmc?
+amlpciephy*	at fdt?
+amlpinctrl*	at fdt? early 1
+amlpwrc*	at fdt? early 1
+amlreset*	at fdt? early 1
+amlrng*		at fdt?
+amluart*	at fdt?
+amlusbphy*	at fdt?
 
 # HiSilicon SoCs
 hiclock*	at fdt? early 1
@@ -142,22 +173,33 @@ mvclock*	at fdt? early 1
 mvgicp*		at fdt? early 1
 mvicu*		at fdt? early 1
 mvpinctrl*	at fdt? early 1
+mvdog*		at fdt?
 mvgpio*		at fdt?
+mviic*		at fdt?
+iic*		at mviic?
+mvkpcie*	at fdt?
+pci*		at mvkpcie?
 mvmdio*		at fdt?
 mvneta*		at fdt?
+#mvppc*		at fdt?
+#mvpp*		at mvppc?
 mvrng*		at fdt?
 mvrtc*		at fdt?
 mvuart*		at fdt?
+sfp*		at fdt?
 
 # Rockchip SoCs
 rkclock*	at fdt? early 1
 rkgrf*		at fdt? early 1
 rkpinctrl*	at fdt? early 1
+rkemmcphy*	at fdt?
 rkgpio*		at fdt?
 rkiic*		at fdt?
 iic*		at rkiic?
 rkpcie*		at fdt?
 pci*		at rkpcie?
+rkpwm*		at fdt?
+rkrng*		at fdt?
 rkdwusb*	at fdt?
 dwmmc*		at fdt?
 sdmmc*		at dwmmc?
@@ -166,10 +208,13 @@ sdmmc*		at dwmmc?
 sxipio*		at fdt? early 1	# GPIO pins for leds & PHYs
 gpio*		at sxipio?
 sxiccmu*	at fdt? early 1	# Clock Control Module/Unit
+sxidog*		at fdt?
 sxirsb*		at fdt? early 1	# Reduced Serial Bus
-sxirtc*		at fdt?		# Real Time Clock
+sxirtc*		at fdt? early 1	# Real Time Clock
 sximmc*		at fdt?		# SD/MMC card controller
 sdmmc*		at sximmc?	# SD/MMC bus
+sxisid*		at fdt? early 1
+sxisyscon*	at fdt? early 1	# System controller
 sxitwi*		at fdt?		# I2C controller
 iic*		at sxitwi?	# I2C bus
 dwxe*		at fdt?
@@ -182,9 +227,14 @@ pci*		at ppb?
 bnxt*		at pci?			# Broadcom BCM573xx, BCM574xx
 em*		at pci?			# Intel Pro/1000 Ethernet
 ix*		at pci?			# Intel 82598EB 10Gb Ethernet
+mcx*		at pci?			# Mellanox ConnectX-4/5 Ethernet
 mskc*		at pci?			# Marvell Yukon-2
 msk*		at mskc?		#  each port of above
 re*		at pci?			# Realtek 8169/8169S/8110S
+rge*		at pci?			# Realtek 8125
+
+# PCI WiFi
+bwfm*		at pci?			# Broadcom FullMAC
 
 # PCI SCSI
 ahci*		at pci? flags 0x0000	# AHCI SATA controllers
@@ -238,9 +288,11 @@ upgt*		at uhub?		# Conexant/Intersil PrismGT SoftMAC USB
 urtw*		at uhub?		# Realtek 8187
 rsu*		at uhub?		# Realtek RTL8188SU/RTL8191SU/RTL8192SU
 urtwn*		at uhub?		# Realtek RTL8188CU/RTL8192CU
+bwfm*		at uhub?		# Broadcom FullMAC
 
 amphy*		at mii?			# AMD 79C873 PHYs
 atphy*		at mii?			# Attansic F1 PHYs
+brgphy*		at mii?			# Broadcom Gigabit PHYs
 eephy*		at mii?			# Marvell 88E1000 series PHY
 rgephy*		at mii?			# Realtek 8169S/8110S PHY
 rlphy*		at mii?			# Realtek 8139 internal PHYs
@@ -256,9 +308,15 @@ uk*		at scsibus?
 
 # I2C devices
 abcrtc*		at iic?			# Abracon x80x RTC
-islrtc*		at iic?			# ISL1208 RTC
-rkpmic*		at iic?			# RK808 PMIC
+dsxrtc*		at iic?			# DS3231 RTC
 fusbtc*		at iic?			# USB Type-C controller
+islrtc*		at iic?			# ISL1208 RTC
+maxrtc*		at iic?			# DS1307 RTC
+mcprtc*		at iic?			# MCP794XX RTC
+pcfrtc*		at iic?			# PCF8523 RTC
+pcxrtc*		at iic?			# PCF8563 RTC
+rkpmic*		at iic?			# RK808 PMIC
+tcpci*		at iic?			# USB Type-C controller
 
 pseudo-device	loop 1
 pseudo-device	vlan

@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpath_emc.c,v 1.21 2015/03/14 03:38:52 jsg Exp $ */
+/*	$OpenBSD: mpath_emc.c,v 1.23 2020/06/30 18:43:37 krw Exp $ */
 
 /*
  * Copyright (c) 2011 David Gwynne <dlg@openbsd.org>
@@ -116,7 +116,7 @@ int
 emc_match(struct device *parent, void *match, void *aux)
 {
 	struct scsi_attach_args *sa = aux;
-	struct scsi_inquiry_data *inq = sa->sa_inqbuf;
+	struct scsi_inquiry_data *inq = &sa->sa_sc_link->inqdata;
 	struct emc_device *s;
 	int i;
 
@@ -180,7 +180,6 @@ int
 emc_activate(struct device *self, int act)
 {
 	struct emc_softc *sc = (struct emc_softc *)self;
-	int rv = 0;
 
 	switch (act) {
 	case DVACT_DEACTIVATE:
@@ -188,7 +187,7 @@ emc_activate(struct device *self, int act)
 			mpath_path_detach(&sc->sc_path);
 		break;
 	}
-	return (rv);
+	return (0);
 }
 
 void

@@ -1,7 +1,7 @@
-/*	$OpenBSD: rthread_sem.c,v 1.30 2019/01/29 17:43:23 mpi Exp $ */
+/*	$OpenBSD: rthread_sem.c,v 1.32 2020/04/06 00:01:08 pirofti Exp $ */
 /*
  * Copyright (c) 2004,2005,2013 Ted Unangst <tedu@openbsd.org>
- * Copyright (c) 2018 Paul Irofti <pirofti@openbsd.org>
+ * Copyright (c) 2018 Paul Irofti <paul@irofti.net>
  * All Rights Reserved.
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -22,7 +22,6 @@
 #include <sys/stat.h>
 #include <sys/atomic.h>
 #include <sys/time.h>
-#include <sys/futex.h>
 
 #include <errno.h>
 #include <fcntl.h>

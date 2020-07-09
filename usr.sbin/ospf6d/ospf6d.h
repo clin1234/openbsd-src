@@ -1,4 +1,4 @@
-/*	$OpenBSD: ospf6d.h,v 1.39 2018/12/29 16:04:31 remi Exp $ */
+/*	$OpenBSD: ospf6d.h,v 1.49 2020/05/17 18:29:25 denis Exp $ */
 
 /*
  * Copyright (c) 2004, 2007 Esben Norby <norby@openbsd.org>
@@ -103,8 +103,6 @@ enum imsg_type {
 	IMSG_KROUTE_CHANGE,
 	IMSG_KROUTE_DELETE,
 	IMSG_IFINFO,
-	IMSG_IFADD,
-	IMSG_IFDELETE,
 	IMSG_IFADDRNEW,
 	IMSG_IFADDRDEL,
 	IMSG_NEIGHBOR_UP,
@@ -112,6 +110,7 @@ enum imsg_type {
 	IMSG_NEIGHBOR_CHANGE,
 	IMSG_NETWORK_ADD,
 	IMSG_NETWORK_DEL,
+	IMSG_AREA_CHANGE,
 	IMSG_DD,
 	IMSG_DD_END,
 	IMSG_DB_SNAPSHOT,
@@ -304,10 +303,10 @@ struct iface {
 	struct in6_addr		 addr;
 	struct in6_addr		 dst;
 	struct in_addr		 abr_id;
-	struct in_addr		 area_id;
 	struct nbr		*dr;	/* designated router */
 	struct nbr		*bdr;	/* backup designated router */
 	struct nbr		*self;
+	struct area		*area;
 
 	u_int64_t		 baudrate;
 	u_int32_t		 ls_ack_cnt;
@@ -331,7 +330,6 @@ struct iface {
 	u_int8_t		 cflags;
 #define F_IFACE_PASSIVE		0x01
 #define F_IFACE_CONFIGURED	0x02
-#define F_IFACE_AVAIL		0x04
 };
 
 struct ifaddrchange {
@@ -364,13 +362,14 @@ struct redistribute {
 	u_int8_t			prefixlen;
 	char				dependon[IFNAMSIZ];
 };
+SIMPLEQ_HEAD(redist_list, redistribute);
 
 struct ospfd_conf {
 	struct event		ev;
 	struct in_addr		rtr_id;
 	LIST_HEAD(, area)	area_list;
 	LIST_HEAD(, vertex)	cand_list;
-	SIMPLEQ_HEAD(, redistribute) redist_list;
+	struct redist_list	redist_list;
 
 	u_int32_t		opts;
 #define OSPFD_OPT_VERBOSE	0x00000001
@@ -384,6 +383,7 @@ struct ospfd_conf {
 	int			spf_state;
 	int			ospf_socket;
 	int			flags;
+	int			redist_label_or_prefix;
 	u_int8_t		border;
 	u_int8_t		redistribute;
 	u_int8_t		fib_priority;
@@ -421,7 +421,6 @@ extern struct n2id_labels rt_labels;
 struct ctl_iface {
 	char			 name[IF_NAMESIZE];
 	struct in6_addr		 addr;
-	struct in6_addr		 mask;
 	struct in_addr		 area;
 	struct in_addr		 rtr_id;
 	struct in_addr		 dr_id;
@@ -481,6 +480,7 @@ struct ctl_rt {
 	enum dst_type		 d_type;
 	u_int8_t		 flags;
 	u_int8_t		 prefixlen;
+	u_int8_t		 connected;
 };
 
 struct ctl_sum {
@@ -509,7 +509,7 @@ struct demote_msg {
 struct area	*area_new(void);
 int		 area_del(struct area *);
 struct area	*area_find(struct ospfd_conf *, struct in_addr);
-void		 area_track(struct area *, int);
+void		 area_track(struct area *);
 int		 area_border_router(struct ospfd_conf *);
 u_int32_t	 area_ospf_options(struct area *);
 
@@ -522,6 +522,7 @@ int		 carp_demote_set(char *, int);
 /* parse.y */
 struct ospfd_conf	*parse_config(char *, int);
 int			 cmdline_symset(char *);
+void			 conf_clear_redist_list(struct redist_list *);
 
 /* interface.c */
 int		 if_init(void);
@@ -538,15 +539,16 @@ u_int16_t	 in_cksum(void *, size_t);
 u_int16_t	 iso_cksum(void *, u_int16_t, u_int16_t);
 
 /* kroute.c */
-int		 kr_init(int, u_int, u_int8_t);
+int		 kr_init(int, u_int, int, u_int8_t);
 int		 kr_change(struct kroute *, int);
 int		 kr_delete(struct kroute *);
 void		 kr_shutdown(void);
 void		 kr_fib_couple(void);
 void		 kr_fib_decouple(void);
+void		 kr_fib_update_prio(u_int8_t);
 void		 kr_dispatch_msg(int, short, void *);
 void		 kr_show_route(struct imsg *);
-void		 kr_reload(void);
+void		 kr_reload(int);
 
 void		 embedscope(struct sockaddr_in6 *);
 void		 recoverscope(struct sockaddr_in6 *);

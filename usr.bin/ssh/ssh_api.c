@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh_api.c,v 1.15 2019/01/21 10:38:54 djm Exp $ */
+/* $OpenBSD: ssh_api.c,v 1.20 2020/07/01 16:28:31 markus Exp $ */
 /*
  * Copyright (c) 2012 Markus Friedl.  All rights reserved.
  *
@@ -14,6 +14,11 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+
+#include <sys/types.h>
+
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "ssh_api.h"
 #include "compat.h"
@@ -45,8 +50,11 @@ int	_ssh_host_key_sign(struct ssh *, struct sshkey *, struct sshkey *,
  */
 int	use_privsep = 0;
 int	mm_sshkey_sign(struct sshkey *, u_char **, u_int *,
-    u_char *, u_int, char *, u_int);
+    const u_char *, u_int, const char *, const char *, u_int);
+
+#ifdef WITH_OPENSSL
 DH	*mm_choose_dh(int, int, int);
+#endif
 
 /* Define these two variables here so that they are part of the library */
 u_char *session_id2 = NULL;
@@ -54,16 +62,19 @@ u_int session_id2_len = 0;
 
 int
 mm_sshkey_sign(struct sshkey *key, u_char **sigp, u_int *lenp,
-    u_char *data, u_int datalen, char *alg, u_int compat)
+    const u_char *data, u_int datalen, const char *alg, const char *sk_provider,
+    u_int compat)
 {
 	return (-1);
 }
 
+#ifdef WITH_OPENSSL
 DH *
 mm_choose_dh(int min, int nbits, int max)
 {
 	return (NULL);
 }
+#endif
 
 /* API */
 
@@ -77,7 +88,9 @@ ssh_init(struct ssh **sshp, int is_server, struct kex_params *kex_params)
 	int r;
 
 	if (!called) {
+#ifdef WITH_OPENSSL
 		OpenSSL_add_all_algorithms();
+#endif
 		called = 1;
 	}
 
@@ -133,7 +146,6 @@ ssh_free(struct ssh *ssh)
 {
 	struct key_entry *k;
 
-	ssh_packet_close(ssh);
 	/*
 	 * we've only created the public keys variants in case we
 	 * are a acting as a server.
@@ -148,8 +160,7 @@ ssh_free(struct ssh *ssh)
 		TAILQ_REMOVE(&ssh->private_keys, k, next);
 		free(k);
 	}
-	if (ssh->kex)
-		kex_free(ssh->kex);
+	ssh_packet_close(ssh);
 	free(ssh);
 }
 
@@ -312,8 +323,8 @@ _ssh_read_banner(struct ssh *ssh, struct sshbuf *banner)
 	const char *mismatch = "Protocol mismatch.\r\n";
 	const u_char *s = sshbuf_ptr(input);
 	u_char c;
-	char *cp, *remote_version;
-	int r, remote_major, remote_minor, expect_nl;
+	char *cp = NULL, *remote_version = NULL;
+	int r = 0, remote_major, remote_minor, expect_nl;
 	size_t n, j;
 
 	for (j = n = 0;;) {
@@ -339,10 +350,8 @@ _ssh_read_banner(struct ssh *ssh, struct sshbuf *banner)
 		if (sshbuf_len(banner) >= 4 &&
 		    memcmp(sshbuf_ptr(banner), "SSH-", 4) == 0)
 			break;
-		if ((cp = sshbuf_dup_string(banner)) == NULL)
-			return SSH_ERR_ALLOC_FAIL;
-		debug("%s: %s", __func__, cp);
-		free(cp);
+		debug("%s: %.*s", __func__, (int)sshbuf_len(banner),
+		    sshbuf_ptr(banner));
 		/* Accept lines before banner only on client */
 		if (ssh->kex->server || ++n > SSH_MAX_PRE_BANNER_LINES) {
   bad:
@@ -355,19 +364,22 @@ _ssh_read_banner(struct ssh *ssh, struct sshbuf *banner)
 	if ((r = sshbuf_consume(input, j)) != 0)
 		return r;
 
-	if ((cp = sshbuf_dup_string(banner)) == NULL)
-		return SSH_ERR_ALLOC_FAIL;
 	/* XXX remote version must be the same size as banner for sscanf */
-	if ((remote_version = calloc(1, sshbuf_len(banner))) == NULL)
-		return SSH_ERR_ALLOC_FAIL;
+	if ((cp = sshbuf_dup_string(banner)) == NULL ||
+	    (remote_version = calloc(1, sshbuf_len(banner))) == NULL) {
+		r = SSH_ERR_ALLOC_FAIL;
+		goto out;
+	}
 
 	/*
 	 * Check that the versions match.  In future this might accept
 	 * several versions and set appropriate flags to handle them.
 	 */
 	if (sscanf(cp, "SSH-%d.%d-%[^\n]\n",
-	    &remote_major, &remote_minor, remote_version) != 3)
-		return SSH_ERR_INVALID_FORMAT;
+	    &remote_major, &remote_minor, remote_version) != 3) {
+		r = SSH_ERR_INVALID_FORMAT;
+		goto out;
+	}
 	debug("Remote protocol version %d.%d, remote software version %.100s",
 	    remote_major, remote_minor, remote_version);
 
@@ -377,10 +389,13 @@ _ssh_read_banner(struct ssh *ssh, struct sshbuf *banner)
 		remote_minor = 0;
 	}
 	if (remote_major != 2)
-		return SSH_ERR_PROTOCOL_MISMATCH;
+		r = SSH_ERR_PROTOCOL_MISMATCH;
+
 	debug("Remote version string %.100s", cp);
+ out:
 	free(cp);
-	return 0;
+	free(remote_version);
+	return r;
 }
 
 /* Send our own protocol version identification. */
@@ -546,5 +561,5 @@ _ssh_host_key_sign(struct ssh *ssh, struct sshkey *privkey,
     const u_char *data, size_t dlen, const char *alg)
 {
 	return sshkey_sign(privkey, signature, slen, data, dlen,
-	    alg, ssh->compat);
+	    alg, NULL, ssh->compat);
 }

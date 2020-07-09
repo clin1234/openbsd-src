@@ -1,4 +1,4 @@
-.\"	$OpenBSD: acme-client.1,v 1.29 2019/02/03 20:39:35 jmc Exp $
+.\"	$OpenBSD: acme-client.1,v 1.34 2020/05/10 12:06:18 benno Exp $
 .\"
 .\" Copyright (c) 2016 Kristaps Dzonsons <kristaps@bsd.lv>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: February 3 2019 $
+.Dd $Mdocdate: May 10 2020 $
 .Dt ACME-CLIENT 1
 .Os
 .Sh NAME
@@ -22,16 +22,16 @@
 .Nd ACME client
 .Sh SYNOPSIS
 .Nm acme-client
-.Op Fl ADFnrv
+.Op Fl Fnrv
 .Op Fl f Ar configfile
-.Ar domain
+.Ar handle
 .Sh DESCRIPTION
 .Nm
 is an
 Automatic Certificate Management Environment (ACME) client:
 it looks in its configuration for a domain section
 corresponding to the
-.Ar domain
+.Ar handle
 given as command line argument
 and uses that configuration to retrieve an X.509 certificate
 which can be used to provide domain name validation
@@ -39,16 +39,6 @@ which can be used to provide domain name validation
 The certificates are typically used to provide HTTPS for web servers,
 but can be used in any situation where domain name validation is required
 (such as mail servers).
-.Pp
-Before a certificate can be requested, an account key needs to be
-created using the
-.Fl A
-argument.
-The first time a certificate is requested, a domain key needs to be created with
-.Fl D .
-So a typical invocation the first time it's run would be:
-.Pp
-.Dl # acme-client -ADv example.com
 .Pp
 If the certificate already exists and is less than 30 days from expiry,
 .Nm
@@ -76,10 +66,6 @@ location "/.well-known/acme-challenge/*" {
 .Pp
 The options are as follows:
 .Bl -tag -width Ds
-.It Fl A
-Create a new RSA account key if one does not already exist.
-.It Fl D
-Create a new RSA domain key if one does not already exist.
 .It Fl F
 Force certificate renewal, even if it's too soon.
 .It Fl f Ar configfile
@@ -91,8 +77,9 @@ Revoke the X.509 certificate.
 .It Fl v
 Verbose operation.
 Specify twice to also trace communication and data transfers.
-.It Ar domain
-The domain name.
+.It Ar handle
+The handle of the domain section of the configuration that contains the
+details of the certificate to be created, renewed or revoked.
 .El
 .Sh FILES
 .Bl -tag -width "/etc/acme-client.conf" -compact
@@ -127,7 +114,7 @@ and
 .Pa httpd.conf
 and run:
 .Pp
-.Dl # acme-client -ADv example.com && rcctl reload httpd
+.Dl # acme-client -v example.com && rcctl reload httpd
 .Pp
 A
 .Xr cron 8
@@ -136,8 +123,8 @@ On renewal,
 .Xr httpd 8
 is reloaded:
 .Bd -literal -offset indent
-0	*	*	*	*	sleep $((RANDOM \e% 2048)) && \e
-	acme-client example.com && rcctl reload httpd
+~	*	*	*	*	acme-client example.com && \e
+	rcctl reload httpd
 .Ed
 .Sh SEE ALSO
 .Xr openssl 1 ,
@@ -145,7 +132,12 @@ is reloaded:
 .Xr httpd.conf 5
 .Sh STANDARDS
 .Rs
-.%U https://tools.ietf.org/html/draft-ietf-acme-acme-03
+.%A R. Barnes
+.%A J. Hoffman-Andrews
+.%A D. McCarney
+.%A J. Kasten
+.%D March 2019
+.%R RFC 8555
 .%T Automatic Certificate Management Environment (ACME)
 .Re
 .Sh HISTORY
@@ -158,10 +150,3 @@ The
 .Nm
 utility was written by
 .An Kristaps Dzonsons Aq Mt kristaps@bsd.lv .
-.Sh BUGS
-The challenge and certificate processes currently retain their (root)
-privileges.
-.Pp
-For the time being,
-.Nm
-only supports RSA as an account key format.

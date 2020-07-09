@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mue.c,v 1.5 2018/09/19 07:47:54 mestre Exp $	*/
+/*	$OpenBSD: if_mue.c,v 1.8 2020/06/09 07:43:39 gerhard Exp $	*/
 
 /*
  * Copyright (c) 2018 Kevin Lo <kevlo@openbsd.org>
@@ -855,10 +855,6 @@ mue_detach(struct device *self, int flags)
 		if_detach(ifp);
 	}
 
-	if (--sc->mue_refcnt >= 0) {
-		/* Wait for processes to go away. */
-		usb_detach_wait(&sc->mue_dev);
-	}
 	splx(s);
 
 	return (0);
@@ -991,6 +987,7 @@ mue_encap(struct mue_softc *sc, struct mbuf *m, int idx)
 	/* Transmit */
 	err = usbd_transfer(c->mue_xfer);
 	if (err != USBD_IN_PROGRESS) {
+		c->mue_mbuf = NULL;
 		mue_stop(sc);
 		return(EIO);
 	}
@@ -1312,16 +1309,15 @@ mue_start(struct ifnet *ifp)
 	if (ifq_is_oactive(&ifp->if_snd))
 		return;
 
-	m_head = ifq_deq_begin(&ifp->if_snd);
+	m_head = ifq_dequeue(&ifp->if_snd);
 	if (m_head == NULL)
 		return;
 
 	if (mue_encap(sc, m_head, 0)) {
-		ifq_deq_rollback(&ifp->if_snd, m_head);
+		m_freem(m_head);
 		ifq_set_oactive(&ifp->if_snd);
 		return;
 	}
-	ifq_deq_commit(&ifp->if_snd, m_head);
 
 	/* If there's a BPF listener, bounce a copy of this frame to him. */
 #if NBPFILTER > 0
@@ -1339,6 +1335,8 @@ void
 mue_stop(struct mue_softc *sc)
 {
 	struct ifnet *ifp;
+	usbd_status err;
+	int i;
 
 	ifp = GET_IFP(sc);
 	ifp->if_timer = 0;
@@ -1346,6 +1344,61 @@ mue_stop(struct mue_softc *sc)
 	ifq_clr_oactive(&ifp->if_snd);
 
 	timeout_del(&sc->mue_stat_ch);
+
+	/* Stop transfers. */
+	if (sc->mue_ep[MUE_ENDPT_RX] != NULL) {
+		usbd_abort_pipe(sc->mue_ep[MUE_ENDPT_RX]);
+		err = usbd_close_pipe(sc->mue_ep[MUE_ENDPT_RX]);
+		if (err) {
+			printf("%s: close rx pipe failed: %s\n",
+			    sc->mue_dev.dv_xname, usbd_errstr(err));
+		}
+		sc->mue_ep[MUE_ENDPT_RX] = NULL;
+	}
+
+	if (sc->mue_ep[MUE_ENDPT_TX] != NULL) {
+		usbd_abort_pipe(sc->mue_ep[MUE_ENDPT_TX]);
+		err = usbd_close_pipe(sc->mue_ep[MUE_ENDPT_TX]);
+		if (err) {
+			printf("%s: close tx pipe failed: %s\n",
+			    sc->mue_dev.dv_xname, usbd_errstr(err));
+		}
+		sc->mue_ep[MUE_ENDPT_TX] = NULL;
+	}
+
+	if (sc->mue_ep[MUE_ENDPT_INTR] != NULL) {
+		usbd_abort_pipe(sc->mue_ep[MUE_ENDPT_INTR]);
+		err = usbd_close_pipe(sc->mue_ep[MUE_ENDPT_INTR]);
+		if (err) {
+			printf("%s: close intr pipe failed: %s\n",
+			    sc->mue_dev.dv_xname, usbd_errstr(err));
+		}
+		sc->mue_ep[MUE_ENDPT_INTR] = NULL;
+	}
+
+	/* Free RX resources. */
+	for (i = 0; i < MUE_RX_LIST_CNT; i++) {
+		if (sc->mue_cdata.mue_rx_chain[i].mue_mbuf != NULL) {
+			m_freem(sc->mue_cdata.mue_rx_chain[i].mue_mbuf);
+			sc->mue_cdata.mue_rx_chain[i].mue_mbuf = NULL;
+		}
+		if (sc->mue_cdata.mue_rx_chain[i].mue_xfer != NULL) {
+			usbd_free_xfer(sc->mue_cdata.mue_rx_chain[i].mue_xfer);
+			sc->mue_cdata.mue_rx_chain[i].mue_xfer = NULL;
+		}
+	}
+
+	/* Free TX resources. */
+	for (i = 0; i < MUE_TX_LIST_CNT; i++) {
+		if (sc->mue_cdata.mue_tx_chain[i].mue_mbuf != NULL) {
+			m_freem(sc->mue_cdata.mue_tx_chain[i].mue_mbuf);
+			sc->mue_cdata.mue_tx_chain[i].mue_mbuf = NULL;
+		}
+		if (sc->mue_cdata.mue_tx_chain[i].mue_xfer != NULL) {
+			usbd_free_xfer(sc->mue_cdata.mue_tx_chain[i].mue_xfer);
+			sc->mue_cdata.mue_tx_chain[i].mue_xfer = NULL;
+		}
+	}
 
 	sc->mue_link = 0;
 }

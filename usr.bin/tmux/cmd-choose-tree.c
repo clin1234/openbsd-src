@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-choose-tree.c,v 1.42 2018/11/15 10:38:53 kn Exp $ */
+/* $OpenBSD: cmd-choose-tree.c,v 1.47 2020/05/16 16:02:24 nicm Exp $ */
 
 /*
  * Copyright (c) 2012 Thomas Adam <thomas@xteddy.org>
@@ -30,8 +30,8 @@ const struct cmd_entry cmd_choose_tree_entry = {
 	.name = "choose-tree",
 	.alias = NULL,
 
-	.args = { "F:Gf:NO:st:wZ", 0, 1 },
-	.usage = "[-GNsw] [-F format] [-f filter] [-O sort-order] "
+	.args = { "F:Gf:NO:rst:wZ", 0, 1 },
+	.usage = "[-GNrswZ] [-F format] [-f filter] [-O sort-order] "
 	         CMD_TARGET_PANE_USAGE " [template]",
 
 	.target = { 't', CMD_FIND_PANE, 0 },
@@ -44,8 +44,8 @@ const struct cmd_entry cmd_choose_client_entry = {
 	.name = "choose-client",
 	.alias = NULL,
 
-	.args = { "F:f:NO:t:Z", 0, 1 },
-	.usage = "[-N] [-F format] [-f filter] [-O sort-order] "
+	.args = { "F:f:NO:rt:Z", 0, 1 },
+	.usage = "[-NrZ] [-F format] [-f filter] [-O sort-order] "
 	         CMD_TARGET_PANE_USAGE " [template]",
 
 	.target = { 't', CMD_FIND_PANE, 0 },
@@ -58,9 +58,22 @@ const struct cmd_entry cmd_choose_buffer_entry = {
 	.name = "choose-buffer",
 	.alias = NULL,
 
-	.args = { "F:f:NO:t:Z", 0, 1 },
-	.usage = "[-N] [-F format] [-f filter] [-O sort-order] "
+	.args = { "F:f:NO:rt:Z", 0, 1 },
+	.usage = "[-NrZ] [-F format] [-f filter] [-O sort-order] "
 	         CMD_TARGET_PANE_USAGE " [template]",
+
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = 0,
+	.exec = cmd_choose_tree_exec
+};
+
+const struct cmd_entry cmd_customize_mode_entry = {
+	.name = "customize-mode",
+	.alias = NULL,
+
+	.args = { "F:f:Nt:Z", 0, 0 },
+	.usage = "[-NZ] [-F format] [-f filter] " CMD_TARGET_PANE_USAGE,
 
 	.target = { 't', CMD_FIND_PANE, 0 },
 
@@ -71,21 +84,24 @@ const struct cmd_entry cmd_choose_buffer_entry = {
 static enum cmd_retval
 cmd_choose_tree_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args			*args = self->args;
-	struct window_pane		*wp = item->target.wp;
+	struct args			*args = cmd_get_args(self);
+	struct cmd_find_state		*target = cmdq_get_target(item);
+	struct window_pane		*wp = target->wp;
 	const struct window_mode	*mode;
 
-	if (self->entry == &cmd_choose_buffer_entry) {
+	if (cmd_get_entry(self) == &cmd_choose_buffer_entry) {
 		if (paste_get_top(NULL) == NULL)
 			return (CMD_RETURN_NORMAL);
 		mode = &window_buffer_mode;
-	} else if (self->entry == &cmd_choose_client_entry) {
+	} else if (cmd_get_entry(self) == &cmd_choose_client_entry) {
 		if (server_client_how_many() == 0)
 			return (CMD_RETURN_NORMAL);
 		mode = &window_client_mode;
-	} else
+	} else if (cmd_get_entry(self) == &cmd_customize_mode_entry)
+		mode = &window_customize_mode;
+	else
 		mode = &window_tree_mode;
 
-	window_pane_set_mode(wp, mode, &item->target, args);
+	window_pane_set_mode(wp, NULL, mode, target, args);
 	return (CMD_RETURN_NORMAL);
 }

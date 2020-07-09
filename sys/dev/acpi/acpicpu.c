@@ -1,4 +1,4 @@
-/* $OpenBSD: acpicpu.c,v 1.83 2018/09/19 05:23:16 guenther Exp $ */
+/* $OpenBSD: acpicpu.c,v 1.85 2020/05/27 05:02:21 jsg Exp $ */
 /*
  * Copyright (c) 2005 Marco Peereboom <marco@openbsd.org>
  * Copyright (c) 2015 Philip Guenther <guenther@openbsd.org>
@@ -472,7 +472,7 @@ acpicpu_add_cdeppkg(struct aml_value *val, void *arg)
 
 	/*
 	 * errors: unexpected object type, bad length, mismatched length,
-	 * and bad CSD revision 
+	 * and bad CSD revision
 	 */
 	if (val->type != AML_OBJTYPE_PACKAGE || val->length < 6 ||
 	    val->length != val->v_package[0]->v_integer ||
@@ -1224,7 +1224,8 @@ acpicpu_idle(void)
 		atomic_setbits_int(&ci->ci_mwait, MWAIT_IDLING);
 		if (cpu_is_idle(ci)) {
 			/* intel errata AAI65: cflush before monitor */
-			if (ci->ci_cflushsz != 0) {
+			if (ci->ci_cflushsz != 0 &&
+			    strcmp(cpu_vendor, "GenuineIntel") == 0) {
 				membar_sync();
 				clflush((unsigned long)&ci->ci_mwait);
 				membar_sync();

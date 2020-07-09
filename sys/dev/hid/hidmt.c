@@ -1,4 +1,4 @@
-/* $OpenBSD: hidmt.c,v 1.9 2018/08/25 20:31:31 jcs Exp $ */
+/* $OpenBSD: hidmt.c,v 1.11 2020/02/10 14:35:08 patrick Exp $ */
 /*
  * HID multitouch driver for devices conforming to Windows Precision Touchpad
  * standard
@@ -176,6 +176,8 @@ hidmt_setup(struct device *self, struct hidmt *mt, void *desc, int dlen)
 
 		if (h.report_ID != mt->sc_rep_input)
 			continue;
+		if (h.kind != hid_input)
+			continue;
 
 		switch (h.usage) {
 		/* contact level usages */
@@ -202,6 +204,8 @@ hidmt_setup(struct device *self, struct hidmt *mt, void *desc, int dlen)
 		/* report level usages */
 		case HID_USAGE2(HUP_DIGITIZERS, HUD_CONTACTCOUNT):
 		case HID_USAGE2(HUP_BUTTON, 0x01):
+		case HID_USAGE2(HUP_BUTTON, 0x02):
+		case HID_USAGE2(HUP_BUTTON, 0x03):
 			break;
 		default:
 			continue;
@@ -296,7 +300,7 @@ hidmt_input(struct hidmt *mt, uint8_t *data, u_int len)
 	struct hidmt_data *hi;
 	struct hidmt_contact hc;
 	int32_t d, firstu = 0;
-	int contactcount = 0, seencontacts = 0, tips = 0, i, s, z;
+	int contactcount = 0, seencontacts = 0, tips = 0, buttons = 0, i, s, z;
 
 	if (len != mt->sc_rep_input_size) {
 		DPRINTF(("%s: %s: length %d not %d, ignoring\n",
@@ -407,7 +411,13 @@ hidmt_input(struct hidmt *mt, uint8_t *data, u_int len)
 				contactcount = d;
 			break;
 		case HID_USAGE2(HUP_BUTTON, 0x01):
-			mt->sc_button = (d != 0);
+		case HID_USAGE2(HUP_BUTTON, 0x02):
+			if (d != 0)
+				buttons |= 1;
+			break;
+		case HID_USAGE2(HUP_BUTTON, 0x03):
+			if (d != 0)
+				buttons |= 1 << 2;
 			break;
 		}
 	}
@@ -421,7 +431,10 @@ hidmt_input(struct hidmt *mt, uint8_t *data, u_int len)
 	}
 
 	s = spltty();
-	wsmouse_buttons(mt->sc_wsmousedev, mt->sc_button);
+	if (mt->sc_buttons != buttons) {
+		wsmouse_buttons(mt->sc_wsmousedev, buttons);
+		mt->sc_buttons = buttons;
+	}
 	for (i = 0; i < HIDMT_MAX_CONTACTS; i++) {
 		if (!mt->sc_contacts[i].seen)
 			continue;
@@ -430,7 +443,7 @@ hidmt_input(struct hidmt *mt, uint8_t *data, u_int len)
 
 		DPRINTF(("%s: %s: contact %d of %d: id %d, x %d, y %d, "
 		    "touch %d, confidence %d, width %d, height %d "
-		    "(button %d)\n",
+		    "(button 0x%x)\n",
 		    mt->sc_device->dv_xname, __func__,
 		    i + 1, contactcount,
 		    mt->sc_contacts[i].contactid,
@@ -440,7 +453,7 @@ hidmt_input(struct hidmt *mt, uint8_t *data, u_int len)
 		    mt->sc_contacts[i].confidence,
 		    mt->sc_contacts[i].width,
 		    mt->sc_contacts[i].height,
-		    mt->sc_button));
+		    mt->sc_buttons));
 
 		if (mt->sc_contacts[i].tip && !mt->sc_contacts[i].confidence)
 			continue;

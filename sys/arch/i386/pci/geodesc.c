@@ -1,4 +1,4 @@
-/*	$OpenBSD: geodesc.c,v 1.13 2014/12/10 12:27:56 mikeb Exp $	*/
+/*	$OpenBSD: geodesc.c,v 1.15 2020/07/06 13:33:07 pirofti Exp $	*/
 
 /*
  * Copyright (c) 2003 Markus Friedl <markus@openbsd.org>
@@ -65,7 +65,9 @@ struct timecounter geodesc_timecounter = {
 	0xffffffff,		/* counter_mask */
 	27000000,		/* frequency */
 	"GEOTSC",		/* name */
-	2000			/* quality */
+	2000,			/* quality */
+	NULL,			/* private bits */
+	0			/* expose to user */
 };
 
 int
@@ -75,7 +77,7 @@ geodesc_match(struct device *parent, void *match, void *aux)
 
 	if (PCI_VENDOR(pa->pa_id) == PCI_VENDOR_NS &&
 	    (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_NS_SC1100_XBUS ||
-	     PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_NS_SCx200_XBUS))
+	     PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_NS_SCX200_XBUS))
 		return (1);
 	return (0);
 }

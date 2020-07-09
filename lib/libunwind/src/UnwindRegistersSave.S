@@ -168,7 +168,7 @@ DEFINE_LIBUNWIND_FUNCTION(unw_getcontext)
   mflo  $8
   sw    $8,  (4 * 34)($4)
 #ifdef __mips_hard_float
-#if __mips_fpr == 32
+#if __mips_fpr != 64
   sdc1  $f0, (4 * 36 + 8 * 0)($4)
   sdc1  $f2, (4 * 36 + 8 * 2)($4)
   sdc1  $f4, (4 * 36 + 8 * 4)($4)
@@ -599,8 +599,8 @@ DEFINE_LIBUNWIND_FUNCTION(unw_getcontext)
   stw     %r30,128(%r3)
   stw     %r31,132(%r3)
 
-  // save VRSave register
-  mfspr  %r0,256
+  // zero VRSave register; saveVectorRegisters() will save it
+  li     %r0,0
   stw    %r0,156(%r3)
   // save CR registers
   mfcr  %r0
@@ -643,12 +643,29 @@ DEFINE_LIBUNWIND_FUNCTION(unw_getcontext)
   stfd    %f30,400(%r3)
   stfd    %f31,408(%r3)
 
+  li  %r3, 0    // return UNW_ESUCCESS
+  blr
 
-  // save vector registers
+//
+// void libunwind::Registers_ppc::saveVectorRegisters() const
+//
+// On entry:
+//  thread_state pointer is in r3
+//
+DEFINE_LIBUNWIND_PRIVATE_FUNCTION(_ZNK9libunwind13Registers_ppc19saveVectorRegistersEv)
+  // return if we have already saved VRsave
+  lwz    %r0,156(%r3)
+  cmpwi  %r0,0
+  bnelr
 
-  subi  %r4,%r1,16
-  rlwinm  %r4,%r4,0,0,27  // mask low 4-bits
-  // r4 is now a 16-byte aligned pointer into the red zone
+  stwu   %r1,-32(%r1)  // allocate a stack frame
+  addi   %r4,%r1,16
+  clrrwi %r4,%r4,4
+  // r4 is now a 16-byte aligned pointer
+
+  // save VRsave register
+  mfvrsave %r0
+  stw      %r0,156(%r3)
 
 #define SAVE_VECTOR_UNALIGNED(_vec, _offset) \
   stvx  _vec,0,%r4           ;\
@@ -694,9 +711,8 @@ DEFINE_LIBUNWIND_FUNCTION(unw_getcontext)
   SAVE_VECTOR_UNALIGNED(%v30, 424+0x1E0)
   SAVE_VECTOR_UNALIGNED(%v31, 424+0x1F0)
 
-  li  %r3, 0    // return UNW_ESUCCESS
+  addi   %r1,%r1,32  // drop the stack frame
   blr
-
 
 #elif defined(__arm64__) || defined(__aarch64__)
 
@@ -995,9 +1011,36 @@ DEFINE_LIBUNWIND_FUNCTION(unw_getcontext)
   retl
    stx %g4, [%o0 + 0x100]
 
-#endif
+#elif defined(__sparc__)
 
+#
+# extern int unw_getcontext(unw_context_t* thread_state)
+#
+# On entry:
+#  thread_state pointer is in o0
+#
+DEFINE_LIBUNWIND_FUNCTION(unw_getcontext)
+  ta 3
+  add %o7, 8, %o7
+  std %g0, [%o0 +   0]
+  std %g2, [%o0 +   8]
+  std %g4, [%o0 +  16]
+  std %g6, [%o0 +  24]
+  std %o0, [%o0 +  32]
+  std %o2, [%o0 +  40]
+  std %o4, [%o0 +  48]
+  std %o6, [%o0 +  56]
+  std %l0, [%o0 +  64]
+  std %l2, [%o0 +  72]
+  std %l4, [%o0 +  80]
+  std %l6, [%o0 +  88]
+  std %i0, [%o0 +  96]
+  std %i2, [%o0 + 104]
+  std %i4, [%o0 + 112]
+  std %i6, [%o0 + 120]
+  jmp %o7
+   clr %o0                   // return UNW_ESUCCESS
+#endif
 #endif /* !defined(__USING_SJLJ_EXCEPTIONS__) */
 
 NO_EXEC_STACK_DIRECTIVE
-

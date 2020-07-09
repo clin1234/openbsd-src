@@ -1,4 +1,4 @@
-/*	$OpenBSD: bpfdesc.h,v 1.38 2019/05/18 12:59:32 sashan Exp $	*/
+/*	$OpenBSD: bpfdesc.h,v 1.41 2020/05/13 21:34:37 cheloha Exp $	*/
 /*	$NetBSD: bpfdesc.h,v 1.11 1995/09/27 18:30:42 thorpej Exp $	*/
 
 /*
@@ -74,6 +74,7 @@ struct bpf_d {
 	struct bpf_if  *bd_bif;		/* interface descriptor */
 	u_long		bd_rtout;	/* Read timeout in 'ticks' */
 	u_long		bd_rdStart;	/* when the read started */
+	int		bd_rnonblock;	/* true if nonblocking reads are set */
 	struct bpf_program_smr
 		       *bd_rfilter;	/* read filter code */
 	struct bpf_program_smr
@@ -90,14 +91,14 @@ struct bpf_d {
 	int		bd_hdrcmplt;	/* false to fill in src lladdr automatically */
 	int		bd_async;	/* non-zero if packet reception should generate signal */
 	int		bd_sig;		/* signal to send upon packet reception */
-	pid_t		bd_pgid;	/* process or group id for signal */
-	uid_t		bd_siguid;	/* uid for process that set pgid */
-	uid_t		bd_sigeuid;	/* euid for process that set pgid */
+	struct sigio_ref
+			bd_sigio;	/* async I/O registration */
+	u_int		bd_ref;		/* reference count */
 	struct selinfo	bd_sel;		/* bsd select info */
 	int		bd_unit;	/* logical unit number */
 	LIST_ENTRY(bpf_d) bd_list;	/* descriptor list */
 
-	struct task	bd_wake_task;	/* delay csignal() and selwakeup() */
+	struct task	bd_wake_task;	/* delay pgsigio() and selwakeup() */
 
 	struct smr_entry
 			bd_smr;

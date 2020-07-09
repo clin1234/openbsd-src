@@ -1,6 +1,6 @@
 define(MACHINE,alpha)dnl
 vers(__file__,
-	{-$OpenBSD: MAKEDEV.md,v 1.71 2017/11/02 14:04:24 mpi Exp $-},
+	{-$OpenBSD: MAKEDEV.md,v 1.76 2020/07/06 06:11:26 dlg Exp $-},
 etc.MACHINE)dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
@@ -55,6 +55,7 @@ _DEV(ttyU, 49)
 _DEV(uall)
 _DEV(ugen, 48)
 _DEV(uhid, 46)
+_DEV(fido, 70)
 _DEV(ulpt, 47)
 _DEV(usb, 45)
 _TITLE(spec)
@@ -63,12 +64,14 @@ _DEV(bio, 53)
 _DEV(bktr, 58)
 _DEV(bpf, 11)
 _DEV(diskmap, 63)
+_DEV(dt, 32)
 _DEV(fdesc, 10)
 _DEV(fuse, 67)
 _DEV(hotplug, 56)
 _DEV(pci, 52)
 _DEV(pf, 35)
 _DEV(pppx, 64)
+_DEV(pppac, 71)
 _DEV(radio, 59)
 _DEV(rnd, 34)
 _DEV(rmidi, 41)
@@ -80,6 +83,7 @@ _DEV(uk, 33)
 _DEV(vi, 44)
 _DEV(vscsi, 61)
 _DEV(switch, 69)
+_DEV(kstat, 51)
 dnl
 divert(__mddivert)dnl
 dnl
@@ -104,7 +108,7 @@ ttyB*|ttyc*)
 dnl
 dnl *** alpha specific targets
 dnl
-twrget(all, au, audio, 0, 1, 2)dnl
+twrget(all, au, audio, 0, 1, 2, 3)dnl
 target(all, bio)dnl
 target(all, ch, 0)dnl
 target(all, vscsi, 0)dnl

@@ -1,4 +1,4 @@
-/*	$OpenBSD: spif.c,v 1.22 2018/12/27 11:09:17 claudio Exp $	*/
+/*	$OpenBSD: spif.c,v 1.24 2020/05/23 09:44:20 mpi Exp $	*/
 
 /*
  * Copyright (c) 1999-2002 Jason L. Wright (jason@thought.net)
@@ -91,6 +91,7 @@ int	sbppwrite(dev_t, struct uio *, int);
 int	sbpp_rw(dev_t, struct uio *);
 int	spifppcintr(void *);
 int	sbpppoll(dev_t, int, struct proc *);
+int	sbppkqfilter(dev_t, struct knote *);
 int	sbppioctl(dev_t, u_long, caddr_t, int, struct proc *);
 
 struct cfattach spif_ca = {
@@ -391,7 +392,7 @@ sttyopen(dev_t dev, int flags, int mode, struct proc *p)
 
 			SET(tp->t_state, TS_WOPEN);
 			error = ttysleep(tp, &tp->t_rawq, TTIPRI | PCATCH,
-			    "sttycd", 0);
+			    "sttycd");
 			if (error != 0) {
 				splx(s);
 				CLR(tp->t_state, TS_WOPEN);
@@ -1043,6 +1044,11 @@ int
 sbpppoll(dev_t dev, int events, struct proc *p)
 {
 	return (seltrue(dev, events, p));
+}
+int
+sbppkqfilter(dev_t dev, struct knote *kn)
+{
+	return (seltrue_kqfilter(dev, kn));
 }
 
 int

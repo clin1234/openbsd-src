@@ -15,6 +15,7 @@
 #include "tsig.h"
 #include "difffile.h"
 #include "rrl.h"
+#include "bitset.h"
 
 #include "configyyrename.h"
 #include "configparser.h"
@@ -24,7 +25,6 @@ int c_parse(void);
 int c_lex(void);
 int c_wrap(void);
 int c_lex_destroy(void);
-void c_error(const char *message);
 extern char* c_text;
 
 static int
@@ -52,9 +52,13 @@ nsd_options_create(region_type* region)
 	opt->ip_addresses = NULL;
 	opt->ip_transparent = 0;
 	opt->ip_freebind = 0;
+	opt->send_buffer_size = 0;
+	opt->receive_buffer_size = 0;
 	opt->debug_mode = 0;
 	opt->verbosity = 0;
 	opt->hide_version = 0;
+	opt->hide_identity = 0;
+	opt->drop_updates = 0;
 	opt->do_ip4 = 1;
 	opt->do_ip6 = 1;
 	opt->database = DBFILE;
@@ -65,9 +69,13 @@ nsd_options_create(region_type* region)
 	opt->log_time_ascii = 1;
 	opt->round_robin = 0; /* also packet.h::round_robin */
 	opt->minimal_responses = 1; /* also packet.h::minimal_responses */
+	opt->confine_to_zone = 0;
 	opt->refuse_any = 1;
 	opt->server_count = 1;
+	opt->cpu_affinity = NULL;
+	opt->service_cpu_affinity = NULL;
 	opt->tcp_count = 100;
+	opt->tcp_reject_overflow = 0;
 	opt->tcp_query_count = 0;
 	opt->tcp_timeout = TCP_TIMEOUT;
 	opt->tcp_mss = 0;
@@ -113,6 +121,10 @@ nsd_options_create(region_type* region)
 		opt->zonefiles_write = ZONEFILES_WRITE_INTERVAL;
 	else	opt->zonefiles_write = 0;
 	opt->xfrd_reload_timeout = 1;
+	opt->tls_service_key = NULL;
+	opt->tls_service_ocsp = NULL;
+	opt->tls_service_pem = NULL;
+	opt->tls_port = TLS_PORT;
 	opt->control_enable = 0;
 	opt->control_interface = NULL;
 	opt->control_port = NSD_CONTROL_PORT;
@@ -166,19 +178,11 @@ parse_options_file(struct nsd_options* opt, const char* file,
 	cfg_parser->filename = (char*)file;
 	cfg_parser->line = 1;
 	cfg_parser->errors = 0;
-	cfg_parser->server_settings_seen = 0;
 	cfg_parser->opt = opt;
-	cfg_parser->current_pattern = 0;
-	cfg_parser->current_zone = 0;
-	cfg_parser->current_key = 0;
-	cfg_parser->current_ip_address_option = opt->ip_addresses;
-	while(cfg_parser->current_ip_address_option && cfg_parser->current_ip_address_option->next)
-		cfg_parser->current_ip_address_option = cfg_parser->current_ip_address_option->next;
-	cfg_parser->current_allow_notify = 0;
-	cfg_parser->current_request_xfr = 0;
-	cfg_parser->current_notify = 0;
-	cfg_parser->current_provide_xfr = 0;
-	
+	cfg_parser->pattern = NULL;
+	cfg_parser->zone = NULL;
+	cfg_parser->key = NULL;
+
 	in = fopen(cfg_parser->filename, "r");
 	if(!in) {
 		if(err) {
@@ -197,36 +201,7 @@ parse_options_file(struct nsd_options* opt, const char* file,
 	fclose(in);
 
 	opt->configfile = region_strdup(opt->region, file);
-	if(cfg_parser->current_pattern) {
-		if(!cfg_parser->current_pattern->pname)
-			c_error("last pattern has no name");
-		else {
-			if(!nsd_options_insert_pattern(cfg_parser->opt,
-				cfg_parser->current_pattern))
-				c_error("duplicate pattern");
-		}
-	}
-	if(cfg_parser->current_zone) {
-		if(!cfg_parser->current_zone->name)
-			c_error("last zone has no name");
-		else {
-			if(!nsd_options_insert_zone(opt,
-				cfg_parser->current_zone))
-				c_error("duplicate zone");
-		}
-		if(!cfg_parser->current_zone->pattern)
-			c_error("last zone has no pattern");
-	}
-	if(cfg_parser->current_key)
-	{
-		if(!cfg_parser->current_key->name)
-			c_error("last key has no name");
-		if(!cfg_parser->current_key->algorithm)
-			c_error("last key has no algorithm");
-		if(!cfg_parser->current_key->secret)
-			c_error("last key has no secret blob");
-		key_options_insert(opt, cfg_parser->current_key);
-	}
+
 	RBTREE_FOR(pat, struct pattern_options*, opt->patterns)
 	{
 		/* lookup keys for acls */
@@ -236,7 +211,7 @@ parse_options_file(struct nsd_options* opt, const char* file,
 				continue;
 			acl->key_options = key_options_find(opt, acl->key_name);
 			if(!acl->key_options)
-				c_error_msg("key %s in pattern %s could not be found",
+				c_error("key %s in pattern %s could not be found",
 					acl->key_name, pat->pname);
 		}
 		for(acl=pat->notify; acl; acl=acl->next)
@@ -245,7 +220,7 @@ parse_options_file(struct nsd_options* opt, const char* file,
 				continue;
 			acl->key_options = key_options_find(opt, acl->key_name);
 			if(!acl->key_options)
-				c_error_msg("key %s in pattern %s could not be found",
+				c_error("key %s in pattern %s could not be found",
 					acl->key_name, pat->pname);
 		}
 		for(acl=pat->request_xfr; acl; acl=acl->next)
@@ -254,7 +229,7 @@ parse_options_file(struct nsd_options* opt, const char* file,
 				continue;
 			acl->key_options = key_options_find(opt, acl->key_name);
 			if(!acl->key_options)
-				c_error_msg("key %s in pattern %s could not be found",
+				c_error("key %s in pattern %s could not be found",
 					acl->key_name, pat->pname);
 		}
 		for(acl=pat->provide_xfr; acl; acl=acl->next)
@@ -263,7 +238,7 @@ parse_options_file(struct nsd_options* opt, const char* file,
 				continue;
 			acl->key_options = key_options_find(opt, acl->key_name);
 			if(!acl->key_options)
-				c_error_msg("key %s in pattern %s could not be found",
+				c_error("key %s in pattern %s could not be found",
 					acl->key_name, pat->pname);
 		}
 	}
@@ -375,6 +350,7 @@ parse_zone_list_file(struct nsd_options* opt)
 	add foo.bar.nl slave
 	add rutabaga.uk config
 	*/
+	char hdr[64];
 	char buf[1024];
 	
 	/* create empty data structures */
@@ -393,15 +369,16 @@ parse_zone_list_file(struct nsd_options* opt)
 		return 0;
 	}
 	/* read header */
-	buf[strlen(ZONELIST_HEADER)] = 0;
-	if(fread(buf, 1, strlen(ZONELIST_HEADER), opt->zonelist) !=
-		strlen(ZONELIST_HEADER) || strncmp(buf, ZONELIST_HEADER,
+	hdr[strlen(ZONELIST_HEADER)] = 0;
+	if(fread(hdr, 1, strlen(ZONELIST_HEADER), opt->zonelist) !=
+		strlen(ZONELIST_HEADER) || strncmp(hdr, ZONELIST_HEADER,
 		strlen(ZONELIST_HEADER)) != 0) {
 		log_msg(LOG_ERR, "zone list %s contains bad header\n", opt->zonelistfile);
 		fclose(opt->zonelist);
 		opt->zonelist = NULL;
 		return 0;
 	}
+	buf[sizeof(buf)-1]=0;
 
 	/* read entries in file */
 	while(fgets(buf, sizeof(buf), opt->zonelist)) {
@@ -710,7 +687,7 @@ zone_list_close(struct nsd_options* opt)
 	}
 }
 
-void
+static void
 c_error_va_list_pos(int showpos, const char* fmt, va_list args)
 {
 	char* at = NULL;
@@ -741,35 +718,24 @@ c_error_va_list_pos(int showpos, const char* fmt, va_list args)
 }
 
 void
-c_error_msg_pos(int showpos, const char* fmt, ...)
+c_error(const char *fmt, ...)
 {
-        va_list args;
-        va_start(args, fmt);
-        c_error_va_list_pos(showpos, fmt, args);
-        va_end(args);
-}
+	va_list ap;
+	int showpos = 0;
 
-void
-c_error_msg(const char* fmt, ...)
-{
-        va_list args;
-        va_start(args, fmt);
-        c_error_va_list_pos(0, fmt, args);
-        va_end(args);
-}
+	if (strcmp(fmt, "syntax error") == 0 || strcmp(fmt, "parse error") == 0) {
+		showpos = 1;
+	}
 
-void
-c_error(const char* str)
-{
-	if((strcmp(str, "syntax error")==0 || strcmp(str, "parse error")==0))
-		c_error_msg_pos(1, "%s", str);
-	else	c_error_msg("%s", str);
+	va_start(ap, fmt);
+	c_error_va_list_pos(showpos, fmt, ap);
+	va_end(ap);
 }
 
 int
-c_wrap()
+c_wrap(void)
 {
-        return 1;
+	return 1;
 }
 
 struct zone_options*
@@ -1454,7 +1420,7 @@ acl_addr_matches_ipv6host(struct acl_options* acl, struct sockaddr_storage* addr
 			return 0;
 		break;
 	case acl_range_minmax:
-		if(!acl_addr_match_range((uint32_t*)&acl->addr.addr6, (uint32_t*)&addr->sin6_addr,
+		if(!acl_addr_match_range_v6((uint32_t*)&acl->addr.addr6, (uint32_t*)&addr->sin6_addr,
 			(uint32_t*)&acl->range_mask.addr6, sizeof(struct in6_addr)))
 			return 0;
 		break;
@@ -1482,7 +1448,7 @@ acl_addr_matches_ipv4host(struct acl_options* acl, struct sockaddr_in* addr, uns
 			return 0;
 		break;
 	case acl_range_minmax:
-		if(!acl_addr_match_range((uint32_t*)&acl->addr.addr, (uint32_t*)&addr->sin_addr,
+		if(!acl_addr_match_range_v4((uint32_t*)&acl->addr.addr, (uint32_t*)&addr->sin_addr,
 			(uint32_t*)&acl->range_mask.addr, sizeof(struct in_addr)))
 			return 0;
 		break;
@@ -1562,7 +1528,23 @@ acl_addr_match_mask(uint32_t* a, uint32_t* b, uint32_t* mask, size_t sz)
 }
 
 int
-acl_addr_match_range(uint32_t* minval, uint32_t* x, uint32_t* maxval, size_t sz)
+acl_addr_match_range_v4(uint32_t* minval, uint32_t* x, uint32_t* maxval, size_t sz)
+{
+	assert(sz == 4); (void)sz;
+	/* check treats x as one huge number */
+
+	/* if outside bounds, we are done */
+	if(*minval > *x)
+		return 0;
+	if(*maxval < *x)
+		return 0;
+
+	return 1;
+}
+
+#ifdef INET6
+int
+acl_addr_match_range_v6(uint32_t* minval, uint32_t* x, uint32_t* maxval, size_t sz)
 {
 	size_t i;
 	uint8_t checkmin = 1, checkmax = 1;
@@ -1590,6 +1572,7 @@ acl_addr_match_range(uint32_t* minval, uint32_t* x, uint32_t* maxval, size_t sz)
 	}
 	return 1;
 }
+#endif /* INET6 */
 
 int
 acl_key_matches(struct acl_options* acl, struct query* q)
@@ -1854,11 +1837,11 @@ parse_acl_range_subnet(char* p, void* addr, int maxbits)
 	int subnet_bits = atoi(p);
 	uint8_t* addr_bytes = (uint8_t*)addr;
 	if(subnet_bits == 0 && strcmp(p, "0")!=0) {
-		c_error_msg("bad subnet range '%s'", p);
+		c_error("bad subnet range '%s'", p);
 		return;
 	}
 	if(subnet_bits < 0 || subnet_bits > maxbits) {
-		c_error_msg("subnet of %d bits out of range [0..%d]", subnet_bits, maxbits);
+		c_error("subnet of %d bits out of range [0..%d]", subnet_bits, maxbits);
 		return;
 	}
 	/* fill addr with n bits of 1s (struct has been zeroed) */
@@ -1900,27 +1883,27 @@ parse_acl_info(region_type* region, char* ip, const char* key)
 		acl->is_ipv6 = 1;
 #ifdef INET6
 		if(inet_pton(AF_INET6, ip, &acl->addr.addr6) != 1)
-			c_error_msg("Bad ip6 address '%s'", ip);
+			c_error("Bad ip6 address '%s'", ip);
 		if(acl->rangetype==acl_range_mask || acl->rangetype==acl_range_minmax) {
 			assert(p);
 			if(inet_pton(AF_INET6, p, &acl->range_mask.addr6) != 1)
-				c_error_msg("Bad ip6 address mask '%s'", p);
+				c_error("Bad ip6 address mask '%s'", p);
 		}
 		if(acl->rangetype==acl_range_subnet) {
 			assert(p);
 			parse_acl_range_subnet(p, &acl->range_mask.addr6, 128);
 		}
 #else
-		c_error_msg("encountered IPv6 address '%s'.", ip);
+		c_error("encountered IPv6 address '%s'.", ip);
 #endif /* INET6 */
 	} else {
 		acl->is_ipv6 = 0;
 		if(inet_pton(AF_INET, ip, &acl->addr.addr) != 1)
-			c_error_msg("Bad ip4 address '%s'", ip);
+			c_error("Bad ip4 address '%s'", ip);
 		if(acl->rangetype==acl_range_mask || acl->rangetype==acl_range_minmax) {
 			assert(p);
 			if(inet_pton(AF_INET, p, &acl->range_mask.addr) != 1)
-				c_error_msg("Bad ip4 address mask '%s'", p);
+				c_error("Bad ip4 address mask '%s'", p);
 		}
 		if(acl->rangetype==acl_range_subnet) {
 			assert(p);
@@ -1947,80 +1930,87 @@ parse_acl_info(region_type* region, char* ip, const char* key)
 
 /* copy acl list at end of parser start, update current */
 static
-void append_acl(struct acl_options** start, struct acl_options** cur,
-	struct acl_options* list)
+void copy_and_append_acls(struct acl_options** start, struct acl_options* list)
 {
+	struct acl_options *tail = NULL;
+
+	assert(start != NULL);
+
+	tail = *start;
+	if(tail) {
+		while(tail->next) {
+			tail = tail->next;
+		}
+	}
+
 	while(list) {
 		struct acl_options* acl = copy_acl(cfg_parser->opt->region,
 			list);
 		acl->next = NULL;
-		if(*cur)
-			(*cur)->next = acl;
-		else	*start = acl;
-		*cur = acl;
+		if(tail) {
+			tail->next = acl;
+		} else {
+			*start = acl;
+		}
+		tail = acl;
 		list = list->next;
 	}
 }
 
 void
-config_apply_pattern(const char* name)
+config_apply_pattern(struct pattern_options *dest, const char* name)
 {
 	/* find the pattern */
 	struct pattern_options* pat = pattern_options_find(cfg_parser->opt,
 		name);
-	struct pattern_options* a = cfg_parser->current_pattern;
 	if(!pat) {
-		c_error_msg("could not find pattern %s", name);
+		c_error("could not find pattern %s", name);
 		return;
 	}
 
 	/* apply settings */
 	if(pat->zonefile)
-		a->zonefile = region_strdup(cfg_parser->opt->region,
+		dest->zonefile = region_strdup(cfg_parser->opt->region,
 			pat->zonefile);
 	if(pat->zonestats)
-		a->zonestats = region_strdup(cfg_parser->opt->region,
+		dest->zonestats = region_strdup(cfg_parser->opt->region,
 			pat->zonestats);
 	if(!pat->allow_axfr_fallback_is_default) {
-		a->allow_axfr_fallback = pat->allow_axfr_fallback;
-		a->allow_axfr_fallback_is_default = 0;
+		dest->allow_axfr_fallback = pat->allow_axfr_fallback;
+		dest->allow_axfr_fallback_is_default = 0;
 	}
 	if(!pat->notify_retry_is_default) {
-		a->notify_retry = pat->notify_retry;
-		a->notify_retry_is_default = 0;
+		dest->notify_retry = pat->notify_retry;
+		dest->notify_retry_is_default = 0;
 	}
 	if(!pat->max_refresh_time_is_default) {
-		a->max_refresh_time = pat->max_refresh_time;
-		a->max_refresh_time_is_default = 0;
+		dest->max_refresh_time = pat->max_refresh_time;
+		dest->max_refresh_time_is_default = 0;
 	}
 	if(!pat->min_refresh_time_is_default) {
-		a->min_refresh_time = pat->min_refresh_time;
-		a->min_refresh_time_is_default = 0;
+		dest->min_refresh_time = pat->min_refresh_time;
+		dest->min_refresh_time_is_default = 0;
 	}
 	if(!pat->max_retry_time_is_default) {
-		a->max_retry_time = pat->max_retry_time;
-		a->max_retry_time_is_default = 0;
+		dest->max_retry_time = pat->max_retry_time;
+		dest->max_retry_time_is_default = 0;
 	}
 	if(!pat->min_retry_time_is_default) {
-		a->min_retry_time = pat->min_retry_time;
-		a->min_retry_time_is_default = 0;
+		dest->min_retry_time = pat->min_retry_time;
+		dest->min_retry_time_is_default = 0;
 	}
-	a->size_limit_xfr = pat->size_limit_xfr;
+	dest->size_limit_xfr = pat->size_limit_xfr;
 #ifdef RATELIMIT
-	a->rrl_whitelist |= pat->rrl_whitelist;
+	dest->rrl_whitelist |= pat->rrl_whitelist;
 #endif
 	/* append acl items */
-	append_acl(&a->allow_notify, &cfg_parser->current_allow_notify,
-		pat->allow_notify);
-	append_acl(&a->request_xfr, &cfg_parser->current_request_xfr,
-		pat->request_xfr);
-	append_acl(&a->notify, &cfg_parser->current_notify, pat->notify);
-	append_acl(&a->provide_xfr, &cfg_parser->current_provide_xfr,
-		pat->provide_xfr);
-	append_acl(&a->outgoing_interface, &cfg_parser->
-		current_outgoing_interface, pat->outgoing_interface);
+	copy_and_append_acls(&dest->allow_notify, pat->allow_notify);
+	copy_and_append_acls(&dest->request_xfr, pat->request_xfr);
+	copy_and_append_acls(&dest->notify, pat->notify);
+	copy_and_append_acls(&dest->provide_xfr, pat->provide_xfr);
+	copy_and_append_acls(&dest->outgoing_interface, pat->outgoing_interface);
 	if(pat->multi_master_check)
-		a->multi_master_check = pat->multi_master_check;
+		dest->multi_master_check = pat->multi_master_check;
 }
 
 void

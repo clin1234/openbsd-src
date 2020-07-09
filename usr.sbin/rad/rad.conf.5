@@ -1,4 +1,4 @@
-.\"	$OpenBSD: rad.conf.5,v 1.14 2019/01/02 07:45:17 jmc Exp $
+.\"	$OpenBSD: rad.conf.5,v 1.17 2020/05/16 16:58:12 jmc Exp $
 .\"
 .\" Copyright (c) 2018 Florian Obser <florian@openbsd.org>
 .\" Copyright (c) 2005 Esben Norby <norby@openbsd.org>
@@ -18,7 +18,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: January 2 2019 $
+.Dd $Mdocdate: May 16 2020 $
 .Dt RAD.CONF 5
 .Os
 .Sh NAME
@@ -109,7 +109,7 @@ The default is 1800 seconds.
 .\" XXX
 .El
 .Sh INTERFACES
-A list of interfaces or interface groups to send advertisments on:
+A list of interfaces or interface groups to send advertisements on:
 .Bd -unfilled -offset indent
 .Ic interface Ar name Op { prefix list }
 .Ed
@@ -149,10 +149,12 @@ prefix.
 The default is 2592000.
 .El
 .Sh FILES
-.Bl -tag -width "/etc/rad.conf" -compact
+.Bl -tag -width /etc/examples/rad.conf -compact
 .It Pa /etc/rad.conf
 .Xr rad 8
-configuration file
+configuration file.
+.It Pa /etc/examples/rad.conf
+Example configuration file.
 .El
 .Sh EXAMPLES
 With the following example configuration,

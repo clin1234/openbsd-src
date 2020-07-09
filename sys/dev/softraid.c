@@ -1,4 +1,4 @@
-/* $OpenBSD: softraid.c,v 1.394 2019/05/18 14:02:27 tim Exp $ */
+/* $OpenBSD: softraid.c,v 1.405 2020/06/27 17:28:58 krw Exp $ */
 /*
  * Copyright (c) 2007, 2008, 2009 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2008 Chris Kuethe <ckuethe@openbsd.org>
@@ -93,7 +93,6 @@ struct cfdriver softraid_cd = {
 
 /* scsi & discipline */
 void			sr_scsi_cmd(struct scsi_xfer *);
-void			sr_minphys(struct buf *, struct scsi_link *);
 int			sr_scsi_probe(struct scsi_link *);
 void			sr_copy_internal_data(struct scsi_xfer *,
 			    void *, size_t);
@@ -179,7 +178,7 @@ extern void		(*softraid_disk_attach)(struct disk *, int);
 
 /* scsi glue */
 struct scsi_adapter sr_switch = {
-	sr_scsi_cmd, sr_minphys, sr_scsi_probe, NULL, sr_scsi_ioctl
+	sr_scsi_cmd, NULL, sr_scsi_probe, NULL, sr_scsi_ioctl
 };
 
 /* native metadata format */
@@ -1805,11 +1804,10 @@ sr_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_link.adapter_softc = sc;
 	sc->sc_link.adapter = &sr_switch;
-	sc->sc_link.adapter_target = SR_MAX_LD;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.adapter_buswidth = SR_MAX_LD;
 	sc->sc_link.luns = 1;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	sc->sc_scsibus = (struct scsibus_softc *)config_found(&sc->sc_dev,
@@ -1884,17 +1882,6 @@ sr_error(struct sr_softc *sc, const char *fmt, ...)
 	va_start(ap, fmt);
 	bio_status(&sc->sc_status, 1, BIO_MSG_ERROR, fmt, &ap);
 	va_end(ap);
-}
-
-void
-sr_minphys(struct buf *bp, struct scsi_link *sl)
-{
-	DNPRINTF(SR_D_MISC, "sr_minphys: %ld\n", bp->b_bcount);
-
-	/* XXX currently using SR_MAXFER = MAXPHYS */
-	if (bp->b_bcount > SR_MAXFER)
-		bp->b_bcount = SR_MAXFER;
-	minphys(bp);
 }
 
 void
@@ -2089,7 +2076,7 @@ sr_ccb_done(struct sr_ccb *ccb)
 }
 
 int
-sr_wu_alloc(struct sr_discipline *sd, int wu_size)
+sr_wu_alloc(struct sr_discipline *sd)
 {
 	struct sr_workunit	*wu;
 	int			i, no_wu;
@@ -2107,7 +2094,7 @@ sr_wu_alloc(struct sr_discipline *sd, int wu_size)
 	TAILQ_INIT(&sd->sd_wu_defq);
 
 	for (i = 0; i < no_wu; i++) {
-		wu = malloc(wu_size, M_DEVBUF, M_WAITOK | M_ZERO);
+		wu = malloc(sd->sd_wu_size, M_DEVBUF, M_WAITOK | M_ZERO);
 		TAILQ_INSERT_TAIL(&sd->sd_wu, wu, swu_next);
 		TAILQ_INIT(&wu->swu_ccb);
 		wu->swu_dis = sd;
@@ -2134,7 +2121,7 @@ sr_wu_free(struct sr_discipline *sd)
 
 	while ((wu = TAILQ_FIRST(&sd->sd_wu)) != NULL) {
 		TAILQ_REMOVE(&sd->sd_wu, wu, swu_next);
-		free(wu, M_DEVBUF, sizeof(*wu));
+		free(wu, M_DEVBUF, sd->sd_wu_size);
 	}
 }
 
@@ -2858,8 +2845,6 @@ sr_hotspare(struct sr_softc *sc, dev_t dev)
 	    NOCRED, curproc)) {
 		DNPRINTF(SR_D_META, "%s: sr_hotspare ioctl failed\n",
 		    DEVNAME(sc));
-		VOP_CLOSE(vn, FREAD | FWRITE, NOCRED, curproc);
-		vput(vn);
 		goto fail;
 	}
 	if (label.d_partitions[part].p_fstype != FS_RAID) {
@@ -3057,7 +3042,8 @@ sr_hotspare_rebuild(struct sr_discipline *sd)
 			splx(s);
 
 			if (busy) {
-				tsleep(sd, PRIBIO, "sr_hotspare", hz);
+				tsleep_nsec(sd, PRIBIO, "sr_hotspare",
+				    SEC_TO_NSEC(1));
 				i++;
 			}
 
@@ -3431,7 +3417,7 @@ sr_ioctl_createraid(struct sr_softc *sc, struct bioc_createraid *bc,
 			    "chunk count");
 			goto unwind;
 		}
-			
+
 		/* Ensure metadata level matches requested assembly level. */
 		if (sd->sd_meta->ssdi.ssd_level != bc->bc_level) {
 			sr_error(sc, "volume level does not match metadata "
@@ -3679,7 +3665,7 @@ sr_ioctl_installboot(struct sr_softc *sc, struct sr_discipline *sd,
 	struct sr_meta_opt_item *omi;
 	struct sr_meta_boot	*sbm;
 	struct disk		*dk;
-	u_int32_t		bbs, bls, secsize;
+	u_int32_t		bbs = 0, bls = 0, secsize;
 	u_char			duid[8];
 	int			rv = EINVAL;
 	int			i;
@@ -3717,11 +3703,17 @@ sr_ioctl_installboot(struct sr_softc *sc, struct sr_discipline *sd,
 		goto done;
 	}
 
-	if (bb->bb_bootblk_size > SR_BOOT_BLOCKS_SIZE * DEV_BSIZE)
+	if (bb->bb_bootblk_size > SR_BOOT_BLOCKS_SIZE * DEV_BSIZE) {
+		sr_error(sc, "boot block too large (%d > %d)",
+		    bb->bb_bootblk_size, SR_BOOT_BLOCKS_SIZE * DEV_BSIZE);
 		goto done;
+	}
 
-	if (bb->bb_bootldr_size > SR_BOOT_LOADER_SIZE * DEV_BSIZE)
+	if (bb->bb_bootldr_size > SR_BOOT_LOADER_SIZE * DEV_BSIZE) {
+		sr_error(sc, "boot loader too large (%d > %d)",
+		    bb->bb_bootldr_size, SR_BOOT_LOADER_SIZE * DEV_BSIZE);
 		goto done;
+	}
 
 	secsize = sd->sd_meta->ssdi.ssd_secsize;
 
@@ -3780,7 +3772,7 @@ sr_ioctl_installboot(struct sr_softc *sc, struct sr_discipline *sd,
 
 		if (sr_rw(sc, chunk->src_dev_mm, bootblk, bbs,
 		    SR_BOOT_BLOCKS_OFFSET, B_WRITE)) {
-			sr_error(sc, "failed to write boot block", DEVNAME(sc));
+			sr_error(sc, "failed to write boot block");
 			goto done;
 		}
 
@@ -3894,7 +3886,7 @@ void
 sr_discipline_shutdown(struct sr_discipline *sd, int meta_save, int dying)
 {
 	struct sr_softc		*sc;
-	int			s;
+	int			ret, s;
 
 	if (!sd)
 		return;
@@ -3919,11 +3911,12 @@ sr_discipline_shutdown(struct sr_discipline *sd, int meta_save, int dying)
 
 	/* make sure there isn't a sync pending and yield */
 	wakeup(sd);
-	while (sd->sd_sync || sd->sd_must_flush)
-		if (tsleep(&sd->sd_sync, MAXPRI, "sr_down", 60 * hz) ==
-		    EWOULDBLOCK)
+	while (sd->sd_sync || sd->sd_must_flush) {
+		ret = tsleep_nsec(&sd->sd_sync, MAXPRI, "sr_down",
+		    SEC_TO_NSEC(60));
+		if (ret == EWOULDBLOCK)
 			break;
-
+	}
 	if (dying == -1) {
 		sd->sd_ready = 1;
 		splx(s);
@@ -3980,6 +3973,7 @@ sr_discipline_init(struct sr_discipline *sd, int level)
 	task_set(&sd->sd_hotspare_rebuild_task, sr_hotspare_rebuild_callback,
 	    sd);
 
+	sd->sd_wu_size = sizeof(struct sr_workunit);
 	switch (level) {
 	case 0:
 		sr_raid0_discipline_init(sd);
@@ -4147,7 +4141,7 @@ int
 sr_raid_sync(struct sr_workunit *wu)
 {
 	struct sr_discipline	*sd = wu->swu_dis;
-	int			s, rv = 0, ios;
+	int			s, ret, rv = 0, ios;
 
 	DNPRINTF(SR_D_DIS, "%s: sr_raid_sync\n", DEVNAME(sd->sd_sc));
 
@@ -4157,7 +4151,8 @@ sr_raid_sync(struct sr_workunit *wu)
 	s = splbio();
 	sd->sd_sync = 1;
 	while (sd->sd_wu_pending > ios) {
-		if (tsleep(sd, PRIBIO, "sr_sync", 15 * hz) == EWOULDBLOCK) {
+		ret = tsleep_nsec(sd, PRIBIO, "sr_sync", SEC_TO_NSEC(15));
+		if (ret == EWOULDBLOCK) {
 			DNPRINTF(SR_D_DIS, "%s: sr_raid_sync timeout\n",
 			    DEVNAME(sd->sd_sc));
 			rv = 1;
@@ -4301,7 +4296,7 @@ sr_raid_recreate_wu(struct sr_workunit *wu)
 int
 sr_alloc_resources(struct sr_discipline *sd)
 {
-	if (sr_wu_alloc(sd, sizeof(struct sr_workunit))) {
+	if (sr_wu_alloc(sd)) {
 		sr_error(sd->sd_sc, "unable to allocate work units");
 		return (ENOMEM);
 	}
@@ -4781,7 +4776,7 @@ sr_rebuild(struct sr_discipline *sd)
 		/* wait for write completion */
 		slept = 0;
 		while ((wu_w->swu_flags & SR_WUF_REBUILDIOCOMP) == 0) {
-			tsleep(wu_w, PRIBIO, "sr_rebuild", 0);
+			tsleep_nsec(wu_w, PRIBIO, "sr_rebuild", INFSLP);
 			slept = 1;
 		}
 		/* yield if we didn't sleep */

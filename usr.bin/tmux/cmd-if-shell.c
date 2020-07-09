@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-if-shell.c,v 1.60 2018/08/27 11:03:34 nicm Exp $ */
+/* $OpenBSD: cmd-if-shell.c,v 1.74 2020/04/13 20:51:57 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Tiago Cunha <me@tiagocunha.org>
@@ -49,60 +49,57 @@ const struct cmd_entry cmd_if_shell_entry = {
 };
 
 struct cmd_if_shell_data {
-	char			*file;
-	u_int			 line;
+	struct cmd_parse_input	 input;
 
 	char			*cmd_if;
 	char			*cmd_else;
 
 	struct client		*client;
 	struct cmdq_item	*item;
-	struct mouse_event	 mouse;
 };
 
 static enum cmd_retval
 cmd_if_shell_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args			*args = self->args;
-	struct cmdq_shared		*shared = item->shared;
+	struct args			*args = cmd_get_args(self);
+	struct cmd_find_state		*target = cmdq_get_target(item);
+	struct cmdq_state		*state = cmdq_get_state(item);
 	struct cmd_if_shell_data	*cdata;
-	char				*shellcmd, *cmd, *cause;
-	struct cmd_list			*cmdlist;
-	struct cmdq_item		*new_item;
-	struct client			*c = cmd_find_client(item, NULL, 1);
-	struct session			*s = item->target.s;
-	struct winlink			*wl = item->target.wl;
-	struct window_pane		*wp = item->target.wp;
+	char				*shellcmd, *cmd, *error;
+	const char			*file;
+	struct client			*tc = cmdq_get_target_client(item);
+	struct session			*s = target->s;
+	struct cmd_parse_input		 pi;
+	enum cmd_parse_status		 status;
 
-	shellcmd = format_single(item, args->argv[0], c, s, wl, wp);
+	shellcmd = format_single_from_target(item, args->argv[0]);
 	if (args_has(args, 'F')) {
-		cmd = NULL;
 		if (*shellcmd != '0' && *shellcmd != '\0')
 			cmd = args->argv[1];
 		else if (args->argc == 3)
 			cmd = args->argv[2];
+		else
+			cmd = NULL;
 		free(shellcmd);
 		if (cmd == NULL)
 			return (CMD_RETURN_NORMAL);
-		cmdlist = cmd_string_parse(cmd, NULL, 0, &cause);
-		if (cmdlist == NULL) {
-			if (cause != NULL) {
-				cmdq_error(item, "%s", cause);
-				free(cause);
-			}
+
+		memset(&pi, 0, sizeof pi);
+		cmd_get_source(self, &pi.file, &pi.line);
+		pi.item = item;
+		pi.c = tc;
+		cmd_find_copy_state(&pi.fs, target);
+
+		status = cmd_parse_and_insert(cmd, &pi, item, state, &error);
+		if (status == CMD_PARSE_ERROR) {
+			cmdq_error(item, "%s", error);
+			free(error);
 			return (CMD_RETURN_ERROR);
 		}
-		new_item = cmdq_get_command(cmdlist, NULL, &shared->mouse, 0);
-		cmdq_insert_after(item, new_item);
-		cmd_list_free(cmdlist);
 		return (CMD_RETURN_NORMAL);
 	}
 
 	cdata = xcalloc(1, sizeof *cdata);
-	if (self->file != NULL) {
-		cdata->file = xstrdup(self->file);
-		cdata->line = self->line;
-	}
 
 	cdata->cmd_if = xstrdup(args->argv[1]);
 	if (args->argc == 3)
@@ -110,7 +107,10 @@ cmd_if_shell_exec(struct cmd *self, struct cmdq_item *item)
 	else
 		cdata->cmd_else = NULL;
 
-	cdata->client = item->client;
+	if (!args_has(args, 'b'))
+		cdata->client = cmdq_get_client(item);
+	else
+		cdata->client = tc;
 	if (cdata->client != NULL)
 		cdata->client->references++;
 
@@ -118,10 +118,20 @@ cmd_if_shell_exec(struct cmd *self, struct cmdq_item *item)
 		cdata->item = item;
 	else
 		cdata->item = NULL;
-	memcpy(&cdata->mouse, &shared->mouse, sizeof cdata->mouse);
 
-	if (job_run(shellcmd, s, server_client_get_cwd(item->client, s), NULL,
-	    cmd_if_shell_callback, cmd_if_shell_free, cdata, 0) == NULL) {
+	memset(&cdata->input, 0, sizeof cdata->input);
+	cmd_get_source(self, &file, &cdata->input.line);
+	if (file != NULL)
+		cdata->input.file = xstrdup(file);
+	cdata->input.c = tc;
+	if (cdata->input.c != NULL)
+		cdata->input.c->references++;
+	cmd_find_copy_state(&cdata->input.fs, target);
+
+	if (job_run(shellcmd, s,
+	    server_client_get_cwd(cmdq_get_client(item), s), NULL,
+	    cmd_if_shell_callback, cmd_if_shell_free, cdata, 0, -1,
+	    -1) == NULL) {
 		cmdq_error(item, "failed to run command: %s", shellcmd);
 		free(shellcmd);
 		free(cdata);
@@ -139,11 +149,11 @@ cmd_if_shell_callback(struct job *job)
 {
 	struct cmd_if_shell_data	*cdata = job_get_data(job);
 	struct client			*c = cdata->client;
-	struct cmd_list			*cmdlist;
-	struct cmdq_item		*new_item;
-	char				*cause, *cmd, *file = cdata->file;
-	u_int				 line = cdata->line;
+	struct cmdq_item		*new_item = NULL;
+	struct cmdq_state		*new_state = NULL;
+	char				*cmd;
 	int				 status;
+	struct cmd_parse_result		*pr;
 
 	status = job_get_status(job);
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
@@ -153,17 +163,26 @@ cmd_if_shell_callback(struct job *job)
 	if (cmd == NULL)
 		goto out;
 
-	cmdlist = cmd_string_parse(cmd, file, line, &cause);
-	if (cmdlist == NULL) {
-		if (cause != NULL && cdata->item != NULL)
-			cmdq_error(cdata->item, "%s", cause);
-		free(cause);
-		new_item = NULL;
-	} else {
-		new_item = cmdq_get_command(cmdlist, NULL, &cdata->mouse, 0);
-		cmd_list_free(cmdlist);
+	pr = cmd_parse_from_string(cmd, &cdata->input);
+	switch (pr->status) {
+	case CMD_PARSE_EMPTY:
+		break;
+	case CMD_PARSE_ERROR:
+		if (cdata->item != NULL)
+		       cmdq_error(cdata->item, "%s", pr->error);
+		free(pr->error);
+		break;
+	case CMD_PARSE_SUCCESS:
+		if (cdata->item == NULL)
+			new_state = cmdq_new_state(NULL, NULL, 0);
+		else
+			new_state = cmdq_get_state(cdata->item);
+		new_item = cmdq_get_command(pr->cmdlist, new_state);
+		if (cdata->item == NULL)
+			cmdq_free_state(new_state);
+		cmd_list_free(pr->cmdlist);
+		break;
 	}
-
 	if (new_item != NULL) {
 		if (cdata->item == NULL)
 			cmdq_append(c, new_item);
@@ -173,7 +192,7 @@ cmd_if_shell_callback(struct job *job)
 
 out:
 	if (cdata->item != NULL)
-		cdata->item->flags &= ~CMDQ_WAITING;
+		cmdq_continue(cdata->item);
 }
 
 static void
@@ -187,6 +206,9 @@ cmd_if_shell_free(void *data)
 	free(cdata->cmd_else);
 	free(cdata->cmd_if);
 
-	free(cdata->file);
+	if (cdata->input.c != NULL)
+		server_client_unref(cdata->input.c);
+	free((void *)cdata->input.file);
+
 	free(cdata);
 }

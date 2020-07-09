@@ -35,7 +35,6 @@
 #include <linux/pagemap.h>
 #include <linux/shmem_fs.h>
 #include <linux/file.h>
-#include <linux/export.h>
 #include <drm/drm_cache.h>
 #include <drm/ttm/ttm_bo_driver.h>
 #include <drm/ttm/ttm_page_alloc.h>
@@ -49,7 +48,7 @@ int ttm_tt_create(struct ttm_buffer_object *bo, bool zero_alloc)
 	struct ttm_bo_device *bdev = bo->bdev;
 	uint32_t page_flags = 0;
 
-	reservation_object_assert_held(bo->resv);
+	dma_resv_assert_held(bo->base.resv);
 
 	if (bdev->need_dma32)
 		page_flags |= TTM_PAGE_FLAG_DMA32;
@@ -224,8 +223,9 @@ void ttm_tt_destroy(struct ttm_tt *ttm)
 	ttm->func->destroy(ttm);
 }
 
-void ttm_tt_init_fields(struct ttm_tt *ttm, struct ttm_buffer_object *bo,
-			uint32_t page_flags)
+static void ttm_tt_init_fields(struct ttm_tt *ttm,
+			       struct ttm_buffer_object *bo,
+			       uint32_t page_flags)
 {
 	ttm->bdev = bo->bdev;
 	ttm->num_pages = bo->num_pages;
@@ -261,6 +261,7 @@ int ttm_dma_tt_init(struct ttm_dma_tt *ttm_dma, struct ttm_buffer_object *bo,
 		    uint32_t page_flags)
 {
 	struct ttm_tt *ttm = &ttm_dma->ttm;
+	int flags = BUS_DMA_WAITOK;
 
 	ttm_tt_init_fields(ttm, bo, page_flags);
 
@@ -271,15 +272,18 @@ int ttm_dma_tt_init(struct ttm_dma_tt *ttm_dma, struct ttm_buffer_object *bo,
 		return -ENOMEM;
 	}
 
-	ttm_dma->segs =  mallocarray(ttm->num_pages,
-	    sizeof(bus_dma_segment_t), M_DRM, M_WAITOK | M_ZERO);
+	ttm_dma->segs = km_alloc(round_page(ttm->num_pages *
+	    sizeof(bus_dma_segment_t)), &kv_any, &kp_zero, &kd_waitok);
 
 	ttm_dma->dmat = bo->bdev->dmat;
 
+	if ((page_flags & TTM_PAGE_FLAG_DMA32) == 0)
+		flags |= BUS_DMA_64BIT;
 	if (bus_dmamap_create(ttm_dma->dmat, ttm->num_pages << PAGE_SHIFT,
-	    ttm->num_pages, ttm->num_pages << PAGE_SHIFT, 0, BUS_DMA_WAITOK,
+	    ttm->num_pages, ttm->num_pages << PAGE_SHIFT, 0, flags,
 	    &ttm_dma->map)) {
-		free(ttm_dma->segs, M_DRM, 0);
+		km_free(ttm_dma->segs, round_page(ttm->num_pages *
+		    sizeof(bus_dma_segment_t)), &kv_any, &kp_zero);
 		ttm_tt_destroy(ttm);
 		pr_err("Failed allocating page table\n");
 		return -ENOMEM;
@@ -293,6 +297,7 @@ int ttm_sg_tt_init(struct ttm_dma_tt *ttm_dma, struct ttm_buffer_object *bo,
 		   uint32_t page_flags)
 {
 	struct ttm_tt *ttm = &ttm_dma->ttm;
+	int flags = BUS_DMA_WAITOK;
 	int ret;
 
 	ttm_tt_init_fields(ttm, bo, page_flags);
@@ -308,15 +313,18 @@ int ttm_sg_tt_init(struct ttm_dma_tt *ttm_dma, struct ttm_buffer_object *bo,
 		return -ENOMEM;
 	}
 
-	ttm_dma->segs =  mallocarray(ttm->num_pages,
-	    sizeof(bus_dma_segment_t), M_DRM, M_WAITOK | M_ZERO);
+	ttm_dma->segs = km_alloc(round_page(ttm->num_pages *
+	    sizeof(bus_dma_segment_t)), &kv_any, &kp_zero, &kd_waitok);
 
 	ttm_dma->dmat = bo->bdev->dmat;
 
+	if ((page_flags & TTM_PAGE_FLAG_DMA32) == 0)
+		flags |= BUS_DMA_64BIT;
 	if (bus_dmamap_create(ttm_dma->dmat, ttm->num_pages << PAGE_SHIFT,
-	    ttm->num_pages, ttm->num_pages << PAGE_SHIFT, 0, BUS_DMA_WAITOK,
+	    ttm->num_pages, ttm->num_pages << PAGE_SHIFT, 0, flags,
 	    &ttm_dma->map)) {
-		free(ttm_dma->segs, M_DRM, 0);
+		km_free(ttm_dma->segs, round_page(ttm->num_pages *
+		    sizeof(bus_dma_segment_t)), &kv_any, &kp_zero);
 		ttm_tt_destroy(ttm);
 		pr_err("Failed allocating page table\n");
 		return -ENOMEM;
@@ -338,7 +346,8 @@ void ttm_dma_tt_fini(struct ttm_dma_tt *ttm_dma)
 	ttm_dma->dma_address = NULL;
 
 	bus_dmamap_destroy(ttm_dma->dmat, ttm_dma->map);
-	free(ttm_dma->segs, M_DRM, 0);
+	km_free(ttm_dma->segs, round_page(ttm->num_pages *
+	    sizeof(bus_dma_segment_t)), &kv_any, &kp_zero);
 }
 EXPORT_SYMBOL(ttm_dma_tt_fini);
 

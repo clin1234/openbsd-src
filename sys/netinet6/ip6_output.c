@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_output.c,v 1.243 2019/04/28 22:15:58 mpi Exp $	*/
+/*	$OpenBSD: ip6_output.c,v 1.246 2020/06/22 11:30:23 krw Exp $	*/
 /*	$KAME: ip6_output.c,v 1.172 2001/03/25 09:55:56 itojun Exp $	*/
 
 /*
@@ -174,7 +174,7 @@ ip6_output(struct mbuf *m0, struct ip6_pktopts *opt, struct route_in6 *ro,
 
 #ifdef IPSEC
 	if (inp && (inp->inp_flags & INP_IPV6) == 0)
-		panic("ip6_output: IPv4 pcb is passed");
+		panic("%s: IPv4 pcb is passed", __func__);
 #endif /* IPSEC */
 
 	ip6 = mtod(m, struct ip6_hdr *);
@@ -295,7 +295,7 @@ ip6_output(struct mbuf *m0, struct ip6_pktopts *opt, struct route_in6 *ro,
 		 */
 		if (exthdrs.ip6e_dest2) {
 			if (!hdrsplit)
-				panic("assumption failed: hdr not split");
+				panic("%s: assumption failed: hdr not split", __func__);
 			exthdrs.ip6e_dest2->m_next = m->m_next;
 			m->m_next = exthdrs.ip6e_dest2;
 			*mtod(exthdrs.ip6e_dest2, u_char *) = ip6->ip6_nxt;
@@ -600,13 +600,13 @@ reroute:
 	 */
 	if (exthdrs.ip6e_hbh) {
 		struct ip6_hbh *hbh = mtod(exthdrs.ip6e_hbh, struct ip6_hbh *);
-		u_int32_t dummy1; /* XXX unused */
-		u_int32_t dummy2; /* XXX unused */
+		u_int32_t rtalert; /* returned value is ignored */
+		u_int32_t plen = 0; /* no more than 1 jumbo payload option! */
 
 		m->m_pkthdr.ph_ifidx = ifp->if_index;
 		if (ip6_process_hopopts(m, (u_int8_t *)(hbh + 1),
 		    ((hbh->ip6h_len + 1) << 3) - sizeof(struct ip6_hbh),
-		    &dummy1, &dummy2) < 0) {
+		    &rtalert, &plen) < 0) {
 			/* m was already freed at this point */
 			error = EINVAL;/* better error? */
 			goto done;
@@ -1761,7 +1761,7 @@ ip6_getpcbopt(struct ip6_pktopts *pktopt, int optname, struct mbuf *m)
 		break;
 	default:		/* should not happen */
 #ifdef DIAGNOSTIC
-		panic("ip6_getpcbopt: unexpected option");
+		panic("%s: unexpected option", __func__);
 #endif
 		return (ENOPROTOOPT);
 	}
@@ -1882,9 +1882,7 @@ ip6_setmoptions(int optname, struct ip6_moptions **im6op, struct mbuf *m,
 		 * No multicast option buffer attached to the pcb;
 		 * allocate one and initialize to default values.
 		 */
-		im6o = (struct ip6_moptions *)
-			malloc(sizeof(*im6o), M_IPMOPTS, M_WAITOK);
-
+		im6o = malloc(sizeof(*im6o), M_IPMOPTS, M_WAITOK);
 		if (im6o == NULL)
 			return (ENOBUFS);
 		*im6op = im6o;
@@ -2138,7 +2136,7 @@ ip6_setmoptions(int optname, struct ip6_moptions **im6op, struct mbuf *m,
 	    im6o->im6o_hlim == ip6_defmcasthlim &&
 	    im6o->im6o_loop == IPV6_DEFAULT_MULTICAST_LOOP &&
 	    LIST_EMPTY(&im6o->im6o_memberships)) {
-		free(*im6op, M_IPMOPTS, 0);
+		free(*im6op, M_IPMOPTS, sizeof(**im6op));
 		*im6op = NULL;
 	}
 
@@ -2202,7 +2200,7 @@ ip6_freemoptions(struct ip6_moptions *im6o)
 		LIST_REMOVE(imm, i6mm_chain);
 		in6_leavegroup(imm);
 	}
-	free(im6o, M_IPMOPTS, 0);
+	free(im6o, M_IPMOPTS, sizeof(*im6o));
 }
 
 /*

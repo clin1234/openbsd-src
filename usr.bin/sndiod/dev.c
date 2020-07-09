@@ -1,4 +1,4 @@
-/*	$OpenBSD: dev.c,v 1.47 2018/06/26 07:49:44 ratchov Exp $	*/
+/*	$OpenBSD: dev.c,v 1.75 2020/06/28 05:21:39 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -57,7 +57,9 @@ int dev_getpos(struct dev *);
 struct dev *dev_new(char *, struct aparams *, unsigned int, unsigned int,
     unsigned int, unsigned int, unsigned int, unsigned int);
 void dev_adjpar(struct dev *, int, int, int);
+int dev_allocbufs(struct dev *);
 int dev_open(struct dev *);
+void dev_freebufs(struct dev *);
 void dev_close(struct dev *);
 int dev_ref(struct dev *);
 void dev_unref(struct dev *);
@@ -65,6 +67,7 @@ int dev_init(struct dev *);
 void dev_done(struct dev *);
 struct dev *dev_bynum(int);
 void dev_del(struct dev *);
+void dev_setalt(struct dev *, unsigned int);
 unsigned int dev_roundof(struct dev *, unsigned int);
 void dev_wakeup(struct dev *);
 void dev_sync_attach(struct dev *);
@@ -72,6 +75,7 @@ void dev_mmcstart(struct dev *);
 void dev_mmcstop(struct dev *);
 void dev_mmcloc(struct dev *, unsigned int);
 
+void slot_ctlname(struct slot *, char *, size_t);
 void slot_log(struct slot *);
 void slot_del(struct slot *);
 void slot_setvol(struct slot *, unsigned int);
@@ -79,6 +83,7 @@ void slot_attach(struct slot *);
 void slot_ready(struct slot *);
 void slot_allocbufs(struct slot *);
 void slot_freebufs(struct slot *);
+void slot_initconv(struct slot *);
 void slot_start(struct slot *);
 void slot_detach(struct slot *);
 void slot_stop(struct slot *);
@@ -86,6 +91,9 @@ void slot_skip_update(struct slot *);
 void slot_write(struct slot *);
 void slot_read(struct slot *);
 int slot_skip(struct slot *);
+
+void ctl_node_log(struct ctl_node *);
+void ctl_log(struct ctl *);
 
 struct midiops dev_midiops = {
 	dev_midi_imsg,
@@ -125,15 +133,22 @@ dev_log(struct dev *d)
 }
 
 void
+slot_ctlname(struct slot *s, char *name, size_t size)
+{
+	snprintf(name, size, "%s%u", s->name, s->unit);
+}
+
+void
 slot_log(struct slot *s)
 {
+	char name[CTL_NAMEMAX];
 #ifdef DEBUG
 	static char *pstates[] = {
 		"ini", "sta", "rdy", "run", "stp", "mid"
 	};
 #endif
-	log_puts(s->name);
-	log_putu(s->unit);
+	slot_ctlname(s, name, CTL_NAMEMAX);
+	log_puts(name);
 #ifdef DEBUG
 	if (log_level >= 3) {
 		log_puts(" vol=");
@@ -333,7 +348,25 @@ dev_midi_vol(struct dev *d, struct slot *s)
 void
 dev_midi_master(struct dev *d)
 {
+	struct ctl *c;
+	unsigned int master, v;
 	struct sysex x;
+
+	if (d->master_enabled)
+		master = d->master;
+	else {
+		master = 0;
+		for (c = d->ctl_list; c != NULL; c = c->next) {
+			if (c->type != CTL_NUM ||
+			    strcmp(c->group, "") != 0 ||
+			    strcmp(c->node0.name, "output") != 0 ||
+			    strcmp(c->func, "level") != 0)
+				continue;
+			v = (c->curval * 127 + c->maxval / 2) / c->maxval;
+			if (master < v)
+				master = v;
+		}
+	}
 
 	memset(&x, 0, sizeof(struct sysex));
 	x.start = SYSEX_START;
@@ -342,7 +375,7 @@ dev_midi_master(struct dev *d)
 	x.id0 = SYSEX_CONTROL;
 	x.id1 = SYSEX_MASTER;
 	x.u.master.fine = 0;
-	x.u.master.coarse = d->master;
+	x.u.master.coarse = master;
 	x.u.master.end = SYSEX_END;
 	midi_send(d->midi, (unsigned char *)&x, SYSEX_SIZE(master));
 }
@@ -361,10 +394,8 @@ dev_midi_slotdesc(struct dev *d, struct slot *s)
 	x.dev = SYSEX_DEV_ANY;
 	x.id0 = SYSEX_AUCAT;
 	x.id1 = SYSEX_AUCAT_SLOTDESC;
-	if (*s->name != '\0') {
-		snprintf((char *)x.u.slotdesc.name, SYSEX_NAMELEN,
-		    "%s%u", s->name, s->unit);
-	}
+	if (*s->name != '\0')
+		slot_ctlname(s, (char *)x.u.slotdesc.name, SYSEX_NAMELEN);
 	x.u.slotdesc.chan = s - d->slot;
 	x.u.slotdesc.end = SYSEX_END;
 	midi_send(d->midi, (unsigned char *)&x, SYSEX_SIZE(slotdesc));
@@ -415,6 +446,7 @@ dev_midi_omsg(void *arg, unsigned char *msg, int len)
 		if (chan >= DEV_NSLOT)
 			return;
 		slot_setvol(d->slot + chan, msg[2]);
+		dev_onval(d, CTLADDR_SLOT_LEVEL(chan), msg[2]);
 		return;
 	}
 	x = (struct sysex *)msg;
@@ -425,8 +457,13 @@ dev_midi_omsg(void *arg, unsigned char *msg, int len)
 	switch (x->type) {
 	case SYSEX_TYPE_RT:
 		if (x->id0 == SYSEX_CONTROL && x->id1 == SYSEX_MASTER) {
-			if (len == SYSEX_SIZE(master))
+			if (len == SYSEX_SIZE(master)) {
 				dev_master(d, x->u.master.coarse);
+				if (d->master_enabled) {
+					dev_onval(d, CTLADDR_MASTER,
+					   x->u.master.coarse);
+				}
+			}
 			return;
 		}
 		if (x->id0 != SYSEX_MMC)
@@ -473,8 +510,7 @@ dev_midi_omsg(void *arg, unsigned char *msg, int len)
 			    (x->u.loc.hr & 0x1f) * 3600 * MTC_SEC +
 			     x->u.loc.min * 60 * MTC_SEC +
 			     x->u.loc.sec * MTC_SEC +
-			     x->u.loc.fr * (MTC_SEC / fps) +
-			     x->u.loc.cent * (MTC_SEC / 100 / fps));
+			     x->u.loc.fr * (MTC_SEC / fps));
 			break;
 		}
 		break;
@@ -638,7 +674,8 @@ dev_mix_adjvol(struct dev *d)
 		}
 		if (weight > i->opt->maxweight)
 			weight = i->opt->maxweight;
-		i->mix.weight = ADATA_MUL(weight, MIDI_TO_ADATA(d->master));
+		i->mix.weight = d->master_enabled ?
+		    ADATA_MUL(weight, MIDI_TO_ADATA(d->master)) : weight;
 #ifdef DEBUG
 		if (log_level >= 3) {
 			slot_log(i);
@@ -929,15 +966,30 @@ dev_onmove(struct dev *d, int delta)
 void
 dev_master(struct dev *d, unsigned int master)
 {
+	struct ctl *c;
+	unsigned int v;
+
 	if (log_level >= 2) {
 		dev_log(d);
 		log_puts(": master volume set to ");
 		log_putu(master);
 		log_puts("\n");
 	}
-	d->master = master;
-	if (d->mode & MODE_PLAY)
-		dev_mix_adjvol(d);
+	if (d->master_enabled) {
+		d->master = master;
+		if (d->mode & MODE_PLAY)
+			dev_mix_adjvol(d);
+	} else {
+		for (c = d->ctl_list; c != NULL; c = c->next) {
+			if (c->type != CTL_NUM ||
+			    strcmp(c->group, "") != 0 ||
+			    strcmp(c->node0.name, "output") != 0 ||
+			    strcmp(c->func, "level") != 0)
+				continue;
+			v = (master * c->maxval + 64) / 127;
+			dev_setctl(d, c->addr, v);
+		}
+	}
 }
 
 /*
@@ -966,9 +1018,11 @@ dev_new(char *path, struct aparams *par,
 		return NULL;
 	}
 	d = xmalloc(sizeof(struct dev));
-	d->path = xstrdup(path);
+	d->alt_list = NULL;
+	dev_addname(d,path);
 	d->num = dev_sndnum++;
 	d->opt_list = NULL;
+	d->alt_num = 1;
 
 	/*
 	 * XXX: below, we allocate a midi input buffer, since we don't
@@ -995,15 +1049,67 @@ dev_new(char *path, struct aparams *par,
 		d->slot[i].ops = NULL;
 		d->slot[i].vol = MIDI_MAXCTL;
 		d->slot[i].serial = d->serial++;
-		strlcpy(d->slot[i].name, "prog", SLOT_NAMEMAX);
+		memset(d->slot[i].name, 0, SLOT_NAMEMAX);
+	}
+	for (i = 0; i < DEV_NCTLSLOT; i++) {
+		d->ctlslot[i].ops = NULL;
+		d->ctlslot[i].dev = d;
+		d->ctlslot[i].mask = 0;
+		d->ctlslot[i].mode = 0;
 	}
 	d->slot_list = NULL;
 	d->master = MIDI_MAXCTL;
 	d->mtc.origin = 0;
 	d->tstate = MMC_STOP;
+	d->ctl_list = NULL;
 	d->next = dev_list;
 	dev_list = d;
 	return d;
+}
+
+/*
+ * add a alternate name
+ */
+int
+dev_addname(struct dev *d, char *name)
+{
+	struct dev_alt *a;
+
+	if (d->alt_list != NULL && d->alt_list->idx == DEV_NMAX - 1) {
+		log_puts(name);
+		log_puts(": too many alternate names\n");
+		return 0;
+	}
+	a = xmalloc(sizeof(struct dev_alt));
+	a->name = name;
+	a->idx = (d->alt_list == NULL) ? 0 : d->alt_list->idx + 1;
+	a->next = d->alt_list;
+	d->alt_list = a;
+	return 1;
+}
+
+/*
+ * set prefered alt device name
+ */
+void
+dev_setalt(struct dev *d, unsigned int idx)
+{
+	struct dev_alt **pa, *a;
+
+	/* find alt with given index */
+	for (pa = &d->alt_list; (a = *pa)->idx != idx; pa = &a->next)
+		;
+
+	/* detach from list */
+	*pa = a->next;
+
+	/* attach at head */
+	a->next = d->alt_list;
+	d->alt_list = a;
+
+	/* reopen device with the new alt */
+	if (idx != d->alt_num)
+		dev_reopen(d);
 }
 
 /*
@@ -1029,28 +1135,8 @@ dev_adjpar(struct dev *d, int mode,
  * monitor, midi control, and any necessary conversions.
  */
 int
-dev_open(struct dev *d)
+dev_allocbufs(struct dev *d)
 {
-	d->mode = d->reqmode;
-	d->round = d->reqround;
-	d->bufsz = d->reqbufsz;
-	d->rate = d->reqrate;
-	d->pchan = d->reqpchan;
-	d->rchan = d->reqrchan;
-	d->par = d->reqpar;
-	if (d->pchan == 0)
-		d->pchan = 2;
-	if (d->rchan == 0)
-		d->rchan = 2;
-	if (!dev_sio_open(d)) {
-		if (log_level >= 1) {
-			dev_log(d);
-			log_puts(": ");
-			log_puts(d->path);
-			log_puts(": failed to open audio device\n");
-		}
-		return 0;
-	}
 	if (d->mode & MODE_REC) {
 		/*
 		 * Create device <-> demuxer buffer
@@ -1084,7 +1170,6 @@ dev_open(struct dev *d)
 		} else
 			d->encbuf = NULL;
 	}
-	d->pstate = DEV_INIT;
 	if (log_level >= 2) {
 		dev_log(d);
 		log_puts(": ");
@@ -1109,29 +1194,99 @@ dev_open(struct dev *d)
 }
 
 /*
- * force the device to go in DEV_CFG state, the caller is supposed to
- * ensure buffers are drained
+ * Reset parameters and open the device.
+ */
+int
+dev_open(struct dev *d)
+{
+	int i;
+	char name[CTL_NAMEMAX];
+	struct dev_alt *a;
+
+	d->master_enabled = 0;
+	d->mode = d->reqmode;
+	d->round = d->reqround;
+	d->bufsz = d->reqbufsz;
+	d->rate = d->reqrate;
+	d->pchan = d->reqpchan;
+	d->rchan = d->reqrchan;
+	d->par = d->reqpar;
+	if (d->pchan == 0)
+		d->pchan = 2;
+	if (d->rchan == 0)
+		d->rchan = 2;
+	if (!dev_sio_open(d)) {
+		if (log_level >= 1) {
+			dev_log(d);
+			log_puts(": failed to open audio device\n");
+		}
+		return 0;
+	}
+	if (!dev_allocbufs(d))
+		return 0;
+
+	for (i = 0; i < DEV_NSLOT; i++) {
+		if (d->slot[i].name[0] == 0)
+			continue;
+		slot_ctlname(&d->slot[i], name, CTL_NAMEMAX);
+		dev_addctl(d, "app", CTL_NUM,
+		    CTLADDR_SLOT_LEVEL(i),
+		    name, -1, "level",
+		    NULL, -1, 127, d->slot[i].vol);
+	}
+
+	for (a = d->alt_list; a != NULL; a = a->next) {
+		snprintf(name, sizeof(name), "%d", a->idx);
+		dev_addctl(d, "", CTL_SEL,
+		    CTLADDR_ALT_SEL + a->idx,
+		    "server", -1, "device",
+		    name, -1, 1, a->idx == d->alt_num);
+	}
+
+	d->pstate = DEV_INIT;
+	return 1;
+}
+
+/*
+ * Force all slots to exit and close device, called after an error
  */
 void
-dev_close(struct dev *d)
+dev_abort(struct dev *d)
 {
 	int i;
 	struct slot *s;
+	struct ctlslot *c;
 
-#ifdef DEBUG
-	if (log_level >= 3) {
-		dev_log(d);
-		log_puts(": closing\n");
-	}
-#endif
-	d->pstate = DEV_CFG;
 	for (s = d->slot, i = DEV_NSLOT; i > 0; i--, s++) {
 		if (s->ops)
 			s->ops->exit(s->arg);
 		s->ops = NULL;
 	}
 	d->slot_list = NULL;
-	dev_sio_close(d);
+
+	for (c = d->ctlslot, i = DEV_NCTLSLOT; i > 0; i--, c++) {
+		if (c->ops)
+			c->ops->exit(c->arg);
+		c->ops = NULL;
+	}
+
+	if (d->pstate != DEV_CFG)
+		dev_close(d);
+}
+
+/*
+ * force the device to go in DEV_CFG state, the caller is supposed to
+ * ensure buffers are drained
+ */
+void
+dev_freebufs(struct dev *d)
+{
+#ifdef DEBUG
+	if (log_level >= 3) {
+		dev_log(d);
+		log_puts(": closing\n");
+	}
+#endif
 	if (d->mode & MODE_PLAY) {
 		if (d->encbuf != NULL)
 			xfree(d->encbuf);
@@ -1142,6 +1297,97 @@ dev_close(struct dev *d)
 			xfree(d->decbuf);
 		xfree(d->rbuf);
 	}
+}
+
+/*
+ * Close the device and exit all slots
+ */
+void
+dev_close(struct dev *d)
+{
+	struct ctl *c;
+
+	d->pstate = DEV_CFG;
+	dev_sio_close(d);
+	dev_freebufs(d);
+
+	/* there are no clients, just free remaining local controls */
+	while ((c = d->ctl_list) != NULL) {
+		d->ctl_list = c->next;
+		xfree(c);
+	}
+}
+
+/*
+ * Close the device, but attempt to migrate everything to a new sndio
+ * device.
+ */
+int
+dev_reopen(struct dev *d)
+{
+	struct slot *s;
+	long long pos;
+	unsigned int pstate;
+	int delta;
+
+	/* not opened */
+	if (d->pstate == DEV_CFG)
+		return 1;
+
+	/* save state */
+	delta = d->delta;
+	pstate = d->pstate;
+
+	if (!dev_sio_reopen(d))
+		return 0;
+
+	/* reopen returns a stopped device */
+	d->pstate = DEV_INIT;
+
+	/* reallocate new buffers, with new parameters */
+	dev_freebufs(d);
+	dev_allocbufs(d);
+
+	/*
+	 * adjust time positions, make anything go back delta ticks, so
+	 * that the new device can start at zero
+	 */
+	for (s = d->slot_list; s != NULL; s = s->next) {
+		pos = (long long)s->delta * d->round + s->delta_rem;
+		pos -= (long long)delta * s->round;
+		s->delta_rem = pos % (int)d->round;
+		s->delta = pos / (int)d->round;
+		if (log_level >= 3) {
+			slot_log(s);
+			log_puts(": adjusted: delta -> ");
+			log_puti(s->delta);
+			log_puts(", delta_rem -> ");
+			log_puti(s->delta_rem);
+			log_puts("\n");
+		}
+
+		/* reinitilize the format conversion chain */
+		slot_initconv(s);
+	}
+	if (d->tstate == MMC_RUN) {
+		d->mtc.delta -= delta * MTC_SEC;
+		if (log_level >= 2) {
+			dev_log(d);
+			log_puts(": adjusted mtc: delta ->");
+			log_puti(d->mtc.delta);
+			log_puts("\n");
+		}
+	}
+
+	/* remove old controls and add new ones */
+	dev_sioctl_close(d);
+	dev_sioctl_open(d);
+
+	/* start the device if needed */
+	if (pstate == DEV_RUN)
+		dev_wakeup(d);
+
+	return 1;
 }
 
 int
@@ -1228,6 +1474,7 @@ void
 dev_del(struct dev *d)
 {
 	struct dev **p;
+	struct dev_alt *a;
 
 #ifdef DEBUG
 	if (log_level >= 3) {
@@ -1250,7 +1497,10 @@ dev_del(struct dev *d)
 	}
 	midi_del(d->midi);
 	*p = d->next;
-	xfree(d->path);
+	while ((a = d->alt_list) != NULL) {
+		d->alt_list = a->next;
+		xfree(a);
+	}
 	xfree(d);
 }
 
@@ -1396,31 +1646,16 @@ dev_mmcloc(struct dev *d, unsigned int origin)
 		dev_mmcstart(d);
 }
 
-
 /*
  * allocate buffers & conversion chain
  */
 void
-slot_allocbufs(struct slot *s)
+slot_initconv(struct slot *s)
 {
 	unsigned int dev_nch;
 	struct dev *d = s->dev;
 
 	if (s->mode & MODE_PLAY) {
-		s->mix.bpf = s->par.bps * s->mix.nch;
-		abuf_init(&s->mix.buf, s->appbufsz * s->mix.bpf);
-
-		dev_nch = s->opt->pmax - s->opt->pmin + 1;
-		s->mix.decbuf = NULL;
-		s->mix.resampbuf = NULL;
-		s->mix.join = 1;
-		s->mix.expand = 1;
-		if (s->opt->dup) {
-			if (dev_nch > s->mix.nch)
-				s->mix.expand = dev_nch / s->mix.nch;
-			else if (dev_nch < s->mix.nch)
-				s->mix.join = s->mix.nch / dev_nch;
-		}
 		cmap_init(&s->mix.cmap,
 		    s->opt->pmin, s->opt->pmin + s->mix.nch - 1,
 		    s->opt->pmin, s->opt->pmin + s->mix.nch - 1,
@@ -1428,47 +1663,50 @@ slot_allocbufs(struct slot *s)
 		    s->opt->pmin, s->opt->pmax);
 		if (!aparams_native(&s->par)) {
 			dec_init(&s->mix.dec, &s->par, s->mix.nch);
-			s->mix.decbuf =
-			    xmalloc(s->round * s->mix.nch * sizeof(adata_t));
 		}
 		if (s->rate != d->rate) {
 			resamp_init(&s->mix.resamp, s->round, d->round,
 			    s->mix.nch);
-			s->mix.resampbuf =
-			    xmalloc(d->round * s->mix.nch * sizeof(adata_t));
+		}
+		s->mix.join = 1;
+		s->mix.expand = 1;
+		if (s->opt->dup && s->mix.cmap.nch > 0) {
+			dev_nch = d->pchan < (s->opt->pmax + 1) ?
+			    d->pchan - s->opt->pmin :
+			    s->opt->pmax - s->opt->pmin + 1;
+			if (dev_nch > s->mix.nch)
+				s->mix.expand = dev_nch / s->mix.nch;
+			else if (s->mix.nch > dev_nch)
+				s->mix.join = s->mix.nch / dev_nch;
 		}
 	}
 
 	if (s->mode & MODE_RECMASK) {
-		s->sub.bpf = s->par.bps * s->sub.nch;
-		abuf_init(&s->sub.buf, s->appbufsz * s->sub.bpf);
+		unsigned int outchan = (s->mode & MODE_MON) ?
+		    d->pchan : d->rchan;
 
-		dev_nch = s->opt->rmax - s->opt->rmin + 1;
-		s->sub.encbuf = NULL;
-		s->sub.resampbuf = NULL;
-		s->sub.join = 1;
-		s->sub.expand = 1;
-		if (s->opt->dup) {
-			if (dev_nch > s->sub.nch)
-				s->sub.join = dev_nch / s->sub.nch;
-			else if (dev_nch < s->sub.nch)
-				s->sub.expand = s->sub.nch / dev_nch;
-		}
 		cmap_init(&s->sub.cmap,
-		    0, ((s->mode & MODE_MON) ? d->pchan : d->rchan) - 1,
+		    0, outchan - 1,
 		    s->opt->rmin, s->opt->rmax,
 		    s->opt->rmin, s->opt->rmin + s->sub.nch - 1,
 		    s->opt->rmin, s->opt->rmin + s->sub.nch - 1);
 		if (s->rate != d->rate) {
 			resamp_init(&s->sub.resamp, d->round, s->round,
 			    s->sub.nch);
-			s->sub.resampbuf =
-			    xmalloc(d->round * s->sub.nch * sizeof(adata_t));
 		}
 		if (!aparams_native(&s->par)) {
 			enc_init(&s->sub.enc, &s->par, s->sub.nch);
-			s->sub.encbuf =
-			    xmalloc(s->round * s->sub.nch * sizeof(adata_t));
+		}
+		s->sub.join = 1;
+		s->sub.expand = 1;
+		if (s->opt->dup && s->sub.cmap.nch > 0) {
+			dev_nch = outchan < (s->opt->rmax + 1) ?
+			    outchan - s->opt->rmin :
+			    s->opt->rmax - s->opt->rmin + 1;
+			if (dev_nch > s->sub.nch)
+				s->sub.join = dev_nch / s->sub.nch;
+			else if (s->sub.nch > dev_nch)
+				s->sub.expand = s->sub.nch / dev_nch;
 		}
 
 		/*
@@ -1488,6 +1726,49 @@ slot_allocbufs(struct slot *s)
 			    s->appbufsz * s->sub.nch * sizeof(adata_t));
 		}
 	}
+}
+
+/*
+ * allocate buffers & conversion chain
+ */
+void
+slot_allocbufs(struct slot *s)
+{
+	struct dev *d = s->dev;
+
+	if (s->mode & MODE_PLAY) {
+		s->mix.bpf = s->par.bps * s->mix.nch;
+		abuf_init(&s->mix.buf, s->appbufsz * s->mix.bpf);
+
+		s->mix.decbuf = NULL;
+		s->mix.resampbuf = NULL;
+		if (!aparams_native(&s->par)) {
+			s->mix.decbuf =
+			    xmalloc(s->round * s->mix.nch * sizeof(adata_t));
+		}
+		if (s->rate != d->rate) {
+			s->mix.resampbuf =
+			    xmalloc(d->round * s->mix.nch * sizeof(adata_t));
+		}
+	}
+
+	if (s->mode & MODE_RECMASK) {
+		s->sub.bpf = s->par.bps * s->sub.nch;
+		abuf_init(&s->sub.buf, s->appbufsz * s->sub.bpf);
+
+		s->sub.encbuf = NULL;
+		s->sub.resampbuf = NULL;
+		if (s->rate != d->rate) {
+			s->sub.resampbuf =
+			    xmalloc(d->round * s->sub.nch * sizeof(adata_t));
+		}
+		if (!aparams_native(&s->par)) {
+			s->sub.encbuf =
+			    xmalloc(s->round * s->sub.nch * sizeof(adata_t));
+		}
+	}
+
+	slot_initconv(s);
 
 #ifdef DEBUG
 	if (log_level >= 3) {
@@ -1528,13 +1809,13 @@ slot_freebufs(struct slot *s)
  * allocate a new slot and register the given call-backs
  */
 struct slot *
-slot_new(struct dev *d, struct opt *opt, char *who,
+slot_new(struct dev *d, struct opt *opt, unsigned int id, char *who,
     struct slotops *ops, void *arg, int mode)
 {
 	char *p;
 	char name[SLOT_NAMEMAX];
-	unsigned int i, unit, umap = 0;
-	unsigned int ser, bestser, bestidx;
+	unsigned int i, ser, bestser, bestidx;
+	struct slot *unit[DEV_NSLOT];
 	struct slot *s;
 
 	/*
@@ -1553,33 +1834,32 @@ slot_new(struct dev *d, struct opt *opt, char *who,
 		strlcpy(name, "noname", SLOT_NAMEMAX);
 
 	/*
-	 * find the first unused "unit" number for this name
+	 * build a unit-to-slot map for this name
 	 */
-	for (i = 0, s = d->slot; i < DEV_NSLOT; i++, s++) {
-		if (s->ops == NULL)
-			continue;
+	for (i = 0; i < DEV_NSLOT; i++)
+		unit[i] = NULL;
+	for (i = 0; i < DEV_NSLOT; i++) {
+		s = d->slot + i;
 		if (strcmp(s->name, name) == 0)
-			umap |= (1 << s->unit);
-	}
-	for (unit = 0; ; unit++) {
-		if ((umap & (1 << unit)) == 0)
-			break;
+			unit[s->unit] = s;
 	}
 
 	/*
-	 * find a free controller slot with the same name/unit
+	 * find the free slot with the least unit number and same id
 	 */
-	for (i = 0, s = d->slot; i < DEV_NSLOT; i++, s++) {
-		if (s->ops == NULL &&
-		    strcmp(s->name, name) == 0 &&
-		    s->unit == unit) {
-#ifdef DEBUG
-			if (log_level >= 3) {
-				log_puts(name);
-				log_putu(unit);
-				log_puts(": reused\n");
-			}
-#endif
+	for (i = 0; i < DEV_NSLOT; i++) {
+		s = unit[i];
+		if (s != NULL && s->ops == NULL && s->id == id)
+			goto found;
+	}
+
+	/*
+	 * find the free slot with the least unit number
+	 */
+	for (i = 0; i < DEV_NSLOT; i++) {
+		s = unit[i];
+		if (s != NULL && s->ops == NULL) {
+			s->id = id;
 			goto found;
 		}
 	}
@@ -1599,29 +1879,23 @@ slot_new(struct dev *d, struct opt *opt, char *who,
 			bestidx = i;
 		}
 	}
-	if (bestidx == DEV_NSLOT) {
-		if (log_level >= 1) {
-			log_puts(name);
-			log_putu(unit);
-			log_puts(": out of sub-device slots\n");
-		}
-		return NULL;
-	}
-	s = d->slot + bestidx;
-	if (s->name[0] != '\0')
+	if (bestidx != DEV_NSLOT) {
+		s = d->slot + bestidx;
 		s->vol = MIDI_MAXCTL;
-	strlcpy(s->name, name, SLOT_NAMEMAX);
-	s->serial = d->serial++;
-	s->unit = unit;
-#ifdef DEBUG
-	if (log_level >= 3) {
-		log_puts(name);
-		log_putu(unit);
-		log_puts(": overwritten slot ");
-		log_putu(bestidx);
-		log_puts("\n");
+		strlcpy(s->name, name, SLOT_NAMEMAX);
+		s->serial = d->serial++;
+		for (i = 0; unit[i] != NULL; i++)
+			; /* nothing */
+		s->unit = i;
+		s->id = id;
+		goto found;
 	}
-#endif
+
+	if (log_level >= 1) {
+		log_puts(name);
+		log_puts(": out of sub-device slots\n");
+	}
+	return NULL;
 
 found:
 	if ((mode & MODE_REC) && (opt->mode & MODE_MON)) {
@@ -1637,13 +1911,14 @@ found:
 	}
 	if (!dev_ref(d))
 		return NULL;
+	dev_label(d, s - d->slot);
 	if ((mode & d->mode) != mode) {
 		if (log_level >= 1) {
 			slot_log(s);
 			log_puts(": requested mode not supported\n");
 		}
 		dev_unref(d);
-		return 0;
+		return NULL;
 	}
 	s->dev = d;
 	s->opt = opt;
@@ -1973,4 +2248,339 @@ void
 slot_read(struct slot *s)
 {
 	slot_skip_update(s);
+}
+
+/*
+ * allocate at control slot
+ */
+struct ctlslot *
+ctlslot_new(struct dev *d, struct ctlops *ops, void *arg)
+{
+	struct ctlslot *s;
+	struct ctl *c;
+	int i;
+
+	i = 0;
+	for (;;) {
+		if (i == DEV_NCTLSLOT)
+			return NULL;
+		s = d->ctlslot + i;
+		if (s->ops == NULL)
+			break;
+		i++;
+	}
+	s->dev = d;
+	s->mask = 1 << i;
+	if (!dev_ref(d))
+		return NULL;
+	s->ops = ops;
+	s->arg = arg;
+	for (c = d->ctl_list; c != NULL; c = c->next)
+		c->refs_mask |= s->mask;
+	return s;
+}
+
+/*
+ * free control slot
+ */
+void
+ctlslot_del(struct ctlslot *s)
+{
+	struct ctl *c, **pc;
+
+	pc = &s->dev->ctl_list;
+	while ((c = *pc) != NULL) {
+		c->refs_mask &= ~s->mask;
+		if (c->refs_mask == 0) {
+			*pc = c->next;
+			xfree(c);
+		} else
+			pc = &c->next;
+	}
+	s->ops = NULL;
+	dev_unref(s->dev);
+}
+
+void
+ctl_node_log(struct ctl_node *c)
+{
+	log_puts(c->name);
+	if (c->unit >= 0)
+		log_putu(c->unit);
+}
+
+void
+ctl_log(struct ctl *c)
+{
+	if (c->group[0] != 0) {
+		log_puts(c->group);
+		log_puts("/");
+	}
+	ctl_node_log(&c->node0);
+	log_puts(".");
+	log_puts(c->func);
+	log_puts("=");
+	switch (c->type) {
+	case CTL_NONE:
+		log_puts("none");
+		break;
+	case CTL_NUM:
+	case CTL_SW:
+		log_putu(c->curval);
+		break;
+	case CTL_VEC:
+	case CTL_LIST:
+	case CTL_SEL:
+		ctl_node_log(&c->node1);
+		log_puts(":");
+		log_putu(c->curval);
+	}
+	log_puts(" at ");
+	log_putu(c->addr);
+}
+
+/*
+ * add a ctl
+ */
+struct ctl *
+dev_addctl(struct dev *d, char *gstr, int type, int addr,
+    char *str0, int unit0, char *func, char *str1, int unit1, int maxval, int val)
+{
+	struct ctl *c, **pc;
+	int i;
+
+	c = xmalloc(sizeof(struct ctl));
+	c->type = type;
+	strlcpy(c->func, func, CTL_NAMEMAX);
+	strlcpy(c->group, gstr, CTL_NAMEMAX);
+	strlcpy(c->node0.name, str0, CTL_NAMEMAX);
+	c->node0.unit = unit0;
+	if (c->type == CTL_VEC || c->type == CTL_LIST || c->type == CTL_SEL) {
+		strlcpy(c->node1.name, str1, CTL_NAMEMAX);
+		c->node1.unit = unit1;
+	} else
+		memset(&c->node1, 0, sizeof(struct ctl_node));
+	c->addr = addr;
+	c->maxval = maxval;
+	c->val_mask = ~0;
+	c->desc_mask = ~0;
+	c->curval = val;
+	c->dirty = 0;
+	c->refs_mask = 0;
+	for (i = 0; i < DEV_NCTLSLOT; i++) {
+		c->refs_mask |= CTL_DEVMASK;
+		if (d->ctlslot[i].ops != NULL)
+			c->refs_mask |= 1 << i;
+	}
+	for (pc = &d->ctl_list; *pc != NULL; pc = &(*pc)->next)
+		; /* nothing */
+	c->next = NULL;
+	*pc = c;
+#ifdef DEBUG
+	if (log_level >= 3) {
+		dev_log(d);
+		log_puts(": adding ");
+		ctl_log(c);
+		log_puts("\n");
+	}
+#endif
+	return c;
+}
+
+void
+dev_rmctl(struct dev *d, int addr)
+{
+	struct ctl *c, **pc;
+
+	pc = &d->ctl_list;
+	for (;;) {
+		c = *pc;
+		if (c == NULL)
+			return;
+		if (c->type != CTL_NONE && c->addr == addr)
+			break;
+		pc = &c->next;
+	}
+	c->type = CTL_NONE;
+#ifdef DEBUG
+	if (log_level >= 3) {
+		dev_log(d);
+		log_puts(": removing ");
+		ctl_log(c);
+		log_puts(", refs_mask = 0x");
+		log_putx(c->refs_mask);
+		log_puts("\n");
+	}
+#endif
+	c->refs_mask &= ~CTL_DEVMASK;
+	if (c->refs_mask == 0) {
+		*pc = c->next;
+		xfree(c);
+		return;
+	}
+	c->desc_mask = ~0;
+}
+
+void
+dev_ctlsync(struct dev *d)
+{
+	struct ctl *c;
+	struct ctlslot *s;
+	int found, i;
+
+	found = 0;
+	for (c = d->ctl_list; c != NULL; c = c->next) {
+		if (c->addr != CTLADDR_MASTER &&
+		    c->type == CTL_NUM &&
+		    strcmp(c->group, "") == 0 &&
+		    strcmp(c->node0.name, "output") == 0 &&
+		    strcmp(c->func, "level") == 0)
+			found = 1;
+	}
+
+	if (d->master_enabled && found) {
+		if (log_level >= 2) {
+			dev_log(d);
+			log_puts(": software master level control disabled\n");
+		}
+		d->master_enabled = 0;
+		dev_rmctl(d, CTLADDR_MASTER);
+	} else if (!d->master_enabled && !found) {
+		if (log_level >= 2) {
+			dev_log(d);
+			log_puts(": software master level control enabled\n");
+		}
+		d->master_enabled = 1;
+		dev_addctl(d, "", CTL_NUM, CTLADDR_MASTER,
+		    "output", -1, "level", NULL, -1, 127, d->master);
+	}
+
+	for (s = d->ctlslot, i = DEV_NCTLSLOT; i > 0; i--, s++) {
+		if (s->ops)
+			s->ops->sync(s->arg);
+	}
+}
+
+int
+dev_setctl(struct dev *d, int addr, int val)
+{
+	struct ctl *c;
+	int num;
+
+	c = d->ctl_list;
+	for (;;) {
+		if (c == NULL) {
+			if (log_level >= 3) {
+				dev_log(d);
+				log_puts(": ");
+				log_putu(addr);
+				log_puts(": no such ctl address\n");
+			}
+			return 0;
+		}
+		if (c->type != CTL_NONE && c->addr == addr)
+			break;
+		c = c->next;
+	}
+	if (c->curval == val) {
+		if (log_level >= 3) {
+			ctl_log(c);
+			log_puts(": already set\n");
+		}
+		return 1;
+	}
+	if (val < 0 || val > c->maxval) {
+		if (log_level >= 3) {
+			dev_log(d);
+			log_puts(": ");
+			log_putu(val);
+			log_puts(": ctl val out of bounds\n");
+		}
+		return 0;
+	}
+	if (addr >= CTLADDR_END) {
+		if (log_level >= 3) {
+			ctl_log(c);
+			log_puts(": marked as dirty\n");
+		}
+		c->dirty = 1;
+		dev_ref(d);
+	} else {
+		if (addr >= CTLADDR_ALT_SEL) {
+			if (val) {
+				num = addr - CTLADDR_ALT_SEL;
+				dev_setalt(d, num);
+			}
+			return 1;
+		} else if (addr == CTLADDR_MASTER) {
+			if (d->master_enabled) {
+				dev_master(d, val);
+				dev_midi_master(d);
+			}
+		} else {
+			num = addr - CTLADDR_SLOT_LEVEL(0);
+			slot_setvol(d->slot + num, val);
+			dev_midi_vol(d, d->slot + num);
+		}
+		c->val_mask = ~0U;
+	}
+	c->curval = val;
+	return 1;
+}
+
+int
+dev_onval(struct dev *d, int addr, int val)
+{
+	struct ctl *c;
+
+	c = d->ctl_list;
+	for (;;) {
+		if (c == NULL)
+			return 0;
+		if (c->type != CTL_NONE && c->addr == addr)
+			break;
+		c = c->next;
+	}
+	c->curval = val;
+	c->val_mask = ~0U;
+	return 1;
+}
+
+void
+dev_label(struct dev *d, int i)
+{
+	struct ctl *c;
+	char name[CTL_NAMEMAX];
+
+	slot_ctlname(&d->slot[i], name, CTL_NAMEMAX);
+
+	c = d->ctl_list;
+	for (;;) {
+		if (c == NULL) {
+			dev_addctl(d, "app", CTL_NUM,
+			    CTLADDR_SLOT_LEVEL(i),
+			    name, -1, "level",
+			    NULL, -1, 127, d->slot[i].vol);
+			return;
+		}
+		if (c->addr == CTLADDR_SLOT_LEVEL(i))
+			break;
+		c = c->next;
+	}
+	if (strcmp(c->node0.name, name) == 0)
+		return;
+	strlcpy(c->node0.name, name, CTL_NAMEMAX);
+	c->desc_mask = ~0;
+}
+
+int
+dev_nctl(struct dev *d)
+{
+	struct ctl *c;
+	int n;
+
+	n = 0;
+	for (c = d->ctl_list; c != NULL; c = c->next)
+		n++;
+	return n;
 }

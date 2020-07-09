@@ -107,9 +107,7 @@ struct ttm_pool_opts {
  **/
 struct ttm_pool_manager {
 	struct kobject		kobj;
-#ifdef notyet
 	struct shrinker		mm_shrink;
-#endif
 	struct ttm_pool_opts	options;
 
 	union {
@@ -388,7 +386,6 @@ out:
  *
  * This code is crying out for a shrinker per pool....
  */
-#ifdef notyet
 static unsigned long
 ttm_pool_shrink_scan(struct shrinker *shrink, struct shrink_control *sc)
 {
@@ -441,24 +438,18 @@ ttm_pool_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
 
 	return count;
 }
-#endif
 
 static int ttm_pool_mm_shrink_init(struct ttm_pool_manager *manager)
 {
-#ifdef notyet
 	manager->mm_shrink.count_objects = ttm_pool_shrink_count;
 	manager->mm_shrink.scan_objects = ttm_pool_shrink_scan;
 	manager->mm_shrink.seeks = 1;
 	return register_shrinker(&manager->mm_shrink);
-#endif
-	return 0;
 }
 
 static void ttm_pool_mm_shrink_fini(struct ttm_pool_manager *manager)
 {
-#ifdef notyet
 	unregister_shrinker(&manager->mm_shrink);
-#endif
 }
 
 static int ttm_set_pages_caching(struct vm_page **pages,
@@ -767,8 +758,8 @@ static void ttm_put_pages(struct vm_page **pages, unsigned npages, int flags,
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 			if (!(flags & TTM_PAGE_FLAG_DMA32) &&
 			    (npages - i) >= HPAGE_PMD_NR) {
-				for (j = 0; j < HPAGE_PMD_NR; ++j)
-					if (p++ != pages[i + j])
+				for (j = 1; j < HPAGE_PMD_NR; ++j)
+					if (++p != pages[i + j])
 					    break;
 
 				if (j == HPAGE_PMD_NR)
@@ -804,8 +795,8 @@ static void ttm_put_pages(struct vm_page **pages, unsigned npages, int flags,
 			if (!p)
 				break;
 
-			for (j = 0; j < HPAGE_PMD_NR; ++j)
-				if (p++ != pages[i + j])
+			for (j = 1; j < HPAGE_PMD_NR; ++j)
+				if (++p != pages[i + j])
 				    break;
 
 			if (j != HPAGE_PMD_NR)
@@ -1067,7 +1058,7 @@ void ttm_page_alloc_fini(void)
 static void
 ttm_pool_unpopulate_helper(struct ttm_tt *ttm, unsigned mem_count_update)
 {
-	struct ttm_mem_global *mem_glob = ttm->bdev->glob->mem_glob;
+	struct ttm_mem_global *mem_glob = &ttm_mem_glob;
 	unsigned i;
 
 	if (mem_count_update == 0)
@@ -1088,7 +1079,7 @@ put_pages:
 
 int ttm_pool_populate(struct ttm_tt *ttm, struct ttm_operation_ctx *ctx)
 {
-	struct ttm_mem_global *mem_glob = ttm->bdev->glob->mem_glob;
+	struct ttm_mem_global *mem_glob = &ttm_mem_glob;
 	unsigned i;
 	int ret;
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: miofile.c,v 1.4 2015/12/20 11:38:33 ratchov Exp $	*/
+/*	$OpenBSD: miofile.c,v 1.7 2020/06/12 15:40:18 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -45,13 +45,71 @@ struct fileops port_mio_ops = {
 	port_mio_hup
 };
 
+/*
+ * open the port using one of the provided paths
+ */
+static struct mio_hdl *
+port_mio_openlist(struct port *c, unsigned int mode)
+{
+	struct mio_hdl *hdl;
+	struct name *n;
+	int idx;
+
+	idx = 0;
+	n = c->path_list;
+	while (1) {
+		if (n == NULL)
+			break;
+		hdl = fdpass_mio_open(c->num, idx, mode);
+		if (hdl != NULL) {
+			if (log_level >= 2) {
+				port_log(c);
+				log_puts(": using ");
+				log_puts(n->str);
+				log_puts("\n");
+			}
+			return hdl;
+		}
+		n = n->next;
+		idx++;
+	}
+	return NULL;
+}
+
 int
 port_mio_open(struct port *p)
 {
-	p->mio.hdl = fdpass_mio_open(p->num, p->midi->mode);
+	p->mio.hdl = port_mio_openlist(p, p->midi->mode);
 	if (p->mio.hdl == NULL)
 		return 0;
-	p->mio.file = file_new(&port_mio_ops, p, p->path, mio_nfds(p->mio.hdl));
+	p->mio.file = file_new(&port_mio_ops, p, "port", mio_nfds(p->mio.hdl));
+	return 1;
+}
+
+/*
+ * Open an alternate port. Upon success, close the old port
+ * and continue using the new one.
+ */
+int
+port_mio_reopen(struct port *p)
+{
+	struct mio_hdl *hdl;
+
+	hdl = port_mio_openlist(p, p->midi->mode);
+	if (hdl == NULL) {
+		if (log_level >= 1) {
+			port_log(p);
+			log_puts(": couldn't open an alternate port\n");
+		}
+		return 0;
+	}
+
+	/* close unused device */
+	file_del(p->mio.file);
+	mio_close(p->mio.hdl);
+
+	p->mio.hdl = hdl;
+	p->mio.file = file_new(&port_mio_ops, p, "port", mio_nfds(hdl));
 	return 1;
 }
 
@@ -129,5 +187,6 @@ port_mio_hup(void *arg)
 {
 	struct port *p = arg;
 
-	port_close(p);
+	if (!port_reopen(p))
+		port_abort(p);
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: tls.c,v 1.83 2019/04/01 15:58:02 jsing Exp $ */
+/* $OpenBSD: tls.c,v 1.85 2020/05/24 15:12:54 jsing Exp $ */
 /*
  * Copyright (c) 2014 Joel Sing <jsing@openbsd.org>
  *
@@ -405,6 +405,8 @@ tls_configure_ssl_keypair(struct tls *ctx, SSL_CTX *ssl_ctx,
 int
 tls_configure_ssl(struct tls *ctx, SSL_CTX *ssl_ctx)
 {
+	SSL_CTX_clear_mode(ssl_ctx, SSL_MODE_AUTO_RETRY);
+
 	SSL_CTX_set_mode(ssl_ctx, SSL_MODE_ENABLE_PARTIAL_WRITE);
 	SSL_CTX_set_mode(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 
@@ -414,6 +416,7 @@ tls_configure_ssl(struct tls *ctx, SSL_CTX *ssl_ctx)
 	SSL_CTX_clear_options(ssl_ctx, SSL_OP_NO_TLSv1);
 	SSL_CTX_clear_options(ssl_ctx, SSL_OP_NO_TLSv1_1);
 	SSL_CTX_clear_options(ssl_ctx, SSL_OP_NO_TLSv1_2);
+	SSL_CTX_clear_options(ssl_ctx, SSL_OP_NO_TLSv1_3);
 
 	if ((ctx->config->protocols & TLS_PROTOCOL_TLSv1_0) == 0)
 		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_TLSv1);
@@ -421,6 +424,8 @@ tls_configure_ssl(struct tls *ctx, SSL_CTX *ssl_ctx)
 		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_TLSv1_1);
 	if ((ctx->config->protocols & TLS_PROTOCOL_TLSv1_2) == 0)
 		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_TLSv1_2);
+	if ((ctx->config->protocols & TLS_PROTOCOL_TLSv1_3) == 0)
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_TLSv1_3);
 
 	if (ctx->config->alpn != NULL) {
 		if (SSL_CTX_set_alpn_protos(ssl_ctx, ctx->config->alpn,

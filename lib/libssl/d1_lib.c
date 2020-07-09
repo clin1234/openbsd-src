@@ -1,4 +1,4 @@
-/* $OpenBSD: d1_lib.c,v 1.42 2017/04/10 17:27:33 jsing Exp $ */
+/* $OpenBSD: d1_lib.c,v 1.46 2020/07/07 19:31:11 jsing Exp $ */
 /*
  * DTLS implementation written by Nagendra Modadugu
  * (nagendra@cs.stanford.edu) for the OpenSSL project 2005.
@@ -73,17 +73,8 @@
 static int dtls1_listen(SSL *s, struct sockaddr *client);
 
 SSL3_ENC_METHOD DTLSv1_enc_data = {
-	.enc = dtls1_enc,
 	.enc_flags = SSL_ENC_FLAG_EXPLICIT_IV,
 };
-
-long
-dtls1_default_timeout(void)
-{
-	/* 2 hours, the 24 hours mentioned in the DTLSv1 spec
-	 * is way too long for http, the cache would over fill */
-	return (60*60*2);
-}
 
 int
 dtls1_new(SSL *s)
@@ -137,17 +128,17 @@ dtls1_clear_queues(SSL *s)
 {
 	pitem *item = NULL;
 	hm_fragment *frag = NULL;
-	DTLS1_RECORD_DATA *rdata;
+	DTLS1_RECORD_DATA_INTERNAL *rdata;
 
 	while ((item = pqueue_pop(D1I(s)->unprocessed_rcds.q)) != NULL) {
-		rdata = (DTLS1_RECORD_DATA *) item->data;
+		rdata = (DTLS1_RECORD_DATA_INTERNAL *) item->data;
 		free(rdata->rbuf.buf);
 		free(item->data);
 		pitem_free(item);
 	}
 
 	while ((item = pqueue_pop(D1I(s)->processed_rcds.q)) != NULL) {
-		rdata = (DTLS1_RECORD_DATA *) item->data;
+		rdata = (DTLS1_RECORD_DATA_INTERNAL *) item->data;
 		free(rdata->rbuf.buf);
 		free(item->data);
 		pitem_free(item);
@@ -168,7 +159,7 @@ dtls1_clear_queues(SSL *s)
 	}
 
 	while ((item = pqueue_pop(D1I(s)->buffered_app_data.q)) != NULL) {
-		rdata = (DTLS1_RECORD_DATA *) item->data;
+		rdata = (DTLS1_RECORD_DATA_INTERNAL *) item->data;
 		free(rdata->rbuf.buf);
 		free(item->data);
 		pitem_free(item);
@@ -455,11 +446,19 @@ void
 dtls1_build_sequence_number(unsigned char *dst, unsigned char *seq,
     unsigned short epoch)
 {
-	unsigned char dtlsseq[SSL3_SEQUENCE_SIZE];
-	unsigned char *p;
+	CBB cbb;
 
-	p = dtlsseq;
-	s2n(epoch, p);
-	memcpy(p, &seq[2], SSL3_SEQUENCE_SIZE - 2);
-	memcpy(dst, dtlsseq, SSL3_SEQUENCE_SIZE);
+	if (!CBB_init_fixed(&cbb, dst, SSL3_SEQUENCE_SIZE))
+		goto err;
+	if (!CBB_add_u16(&cbb, epoch))
+		goto err;
+	if (!CBB_add_bytes(&cbb, &seq[2], SSL3_SEQUENCE_SIZE - 2))
+		goto err;
+	if (!CBB_finish(&cbb, NULL, NULL))
+		goto err;
+
+	return;
+
+ err:
+	CBB_cleanup(&cbb);
 }

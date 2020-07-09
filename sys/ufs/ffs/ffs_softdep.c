@@ -1,4 +1,4 @@
-/*	$OpenBSD: ffs_softdep.c,v 1.143 2018/07/02 20:56:22 bluhm Exp $	*/
+/*	$OpenBSD: ffs_softdep.c,v 1.149 2020/03/09 16:49:12 millert Exp $	*/
 
 /*
  * Copyright 1998, 2000 Marshall Kirk McKusick. All Rights Reserved.
@@ -163,7 +163,7 @@ STATIC	int inodedep_lookup(struct fs *, ufsino_t, int, struct inodedep **);
 STATIC	int pagedep_lookup(struct inode *, daddr_t, int, struct pagedep **);
 STATIC	void pause_timer(void *);
 STATIC	int request_cleanup(int, int);
-STATIC	int process_worklist_item(struct mount *, int);
+STATIC	int process_worklist_item(struct mount *, int *, int);
 STATIC	void add_to_worklist(struct worklist *);
 
 /*
@@ -289,21 +289,19 @@ struct sema {
 	pid_t	holder;
 	char	*name;
 	int	prio;
-	int	timo;
 };
-STATIC	void sema_init(struct sema *, char *, int, int);
+STATIC	void sema_init(struct sema *, char *, int);
 STATIC	int sema_get(struct sema *, struct lockit *);
 STATIC	void sema_release(struct sema *);
 
 STATIC void
-sema_init(struct sema *semap, char *name, int prio, int timo)
+sema_init(struct sema *semap, char *name, int prio)
 {
 
 	semap->holder = -1;
 	semap->value = 0;
 	semap->name = name;
 	semap->prio = prio;
-	semap->timo = timo;
 }
 
 STATIC int
@@ -314,7 +312,7 @@ sema_get(struct sema *semap, struct lockit *interlock)
 	if (semap->value++ > 0) {
 		if (interlock != NULL)
 			s = FREE_LOCK_INTERLOCKED(interlock);
-		tsleep((caddr_t)semap, semap->prio, semap->name, semap->timo);
+		tsleep_nsec(semap, semap->prio, semap->name, INFSLP);
 		if (interlock != NULL) {
 			ACQUIRE_LOCK_INTERLOCKED(interlock, s);
 			FREE_LOCK(interlock);
@@ -641,7 +639,8 @@ softdep_process_worklist(struct mount *matchmnt)
 	loopcount = 1;
 	getmicrouptime(&starttime);
 	while (num_on_worklist > 0) {
-		matchcnt += process_worklist_item(matchmnt, 0);
+		if (process_worklist_item(matchmnt, &matchcnt, LK_NOWAIT) == 0)
+			break;
 
 		/*
 		 * If a umount operation wants to run the worklist
@@ -709,13 +708,12 @@ softdep_process_worklist(struct mount *matchmnt)
  * Process one item on the worklist.
  */
 STATIC int
-process_worklist_item(struct mount *matchmnt, int flags)
+process_worklist_item(struct mount *matchmnt, int *matchcnt, int flags)
 {
 	struct worklist *wk, *wkend;
 	struct dirrem *dirrem;
 	struct mount *mp;
 	struct vnode *vp;
-	int matchcnt = 0;
 
 	ACQUIRE_LOCK(&lk);
 	/*
@@ -763,8 +761,8 @@ process_worklist_item(struct mount *matchmnt, int flags)
 			panic("%s: dirrem on suspended filesystem",
 				"process_worklist_item");
 #endif
-		if (mp == matchmnt)
-			matchcnt += 1;
+		if (matchmnt != NULL && mp == matchmnt)
+			*matchcnt += 1;
 		handle_workitem_remove(WK_DIRREM(wk));
 		break;
 
@@ -776,8 +774,8 @@ process_worklist_item(struct mount *matchmnt, int flags)
 			panic("%s: freeblks on suspended filesystem",
 				"process_worklist_item");
 #endif
-		if (mp == matchmnt)
-			matchcnt += 1;
+		if (matchmnt != NULL && mp == matchmnt)
+			*matchcnt += 1;
 		handle_workitem_freeblocks(WK_FREEBLKS(wk));
 		break;
 
@@ -789,8 +787,8 @@ process_worklist_item(struct mount *matchmnt, int flags)
 			panic("%s: freefrag on suspended filesystem",
 				"process_worklist_item");
 #endif
-		if (mp == matchmnt)
-			matchcnt += 1;
+		if (matchmnt != NULL && mp == matchmnt)
+			*matchcnt += 1;
 		handle_workitem_freefrag(WK_FREEFRAG(wk));
 		break;
 
@@ -802,8 +800,8 @@ process_worklist_item(struct mount *matchmnt, int flags)
 			panic("%s: freefile on suspended filesystem",
 				"process_worklist_item");
 #endif
-		if (mp == matchmnt)
-			matchcnt += 1;
+		if (matchmnt != NULL && mp == matchmnt)
+			*matchcnt += 1;
 		handle_workitem_freefile(WK_FREEFILE(wk));
 		break;
 
@@ -812,7 +810,7 @@ process_worklist_item(struct mount *matchmnt, int flags)
 		    "softdep", TYPENAME(wk->wk_type));
 		/* NOTREACHED */
 	}
-	return (matchcnt);
+	return (1);
 }
 
 /*
@@ -852,7 +850,7 @@ softdep_flushworklist(struct mount *oldmnt, int *countp, struct proc *p)
 	 */
 	while (softdep_worklist_busy) {
 		softdep_worklist_req += 1;
-		tsleep(&softdep_worklist_req, PRIBIO, "softflush", 0);
+		tsleep_nsec(&softdep_worklist_req, PRIBIO, "softflush", INFSLP);
 		softdep_worklist_req -= 1;
 	}
 	softdep_worklist_busy = -1;
@@ -1176,12 +1174,12 @@ softdep_initialize(void)
 	arc4random_buf(&softdep_hashkey, sizeof(softdep_hashkey));
 	pagedep_hashtbl = hashinit(initialvnodes / 5, M_PAGEDEP, M_WAITOK,
 	    &pagedep_hash);
-	sema_init(&pagedep_in_progress, "pagedep", PRIBIO, 0);
+	sema_init(&pagedep_in_progress, "pagedep", PRIBIO);
 	inodedep_hashtbl = hashinit(initialvnodes, M_INODEDEP, M_WAITOK,
 	    &inodedep_hash);
-	sema_init(&inodedep_in_progress, "inodedep", PRIBIO, 0);
+	sema_init(&inodedep_in_progress, "inodedep", PRIBIO);
 	newblk_hashtbl = hashinit(64, M_NEWBLK, M_WAITOK, &newblk_hash);
-	sema_init(&newblk_in_progress, "newblk", PRIBIO, 0);
+	sema_init(&newblk_in_progress, "newblk", PRIBIO);
 	timeout_set(&proc_waiting_timeout, pause_timer, NULL);
 	pool_init(&pagedep_pool, sizeof(struct pagedep), 0, IPL_NONE,
 	    PR_WAITOK, "pagedep", NULL);
@@ -1850,7 +1848,7 @@ setup_allocindir_phase2(struct buf *bp, struct inode *ip,
 				NULL);
 		}
 		newindirdep->ir_savebp =
-		    getblk(ip->i_devvp, bp->b_blkno, bp->b_bcount, 0, 0);
+		    getblk(ip->i_devvp, bp->b_blkno, bp->b_bcount, 0, INFSLP);
 #if 0
 		BUF_KERNPROC(newindirdep->ir_savebp);
 #endif
@@ -4488,10 +4486,7 @@ merge_inode_lists(struct inodedep *inodedep)
 		}
 		newadp = TAILQ_FIRST(&inodedep->id_newinoupdt);
 	}
-	while ((newadp = TAILQ_FIRST(&inodedep->id_newinoupdt)) != NULL) {
-		TAILQ_REMOVE(&inodedep->id_newinoupdt, newadp, ad_next);
-		TAILQ_INSERT_TAIL(&inodedep->id_inoupdt, newadp, ad_next);
-	}
+	TAILQ_CONCAT(&inodedep->id_inoupdt, &inodedep->id_newinoupdt, ad_next);
 }
 
 /*
@@ -5258,8 +5253,8 @@ request_cleanup(int resource, int islocked)
 		atomic_setbits_int(&p->p_flag, P_SOFTDEP);
 		if (islocked)
 			FREE_LOCK(&lk);
-		process_worklist_item(NULL, LK_NOWAIT);
-		process_worklist_item(NULL, LK_NOWAIT);
+		process_worklist_item(NULL, NULL, LK_NOWAIT);
+		process_worklist_item(NULL, NULL, LK_NOWAIT);
 		atomic_clearbits_int(&p->p_flag, P_SOFTDEP);
 		stat_worklist_push += 2;
 		if (islocked)
@@ -5312,7 +5307,7 @@ request_cleanup(int resource, int islocked)
 		timeout_add(&proc_waiting_timeout, tickdelay > 2 ? tickdelay : 2);
 
 	s = FREE_LOCK_INTERLOCKED(&lk);
-	(void) tsleep((caddr_t)&proc_waiting, PPAUSE, "softupdate", 0);
+	tsleep_nsec(&proc_waiting, PPAUSE, "softupdate", INFSLP);
 	ACQUIRE_LOCK_INTERLOCKED(&lk, s);
 	proc_waiting -= 1;
 	if (islocked == 0)
@@ -5574,7 +5569,7 @@ getdirtybuf(struct buf *bp, int waitfor)
 			return (0);
 		bp->b_flags |= B_WANTED;
 		s = FREE_LOCK_INTERLOCKED(&lk);
-		tsleep((caddr_t)bp, PRIBIO + 1, "sdsdty", 0);
+		tsleep_nsec(bp, PRIBIO+1, "sdsdty", INFSLP);
 		ACQUIRE_LOCK_INTERLOCKED(&lk, s);
 		return (-1);
 	}
@@ -5602,7 +5597,7 @@ drain_output(struct vnode *vp, int islocked)
 	while (vp->v_numoutput) {
 		vp->v_bioflag |= VBIOWAIT;
 		s = FREE_LOCK_INTERLOCKED(&lk);
-		tsleep((caddr_t)&vp->v_numoutput, PRIBIO + 1, "drain_output", 0);
+		tsleep_nsec(&vp->v_numoutput, PRIBIO+1, "drain_output", INFSLP);
 		ACQUIRE_LOCK_INTERLOCKED(&lk, s);
 	}
 	if (!islocked)

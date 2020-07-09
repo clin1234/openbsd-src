@@ -1,4 +1,4 @@
-/*	$OpenBSD: engine.c,v 1.55 2018/11/27 09:33:48 espie Exp $ */
+/*	$OpenBSD: engine.c,v 1.69 2020/01/26 12:41:21 espie Exp $ */
 /*
  * Copyright (c) 2012 Marc Espie.
  *
@@ -241,7 +241,7 @@ void
 Job_Touch(GNode *gn)
 {
 	handle_all_signals();
-	if (gn->type & (OP_JOIN|OP_USE|OP_EXEC|OP_OPTIONAL|OP_PHONY)) {
+	if (gn->type & (OP_USE|OP_OPTIONAL|OP_PHONY)) {
 		/*
 		 * .JOIN, .USE, and .OPTIONAL targets are "virtual" targets
 		 * and, as such, shouldn't really be created.
@@ -289,7 +289,6 @@ Make_HandleUse(GNode	*cgn,	/* The .USE node */
 	GNode	*gn;	/* A child of the .USE node */
 	LstNode	ln;	/* An element in the children list */
 
-
 	assert(cgn->type & (OP_USE|OP_TRANSFORM));
 
 	if (pgn == NULL)
@@ -308,7 +307,7 @@ Make_HandleUse(GNode	*cgn,	/* The .USE node */
 
 		if (Lst_AddNew(&pgn->children, gn)) {
 			Lst_AtEnd(&gn->parents, pgn);
-			pgn->unmade++;
+			pgn->children_left++;
 		}
 	}
 
@@ -320,14 +319,14 @@ Make_HandleUse(GNode	*cgn,	/* The .USE node */
 	pgn->type |= cgn->type & ~(OP_OPMASK|OP_USE|OP_TRANSFORM|OP_DOUBLE);
 
 	/*
-	 * This child node is now "made", so we decrement the count of
-	 * unmade children in the parent... We also remove the child
+	 * This child node is now built, so we decrement the count of
+	 * not yet built children in the parent... We also remove the child
 	 * from the parent's list to accurately reflect the number of
-	 * decent children the parent has. This is used by Make_Run to
+	 * remaining children the parent has. This is used by Make_Run to
 	 * decide whether to queue the parent or examine its children...
 	 */
 	if (cgn->type & OP_USE)
-		pgn->unmade--;
+		pgn->children_left--;
 }
 
 void
@@ -348,7 +347,7 @@ Make_DoAllVar(GNode *gn)
 
 	for (ln = Lst_First(&gn->children); ln != NULL; ln = Lst_Adv(ln)) {
 		child = Lst_Datum(ln);
-		if ((child->type & (OP_EXEC|OP_USE|OP_INVISIBLE)) != 0)
+		if ((child->type & (OP_USE|OP_INVISIBLE)) != 0)
 			continue;
 		if (OP_NOP(child->type) ||
 		    (target = Var(TARGET_INDEX, child)) == NULL) {
@@ -372,12 +371,9 @@ Make_DoAllVar(GNode *gn)
 		 * hosed.
 		 */
 		do_oodate = false;
-		if (gn->type & OP_JOIN) {
-			if (child->built_status == MADE)
-				do_oodate = true;
-		} else if (is_strictly_before(gn->mtime, child->mtime) ||
+		if (is_strictly_before(gn->mtime, child->mtime) ||
 		   (!is_strictly_before(child->mtime, starttime) &&
-		   child->built_status == MADE))
+		   child->built_status == REBUILT))
 		   	do_oodate = true;
 		if (do_oodate) {
 			oodate_count++;
@@ -414,9 +410,6 @@ Make_DoAllVar(GNode *gn)
 
 	if (gn->impliedsrc)
 		Var(IMPSRC_INDEX, gn) = Var(TARGET_INDEX, gn->impliedsrc);
-
-	if (gn->type & OP_JOIN)
-		Var(TARGET_INDEX, gn) = Var(ALLSRC_INDEX, gn);
 }
 
 /* Wrapper to call Make_TimeStamp from a forEach loop.	*/
@@ -435,7 +428,7 @@ Make_OODate(GNode *gn)
 	 * Certain types of targets needn't even be sought as their datedness
 	 * doesn't depend on their modification time...
 	 */
-	if ((gn->type & (OP_JOIN|OP_USE|OP_EXEC|OP_PHONY)) == 0) {
+	if ((gn->type & (OP_USE|OP_PHONY)) == 0) {
 		(void)Dir_MTime(gn);
 		if (DEBUG(MAKE)) {
 			if (!is_out_of_date(gn->mtime))
@@ -447,7 +440,7 @@ Make_OODate(GNode *gn)
 	}
 
 	/*
-	 * A target is remade in one of the following circumstances:
+	 * A target is rebuilt in one of the following circumstances:
 	 * - its modification time is smaller than that of its youngest child
 	 *   and it would actually be run (has commands or type OP_NOP)
 	 * - it's the object of a force operator
@@ -463,15 +456,7 @@ Make_OODate(GNode *gn)
 		if (DEBUG(MAKE))
 			printf(".USE node...");
 		oodate = false;
-	} else if (gn->type & OP_JOIN) {
-		/*
-		 * A target with the .JOIN attribute is only considered
-		 * out-of-date if any of its children was out-of-date.
-		 */
-		if (DEBUG(MAKE))
-			printf(".JOIN node...");
-		oodate = gn->childMade;
-	} else if (gn->type & (OP_FORCE|OP_EXEC|OP_PHONY)) {
+	} else if (gn->type & (OP_FORCE|OP_PHONY)) {
 		/*
 		 * A node which is the object of the force (!) operator or which
 		 * has the .EXEC attribute is always considered out-of-date.
@@ -552,6 +537,9 @@ recheck_command_for_shell(char **av)
 	if (strcmp(av[0], "exec") == 0)
 		av++;
 
+	if (!av[0])
+		return NULL;
+
 	for (p = runsh; *p; p++)
 		if (strcmp(av[0], *p) == 0)
 			return NULL;
@@ -601,8 +589,6 @@ run_command(const char *cmd, bool errCheck)
 	_exit(1);
 }
 
-static Job myjob;
-
 void
 job_attach_node(Job *job, GNode *node)
 {
@@ -615,7 +601,7 @@ job_attach_node(Job *job, GNode *node)
 }
 
 void
-job_handle_status(Job *job, int status)
+handle_job_status(Job *job, int status)
 {
 	bool silent;
 	int dying;
@@ -664,19 +650,21 @@ job_handle_status(Job *job, int status)
 			printf(" in target '%s'", job->node->name);
 		if (job->flags & JOB_ERRCHECK) {
 			job->node->built_status = ERROR;
-			/* compute expensive status if we really want it */
-			if ((job->flags & JOB_SILENT) && job == &myjob)
-				determine_expensive_job(job);
 			if (!keepgoing) {
 				if (!silent)
 					printf("\n");
-				job->next = errorJobs;
-				errorJobs = job;
+				job->flags |= JOB_KEEPERROR;
 				/* XXX don't free the command */
 				return;
 			}
 			printf(", line %lu of %s", job->location->lineno, 
 			    job->location->fname);
+			/* Parallel make already determined whether
+			 * JOB_IS_EXPENSIVE, perform the computation for
+			 * sequential make to figure out whether to display the
+			 * command or not.  */
+			if ((job->flags & JOB_SILENT) && sequential)
+				determine_expensive_job(job);
 			if ((job->flags & (JOB_SILENT | JOB_IS_EXPENSIVE)) 
 			    == JOB_SILENT)
 				printf(": %s", job->cmd);
@@ -697,19 +685,12 @@ job_handle_status(Job *job, int status)
 int
 run_gnode(GNode *gn)
 {
+	Job *j;
 	if (!gn || (gn->type & OP_DUMMY))
 		return NOSUCHNODE;
 
-	gn->built_status = MADE;
-
-	job_attach_node(&myjob, gn);
-	while (myjob.exit_type == JOB_EXIT_OKAY) {
-		bool finished = job_run_next(&myjob);
-		if (finished)
-			break;
-		handle_one_job(&myjob);
-	}
-
+	Job_Make(gn);
+	loop_handle_running_jobs();
 	return gn->built_status;
 }
 
@@ -788,11 +769,12 @@ do_run_command(Job *job, const char *pre)
 		Punt("Could not fork");
 		/*NOTREACHED*/
 	case 0:
+		reset_signal_mask();
 		/* put a random delay unless we're the only job running
 		 * and there's nothing left to do.
 		 */
 		if (random_delay)
-			if (!(runningJobs == NULL && no_jobs_left()))
+			if (!(runningJobs == NULL && nothing_left_to_build()))
 				usleep(arc4random_uniform(random_delay));
 		run_command(cmd, errCheck);
 		/*NOTREACHED*/
@@ -823,7 +805,7 @@ job_run_next(Job *job)
 		handle_all_signals();
 		job->location = &command->location;
 		Parse_SetLocation(job->location);
-		job->cmd = Var_Subst(command->string, &gn->context, false);
+		job->cmd = Var_Subst(command->string, &gn->localvars, false);
 		job->next_cmd = Lst_Adv(job->next_cmd);
 		if (fatal_errors)
 			Punt(NULL);

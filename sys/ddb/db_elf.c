@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_elf.c,v 1.28 2017/09/08 05:36:52 deraadt Exp $	*/
+/*	$OpenBSD: db_elf.c,v 1.30 2020/05/26 21:35:43 gkoehler Exp $	*/
 /*	$NetBSD: db_elf.c,v 1.13 2000/07/07 21:55:18 jhawk Exp $	*/
 
 /*-
@@ -152,8 +152,7 @@ db_elf_sym_init(int symsize, void *symtab, void *esymtab, const char *name)
 	 * Now, sanity check the symbols against the string table.
 	 */
 	if (symtab_start == NULL || strtab_start == NULL ||
-	    ALIGNED_POINTER(symtab_start, long) == 0 ||
-	    ALIGNED_POINTER(strtab_start, long) == 0) {
+	    ALIGNED_POINTER(symtab_start, long) == 0) {
 		errstr = "symtab unaligned";
 		goto badheader;
 	}
@@ -263,8 +262,7 @@ db_elf_sym_lookup(char *symstr)
  * provided threshold).
  */
 Elf_Sym *
-db_elf_sym_search(db_addr_t off, db_strategy_t strategy,
-    db_expr_t *diffp)
+db_elf_sym_search(vaddr_t off, db_strategy_t strategy, db_expr_t *diffp)
 {
 	db_symtab_t *stab = &db_symtab;
 	Elf_Sym *rsymp, *symp, *symtab_start, *symtab_end;

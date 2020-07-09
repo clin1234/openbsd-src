@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile.inc,v 1.14 2019/04/19 21:09:48 kettenis Exp $
+# $OpenBSD: Makefile.inc,v 1.18 2019/11/26 10:58:23 sthen Exp $
 
 LLVM_SRCS?=	${.CURDIR}/../../../llvm
 
@@ -25,11 +25,17 @@ CPPFLAGS+=	-DNDEBUG
 
 # Disable some protections in the compiler to regain performance.
 .if ${MACHINE_ARCH} == "amd64" || ${MACHINE_ARCH} == "i386" || \
-    ${MACHINE_ARCH} == "aarch64"
+    ${MACHINE_ARCH} == "mips64" || ${MACHINE_ARCH} == "mips64el" || \
+    ${MACHINE_ARCH} == "aarch64" 
 CXXFLAGS+=	-fno-ret-protector
 .endif
 .if ${MACHINE_ARCH} == "amd64" || ${MACHINE_ARCH} == "i386"
 CXXFLAGS+=	-mno-retpoline
+.endif
+
+# Omit frame pointer to improve performance.
+.if ${MACHINE_ARCH} == "mips64" || ${MACHINE_ARCH} == "mips64el"
+CXXFLAGS+=	-fomit-frame-pointer
 .endif
 
 # Compiling with -fno-pie doesn't work on powerpc.

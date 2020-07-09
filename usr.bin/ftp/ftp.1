@@ -1,4 +1,4 @@
-.\"	$OpenBSD: ftp.1,v 1.115 2019/05/16 12:44:17 florian Exp $
+.\"	$OpenBSD: ftp.1,v 1.119 2020/02/11 18:41:39 deraadt Exp $
 .\"	$NetBSD: ftp.1,v 1.22 1997/08/18 10:20:22 lukem Exp $
 .\"
 .\" Copyright (c) 1985, 1989, 1990, 1993
@@ -30,7 +30,7 @@
 .\"
 .\"	@(#)ftp.1	8.3 (Berkeley) 10/9/94
 .\"
-.Dd $Mdocdate: May 16 2019 $
+.Dd $Mdocdate: February 11 2020 $
 .Dt FTP 1
 .Os
 .Sh NAME
@@ -43,12 +43,13 @@
 .Op Fl k Ar seconds
 .Op Fl P Ar port
 .Op Fl r Ar seconds
-.Op Fl s Ar srcaddr
+.Op Fl s Ar sourceaddr
 .Op Ar host Op Ar port
 .Nm ftp
 .Op Fl C
+.Op Fl N Ar name
 .Op Fl o Ar output
-.Op Fl s Ar srcaddr
+.Op Fl s Ar sourceaddr
 .Sm off
 .Pf ftp:// Op Ar user : password No @
 .Ar host Op : Ar port
@@ -58,9 +59,10 @@
 .Nm ftp
 .Op Fl C
 .Op Fl c Ar cookie
+.Op Fl N Ar name
 .Op Fl o Ar output
 .Op Fl S Ar ssl_options
-.Op Fl s Ar srcaddr
+.Op Fl s Ar sourceaddr
 .Op Fl U Ar useragent
 .Op Fl w Ar seconds
 .Sm off
@@ -72,13 +74,15 @@
 .Ar ...
 .Nm ftp
 .Op Fl C
+.Op Fl N Ar name
 .Op Fl o Ar output
-.Op Fl s Ar srcaddr
+.Op Fl s Ar sourceaddr
 .Pf file: Ar
 .Nm ftp
 .Op Fl C
+.Op Fl N Ar name
 .Op Fl o Ar output
-.Op Fl s Ar srcaddr
+.Op Fl s Ar sourceaddr
 .Ar host : Ns / Ns Ar file Ns Op /
 .Ar ...
 .Sh DESCRIPTION
@@ -186,6 +190,10 @@ Causes
 .Nm
 to always display the progress meter in cases where it would not do
 so by default.
+.It Fl N Ar name
+Use this alternative name instead of
+.Nm
+in some error reports.
 .It Fl n
 Restrains
 .Nm
@@ -272,12 +280,9 @@ or
 setting is provided,
 .Pa /etc/ssl/cert.pem
 will be used.
-.It Fl s Ar srcaddr
-Use
-.Ar srcaddr
-on the local machine as the source address
-of the connection.
-Only useful on systems with more than one address.
+.It Fl s Ar sourceaddr
+Set the source address for connections, which is useful on machines
+with multiple interfaces.
 .It Fl t
 Enables packet tracing.
 .It Fl U Ar useragent
@@ -320,7 +325,7 @@ is provided to the user.
 The following commands are recognized
 by
 .Nm :
-.Bl -tag -width Fl
+.Bl -tag -width Ds
 .It Ic \&! Oo Ar command
 .Op Ar arg ...
 .Oc
@@ -361,8 +366,7 @@ and
 .It Ic ascii
 Set the file transfer
 .Ic type
-to network
-.Tn ASCII .
+to network ASCII.
 .It Ic bell Op Ic on | off
 Arrange that a bell be sounded after each file transfer
 command is completed.

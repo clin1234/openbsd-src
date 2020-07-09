@@ -1,4 +1,4 @@
-.\"	$OpenBSD: pkg_add.1,v 1.158 2019/04/19 19:50:53 espie Exp $
+.\"	$OpenBSD: pkg_add.1,v 1.163 2020/01/24 21:10:46 schwarze Exp $
 .\"
 .\" Documentation and design originally from FreeBSD. All the code has
 .\" been rewritten since. We keep the documentation's notice:
@@ -15,7 +15,7 @@
 .\" Jordan K. Hubbard
 .\"
 .\"
-.Dd $Mdocdate: April 19 2019 $
+.Dd $Mdocdate: January 24 2020 $
 .Dt PKG_ADD 1
 .Os
 .Sh NAME
@@ -221,9 +221,12 @@ All paths recognize certain special sequences,
 which are expanded as follows:
 .Bl -tag -width "%m"
 .It %a
-The package architecture.
+The package architecture as returned by
+.Xr arch 1
+.Fl s .
 .It %v
-The operating system version.
+The operating system version in the format
+.Dq digit dot digit .
 .It %c
 Expands to the string
 .Qq snapshots
@@ -256,6 +259,18 @@ If the environment variable
 .Ev PKG_CACHE
 is set to a directory name, every package retrieved from a distant location
 will also be copied here.
+.Pp
+If the environment variable
+.Ev DEBUG_PKG_CACHE
+is set to a directory name, debug packages matching installed/updated packages
+will be downloaded to that directory
+.Po
+this is to avoid
+.Sq shearing ,
+as later on, you might wish to debug software, but the snapshots will have
+moved on and the debug packages no longer match your installation
+.Pc .
+This only applies to debug packages that are not currently installed/updated.
 .Pp
 Some packages may depend on other packages.
 When resolving dependencies
@@ -408,13 +423,8 @@ would be taken if it was.
 Will still copy packages to
 .Ev PKG_CACHE
 if applicable.
-.It Fl P Ar type
-Check permissions for distribution, where
-.Ar type
-can be
-.Sq cdrom
-or
-.Sq ftp .
+.It Fl P Ar ftp
+Check that package can be distributed on ftp.
 .It Fl qq
 Do not bother with checksums for configuration files.
 .It Fl r
@@ -569,7 +579,7 @@ extracts the package's
 .Dq packing information
 (the packing-list, description, and installation/deinstallation scripts)
 into a special staging directory in
-.Pa /var/tmp
+.Pa /tmp
 (or
 .Ev PKG_TMPDIR
 if set)
@@ -755,6 +765,9 @@ will update the package.
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width PKG_CHECKSUM
+.It Ev DEBUG_PKG_CACHE
+If set, debug packages matching installed/updated packages will be downloaded
+to that directory as well.
 .It Ev FTPMODE
 Specifies whether
 .Xr ftp 1
@@ -799,13 +812,29 @@ Special sequences
 will be expanded.
 .It Ev PKG_TMPDIR
 Temporary area where package information files will be extracted, instead of
-.Pa /var/tmp .
+.Pa /tmp .
 .It Ev TRUSTED_PKG_PATH
 Same semantics as
 .Ev PKG_PATH ,
 but it is searched before
 .Ev PKG_PATH
 and waives any kind of signature checking.
+.El
+.Sh FILES
+.Bl -tag -width /etc/installurl
+.It Pa /etc/installurl
+default mirror server for package download
+.It Pa /etc/signify/*-pkg.pub
+public keys for package verification with
+.Xr signify 1
+.It Pa /usr/local/
+default file system to install packages in
+.It Pa /usr/local/share/doc/pkg-readmes/
+.Ox Ns -specific
+information about individual packages
+.It Pa /var/db/pkg/
+database of installed
+.Xr packages 7
 .El
 .Sh SEE ALSO
 .Xr ftp 1 ,

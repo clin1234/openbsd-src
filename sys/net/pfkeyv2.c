@@ -1,4 +1,4 @@
-/* $OpenBSD: pfkeyv2.c,v 1.197 2019/02/04 21:40:52 bluhm Exp $ */
+/* $OpenBSD: pfkeyv2.c,v 1.200 2020/04/23 19:38:08 tobhe Exp $ */
 
 /*
  *	@(#)COPYRIGHT	1.1 (NRL) 17 January 1995
@@ -129,6 +129,7 @@ extern struct pool ipsec_policy_pool;
 
 extern struct radix_node_head **spd_tables;
 
+struct pool pkpcb_pool;
 #define PFKEY_MSG_MAXSZ 4096
 const struct sockaddr pfkey_addr = { 2, PF_KEY, };
 struct domain pfkeydomain;
@@ -251,6 +252,8 @@ pfkey_init(void)
 	srpl_rc_init(&pkptable.pkp_rc, keycb_ref, keycb_unref, NULL);
 	rw_init(&pkptable.pkp_lk, "pfkey");
 	SRPL_INIT(&pkptable.pkp_list);
+	pool_init(&pkpcb_pool, sizeof(struct pkpcb), 0,
+	    IPL_NONE, PR_WAITOK, "pkpcb", NULL);
 }
 
 
@@ -266,13 +269,13 @@ pfkeyv2_attach(struct socket *so, int proto)
 	if ((so->so_state & SS_PRIV) == 0)
 		return EACCES;
 
-	kp = malloc(sizeof(struct pkpcb), M_PCB, M_WAITOK | M_ZERO);
+	kp = pool_get(&pkpcb_pool, PR_WAITOK|PR_ZERO);
 	so->so_pcb = kp;
 	refcnt_init(&kp->kcb_refcnt);
 
 	error = soreserve(so, PFKEYSNDQ, PFKEYRCVQ);
 	if (error) {
-		free(kp, M_PCB, sizeof(struct pkpcb));
+		pool_put(&pkpcb_pool, kp);
 		return (error);
 	}
 
@@ -326,7 +329,7 @@ pfkeyv2_detach(struct socket *so)
 
 	so->so_pcb = NULL;
 	KASSERT((so->so_state & SS_NOFDREF) == 0);
-	free(kp, M_PCB, sizeof(struct pkpcb));
+	pool_put(&pkpcb_pool, kp);
 
 	return (0);
 }
@@ -852,6 +855,9 @@ pfkeyv2_get(struct tdb *tdb, void **headers, void **buffer, int *lenp)
 	if (tdb->tdb_udpencap_port)
 		i += sizeof(struct sadb_x_udpencap);
 
+	if (tdb->tdb_rdomain != tdb->tdb_rdomain_post)
+		i += sizeof(struct sadb_x_rdomain);
+
 #if NPF > 0
 	if (tdb->tdb_tag)
 		i += sizeof(struct sadb_x_tag) + PADUP(PF_TAG_NAME_SIZE);
@@ -940,6 +946,12 @@ pfkeyv2_get(struct tdb *tdb, void **headers, void **buffer, int *lenp)
 	if (tdb->tdb_udpencap_port) {
 		headers[SADB_X_EXT_UDPENCAP] = p;
 		export_udpencap(&p, tdb);
+	}
+
+	/* Export rdomain switch, if present */
+	if (tdb->tdb_rdomain != tdb->tdb_rdomain_post) {
+		headers[SADB_X_EXT_RDOMAIN] = p;
+		export_rdomain(&p, tdb);
 	}
 
 #if NPF > 0
@@ -1095,7 +1107,8 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 	struct radix_node_head *rnh;
 	struct radix_node *rn = NULL;
 	struct pkpcb *kp, *bkp;
-	void *freeme = NULL, *bckptr = NULL;
+	void *freeme = NULL, *freeme2 = NULL, *freeme3 = NULL;
+	void *bckptr = NULL;
 	void *headers[SADB_EXT_MAX + 1];
 	union sockaddr_union *sunionp;
 	struct tdb *sa1 = NULL, *sa2 = NULL;
@@ -1105,7 +1118,8 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 	struct sadb_supported *ssup;
 	struct sadb_ident *sid, *did;
 	struct srp_ref sr;
-	u_int rdomain;
+	struct sadb_x_rdomain *srdomain;
+	u_int rdomain = 0;
 	int promisc, s;
 
 	mtx_enter(&pfkeyv2_mtx);
@@ -1151,7 +1165,7 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 
 		/* Send to all promiscuous listeners */
 		SRPL_FOREACH(bkp, &sr, &pkptable.pkp_list, kcb_list) {
-			if (bkp->kcb_rdomain != rdomain)
+			if (bkp->kcb_rdomain != kp->kcb_rdomain)
 				continue;
 
 			s = keylock(bkp);
@@ -1172,6 +1186,17 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 	/* Validate message format */
 	if ((rval = pfkeyv2_parsemessage(message, len, headers)) != 0)
 		goto ret;
+
+	/* use specified rdomain */
+	srdomain = (struct sadb_x_rdomain *) headers[SADB_X_EXT_RDOMAIN];
+	if (srdomain) {
+		if (!rtable_exists(srdomain->sadb_x_rdomain_dom1) ||
+		    !rtable_exists(srdomain->sadb_x_rdomain_dom2)) {
+			rval = EINVAL;
+			goto ret;
+		}
+		rdomain = srdomain->sadb_x_rdomain_dom1;
+	}
 
 	smsg = (struct sadb_msg *) headers[0];
 	switch (smsg->sadb_msg_type) {
@@ -1312,6 +1337,7 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 			    headers[SADB_X_EXT_PROTOCOL],
 			    headers[SADB_X_EXT_FLOW_TYPE]);
 			import_udpencap(newsa, headers[SADB_X_EXT_UDPENCAP]);
+			import_rdomain(newsa, headers[SADB_X_EXT_RDOMAIN]);
 #if NPF > 0
 			import_tag(newsa, headers[SADB_X_EXT_TAG]);
 			import_tap(newsa, headers[SADB_X_EXT_TAP]);
@@ -1482,6 +1508,7 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 			    headers[SADB_X_EXT_PROTOCOL],
 			    headers[SADB_X_EXT_FLOW_TYPE]);
 			import_udpencap(newsa, headers[SADB_X_EXT_UDPENCAP]);
+			import_rdomain(newsa, headers[SADB_X_EXT_RDOMAIN]);
 #if NPF > 0
 			import_tag(newsa, headers[SADB_X_EXT_TAG]);
 			import_tap(newsa, headers[SADB_X_EXT_TAP]);
@@ -1602,7 +1629,7 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 
 		i = sizeof(struct sadb_supported) + sizeof(aalgs);
 
-		if (!(freeme = malloc(i, M_PFKEY, M_NOWAIT | M_ZERO))) {
+		if (!(freeme2 = malloc(i, M_PFKEY, M_NOWAIT | M_ZERO))) {
 			rval = ENOMEM;
 			goto ret;
 		}
@@ -1613,34 +1640,34 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 		    (1 << ((struct sadb_msg *)message)->sadb_msg_satype);
 		keyunlock(kp, s);
 
-		ssup = (struct sadb_supported *) freeme;
+		ssup = (struct sadb_supported *) freeme2;
 		ssup->sadb_supported_len = i / sizeof(uint64_t);
 
 		{
-			void *p = freeme + sizeof(struct sadb_supported);
+			void *p = freeme2 + sizeof(struct sadb_supported);
 
 			bcopy(&aalgs[0], p, sizeof(aalgs));
 		}
 
-		headers[SADB_EXT_SUPPORTED_AUTH] = freeme;
+		headers[SADB_EXT_SUPPORTED_AUTH] = freeme2;
 
 		i = sizeof(struct sadb_supported) + sizeof(calgs);
 
-		if (!(freeme = malloc(i, M_PFKEY, M_NOWAIT | M_ZERO))) {
+		if (!(freeme3 = malloc(i, M_PFKEY, M_NOWAIT | M_ZERO))) {
 			rval = ENOMEM;
 			goto ret;
 		}
 
-		ssup = (struct sadb_supported *) freeme;
+		ssup = (struct sadb_supported *) freeme3;
 		ssup->sadb_supported_len = i / sizeof(uint64_t);
 
 		{
-			void *p = freeme + sizeof(struct sadb_supported);
+			void *p = freeme3 + sizeof(struct sadb_supported);
 
 			bcopy(&calgs[0], p, sizeof(calgs));
 		}
 
-		headers[SADB_X_EXT_SUPPORTED_COMP] = freeme;
+		headers[SADB_X_EXT_SUPPORTED_COMP] = freeme3;
 
 		break;
 
@@ -1716,7 +1743,9 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 		    sizeof(struct sadb_address));
 		sa_proto = (struct sadb_protocol *) headers[SADB_X_EXT_SATYPE2];
 
-		tdb2 = gettdb(rdomain, ssa->sadb_sa_spi, sunionp,
+		/* optionally fetch tdb2 from rdomain2 */
+		tdb2 = gettdb(srdomain ? srdomain->sadb_x_rdomain_dom2 : rdomain,
+		    ssa->sadb_sa_spi, sunionp,
 		    SADB_X_GETSPROTO(sa_proto->sadb_protocol_proto));
 		if (tdb2 == NULL) {
 			rval = ESRCH;
@@ -1979,7 +2008,7 @@ pfkeyv2_send(struct socket *so, void *message, int len)
 				goto ret;
 
 			SRPL_FOREACH(bkp, &sr, &pkptable.pkp_list, kcb_list) {
-				if (bkp == kp || bkp->kcb_rdomain != rdomain)
+				if (bkp == kp || bkp->kcb_rdomain != kp->kcb_rdomain)
 					continue;
 
 				if (!smsg->sadb_msg_seq ||
@@ -2057,18 +2086,18 @@ ret:
 		}
 	}
 
-	rval = pfkeyv2_sendmessage(headers, mode, so, 0, 0, rdomain);
+	rval = pfkeyv2_sendmessage(headers, mode, so, 0, 0, kp->kcb_rdomain);
 
 realret:
 
-	if (freeme)
-		free(freeme, M_PFKEY, 0);
+	free(freeme, M_PFKEY, 0);
+	free(freeme2, M_PFKEY, 0);
+	free(freeme3, M_PFKEY, 0);
 
 	explicit_bzero(message, len);
 	free(message, M_PFKEY, 0);
 
-	if (sa1)
-		free(sa1, M_PFKEY, 0);
+	free(sa1, M_PFKEY, 0);
 
 	return (rval);
 }
@@ -2356,6 +2385,12 @@ pfkeyv2_expire(struct tdb *tdb, u_int16_t type)
 	if ((rval = pfkeyv2_sendmessage(headers, PFKEYV2_SENDMESSAGE_BROADCAST,
 	    NULL, 0, 0, tdb->tdb_rdomain)) != 0)
 		goto ret;
+	/* XXX */
+	if (tdb->tdb_rdomain != tdb->tdb_rdomain_post)
+		if ((rval = pfkeyv2_sendmessage(headers,
+		    PFKEYV2_SENDMESSAGE_BROADCAST, NULL, 0, 0,
+		    tdb->tdb_rdomain_post)) != 0)
+			goto ret;
 
 	rval = 0;
 
@@ -2616,6 +2651,7 @@ pfkeyv2_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	struct pfkeyv2_sysctl_walk w;
 	int error = EINVAL;
 	u_int rdomain;
+	u_int tableid;
 
 	if (new)
 		return (EPERM);
@@ -2626,7 +2662,13 @@ pfkeyv2_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	w.w_where = oldp;
 	w.w_len = oldp ? *oldlenp : 0;
 
-	rdomain = rtable_l2(curproc->p_p->ps_rtableid);
+	if (namelen == 3) {
+		tableid = name[2];
+		if (!rtable_exists(tableid))
+			return (ENOENT);
+	} else
+		tableid = curproc->p_p->ps_rtableid;
+	rdomain = rtable_l2(tableid);
 
 	switch(w.w_op) {
 	case NET_KEY_SADB_DUMP:

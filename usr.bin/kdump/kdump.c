@@ -1,4 +1,4 @@
-/*	$OpenBSD: kdump.c,v 1.138 2019/05/15 15:36:59 schwarze Exp $	*/
+/*	$OpenBSD: kdump.c,v 1.143 2020/04/05 08:32:14 mpi Exp $	*/
 
 /*-
  * Copyright (c) 1988, 1993
@@ -74,7 +74,14 @@
 #include "kdump_subr.h"
 #include "extern.h"
 
-int timestamp, decimal, iohex, fancy = 1, maxdata = INT_MAX;
+enum {
+	TIMESTAMP_NONE,
+	TIMESTAMP_ABSOLUTE,
+	TIMESTAMP_RELATIVE,
+	TIMESTAMP_ELAPSED
+} timestamp = TIMESTAMP_NONE;
+
+int decimal, iohex, fancy = 1, maxdata = INT_MAX;
 int needtid, tail, basecol;
 char *tracefile = DEF_TRACEFILE;
 struct ktr_header ktr_header;
@@ -186,10 +193,16 @@ main(int argc, char *argv[])
 				errx(1, "-p %s: %s", optarg, errstr);
 			break;
 		case 'R':	/* relative timestamp */
-			timestamp = timestamp == 1 ? 3 : 2;
+			if (timestamp == TIMESTAMP_ABSOLUTE)
+				timestamp = TIMESTAMP_ELAPSED;
+			else
+				timestamp = TIMESTAMP_RELATIVE;
 			break;
 		case 'T':
-			timestamp = timestamp == 2 ? 3 : 1;
+			if (timestamp == TIMESTAMP_RELATIVE)
+				timestamp = TIMESTAMP_ELAPSED;
+			else
+				timestamp = TIMESTAMP_ABSOLUTE;
 			break;
 		case 't':
 			trpoints = getpoints(optarg, DEF_POINTS);
@@ -211,6 +224,8 @@ main(int argc, char *argv[])
 	if (strcmp(tracefile, "-") != 0)
 		if (unveil(tracefile, "r") == -1)
 			err(1, "unveil");
+	if (unveil(_PATH_PROTOCOLS, "r") == -1)
+		err(1, "unveil");
 	if (pledge("stdio rpath getpw", NULL) == -1)
 		err(1, "pledge");
 
@@ -352,12 +367,12 @@ dumpheader(struct ktr_header *kth)
 	if (needtid)
 		basecol += printf("/%-7ld", (long)kth->ktr_tid);
 	basecol += printf(" %-8.*s ", MAXCOMLEN, kth->ktr_comm);
-	if (timestamp) {
-		if (timestamp == 3) {
+	if (timestamp != TIMESTAMP_NONE) {
+		if (timestamp == TIMESTAMP_ELAPSED) {
 			if (prevtime.tv_sec == 0)
 				prevtime = kth->ktr_time;
 			timespecsub(&kth->ktr_time, &prevtime, &temp);
-		} else if (timestamp == 2) {
+		} else if (timestamp == TIMESTAMP_RELATIVE) {
 			timespecsub(&kth->ktr_time, &prevtime, &temp);
 			prevtime = kth->ktr_time;
 		} else
@@ -1113,7 +1128,6 @@ doerr:
 			/* syscalls that return errno values */
 			case SYS_getlogin_r:
 			case SYS___thrsleep:
-			case SYS_futex:
 				if ((error = ret) != 0)
 					goto doerr;
 				/* FALLTHROUGH */
@@ -1360,7 +1374,7 @@ ktrexec(const char *ptr, size_t len)
 static void
 ktrpledge(struct ktr_pledge *pledge, size_t len)
 {
-	char *name = "";
+	const char *name = "";
 	int i;
 
 	if (len < sizeof(struct ktr_pledge))

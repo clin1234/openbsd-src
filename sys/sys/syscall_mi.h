@@ -1,4 +1,4 @@
-/*	$OpenBSD: syscall_mi.h,v 1.19 2018/04/12 17:13:44 deraadt Exp $	*/
+/*	$OpenBSD: syscall_mi.h,v 1.25 2020/01/21 16:16:23 mpi Exp $	*/
 
 /*
  * Copyright (c) 1982, 1986, 1989, 1993
@@ -33,10 +33,16 @@
 
 #include <sys/param.h>
 #include <sys/pledge.h>
+#include <sys/tracepoint.h>
 #include <uvm/uvm_extern.h>
 
 #ifdef KTRACE
 #include <sys/ktrace.h>
+#endif
+
+#include "dt.h"
+#if NDT > 0
+#include <dev/dt/dtvar.h>
 #endif
 
 
@@ -50,7 +56,6 @@ mi_syscall(struct proc *p, register_t code, const struct sysent *callp,
 	uint64_t tval;
 	int lock = !(callp->sy_flags & SY_NOLOCK);
 	int error, pledged;
-	vaddr_t sp = PROC_STACK(p);
 
 	/* refresh the thread's cache of the process's creds */
 	refreshcreds(p);
@@ -60,6 +65,10 @@ mi_syscall(struct proc *p, register_t code, const struct sysent *callp,
 	scdebug_call(p, code, argp);
 	KERNEL_UNLOCK();
 #endif
+	TRACEPOINT(raw_syscalls, sys_enter, code, NULL);
+#if NDT > 0
+	DT_ENTER(syscall, code, callp->sy_argsize, argp);
+#endif
 #ifdef KTRACE
 	if (KTRPOINT(p, KTR_SYSCALL)) {
 		KERNEL_LOCK();
@@ -68,24 +77,18 @@ mi_syscall(struct proc *p, register_t code, const struct sysent *callp,
 	}
 #endif
 
-	if (p->p_vmspace->vm_map.serial != p->p_spserial ||
-	    p->p_spstart == 0 || sp < p->p_spstart || sp >= p->p_spend) {
-		KERNEL_LOCK();
+	/* SP must be within MAP_STACK space */
+	if (!uvm_map_inentry(p, &p->p_spinentry, PROC_STACK(p),
+	    "[%s]%d/%d sp=%lx inside %lx-%lx: not MAP_STACK\n",
+	    uvm_map_inentry_sp, p->p_vmspace->vm_map.sserial))
+		return (EPERM);
 
-		if (!uvm_map_check_stack_range(p, sp)) {
-			printf("syscall [%s]%d/%d sp %lx not inside %lx-%lx\n",
-			    p->p_p->ps_comm, p->p_p->ps_pid, p->p_tid,
-			    sp, p->p_spstart, p->p_spend);
-	
-			p->p_sitrapno = 0;
-			p->p_sicode = SEGV_ACCERR;
-			p->p_sigval.sival_ptr = (void *)PROC_PC(p);
-			psignal(p, SIGSEGV);
-			KERNEL_UNLOCK();
-			return (EPERM);
-		}
-		KERNEL_UNLOCK();
-	}
+	/* PC must be in un-writeable permitted text (sigtramp, libc, ld.so) */
+	if (!uvm_map_inentry(p, &p->p_pcinentry, PROC_PC(p),
+	    "[%s]%d/%d pc=%lx inside %lx-%lx: bogus syscall\n",
+	    uvm_map_inentry_pc, p->p_vmspace->vm_map.wserial))
+		return (EPERM);
+
 	if (lock)
 		KERNEL_LOCK();
 	pledged = (p->p_p->ps_flags & PS_PLEDGE);
@@ -115,6 +118,10 @@ mi_syscall_return(struct proc *p, register_t code, int error,
 	scdebug_ret(p, code, error, retval);
 	KERNEL_UNLOCK();
 #endif
+#if NDT > 0
+	DT_LEAVE(syscall, code, error, retval[0], retval[1]);
+#endif
+	TRACEPOINT(raw_syscalls, sys_exit, code, NULL);
 
 	userret(p);
 
@@ -133,17 +140,23 @@ mi_syscall_return(struct proc *p, register_t code, int error,
 static inline void
 mi_child_return(struct proc *p)
 {
-#if defined(SYSCALL_DEBUG) || defined(KTRACE)
+#if defined(SYSCALL_DEBUG) || defined(KTRACE) || NDT > 0
 	int code = (p->p_flag & P_THREAD) ? SYS___tfork :
 	    (p->p_p->ps_flags & PS_PPWAIT) ? SYS_vfork : SYS_fork;
 	const register_t child_retval[2] = { 0, 1 };
 #endif
+
+	TRACEPOINT(sched, on__cpu, NULL);
 
 #ifdef SYSCALL_DEBUG
 	KERNEL_LOCK();
 	scdebug_ret(p, code, 0, child_retval);
 	KERNEL_UNLOCK();
 #endif
+#if NDT > 0
+	DT_LEAVE(syscall, code, 0, child_retval[0], child_retval[1]);
+#endif
+	TRACEPOINT(raw_syscalls, sys_exit, code, NULL);
 
 	userret(p);
 

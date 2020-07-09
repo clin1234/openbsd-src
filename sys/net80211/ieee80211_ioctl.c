@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_ioctl.c,v 1.74 2019/05/12 18:12:38 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_ioctl.c,v 1.79 2020/01/15 09:34:27 phessler Exp $	*/
 /*	$NetBSD: ieee80211_ioctl.c,v 1.15 2004/05/06 02:58:16 dyoung Exp $	*/
 
 /*-
@@ -74,7 +74,8 @@ ieee80211_node2req(struct ieee80211com *ic, const struct ieee80211_node *ni,
 
 	/* Channel and rates */
 	nr->nr_channel = ieee80211_chan2ieee(ic, ni->ni_chan);
-	nr->nr_chan_flags = ni->ni_chan->ic_flags;
+	if (ni->ni_chan != IEEE80211_CHAN_ANYC)
+		nr->nr_chan_flags = ni->ni_chan->ic_flags;
 	if (ic->ic_curmode != IEEE80211_MODE_11N)
 		nr->nr_chan_flags &= ~IEEE80211_CHAN_HT;
 	nr->nr_nrates = ni->ni_rates.rs_nrates;
@@ -104,6 +105,7 @@ ieee80211_node2req(struct ieee80211com *ic, const struct ieee80211_node *ni,
 	nr->nr_txseq = ni->ni_txseq;
 	nr->nr_rxseq = ni->ni_rxseq;
 	nr->nr_fails = ni->ni_fails;
+	nr->nr_assoc_fail = ni->ni_assoc_fail; /* flag values are the same */
 	nr->nr_inact = ni->ni_inact;
 	nr->nr_txrate = ni->ni_txrate;
 	nr->nr_state = ni->ni_state;
@@ -510,6 +512,8 @@ ieee80211_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	case SIOCS80211JOIN:
 		if ((error = suser(curproc)) != 0)
 			break;
+		if (ic->ic_opmode != IEEE80211_M_STA)
+			break;
 		if ((error = copyin(ifr->ifr_data, &join, sizeof(join))) != 0)
 			break;
 		if (join.i_len > IEEE80211_NWID_LEN) {
@@ -538,6 +542,18 @@ ieee80211_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 				error = ENETRESET;
 			}
 		} else {
+			if (ic->ic_des_esslen == join.i_len &&
+			    memcmp(join.i_nwid, ic->ic_des_essid,
+			    join.i_len) == 0) {
+				struct ieee80211_node *ni;
+
+				ieee80211_deselect_ess(ic);
+				ni = ieee80211_find_node(ic,
+				    ic->ic_bss->ni_bssid);
+				if (ni != NULL)
+					ieee80211_free_node(ic, ni);
+				error = ENETRESET;
+			}
 			/* save nwid for auto-join */
 			if (ieee80211_add_ess(ic, &join) == 0)
 				ic->ic_flags |= IEEE80211_F_AUTO_JOIN;
@@ -821,7 +837,11 @@ ieee80211_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		break;
 	case SIOCG80211NODE:
 		nr = (struct ieee80211_nodereq *)data;
-		ni = ieee80211_find_node(ic, nr->nr_macaddr);
+		if (ic->ic_bss &&
+		    IEEE80211_ADDR_EQ(nr->nr_macaddr, ic->ic_bss->ni_macaddr))
+			ni = ic->ic_bss;
+		else
+			ni = ieee80211_find_node(ic, nr->nr_macaddr);
 		if (ni == NULL) {
 			error = ENOENT;
 			break;
@@ -901,6 +921,8 @@ ieee80211_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			na->na_nodes++;
 			ni = RBT_NEXT(ieee80211_tree, ni);
 		}
+		if (suser(curproc) == 0)
+			ieee80211_begin_bgscan(ifp);
 		break;
 	case SIOCG80211FLAGS:
 		flags = ic->ic_userflags;

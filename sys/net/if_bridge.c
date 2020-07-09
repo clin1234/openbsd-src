@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bridge.c,v 1.333 2019/05/13 18:14:05 mpi Exp $	*/
+/*	$OpenBSD: if_bridge.c,v 1.340 2020/06/24 22:03:42 cheloha Exp $	*/
 
 /*
  * Copyright (c) 1999, 2000 Jason L. Wright (jason@thought.net)
@@ -285,7 +285,10 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			error = ENOENT;
 			break;
 		}
-
+		if (ifs->if_type != IFT_ETHER) {
+			error = EINVAL;
+			break;
+		}
 		if (ifs->if_bridgeidx != 0) {
 			if (ifs->if_bridgeidx == ifp->if_index)
 				error = EEXIST;
@@ -304,20 +307,17 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			break;
 		}
 
-		if (ifs->if_type == IFT_ETHER) {
-			error = ifpromisc(ifs, 1);
-			if (error != 0)
-				break;
-		} else {
-			error = EINVAL;
+		bif = malloc(sizeof(*bif), M_DEVBUF, M_NOWAIT|M_ZERO);
+		if (bif == NULL) {
+			error = ENOMEM;
 			break;
 		}
 
-		bif = malloc(sizeof(*bif), M_DEVBUF, M_NOWAIT|M_ZERO);
-		if (bif == NULL) {
-			if (ifs->if_type == IFT_ETHER)
-				ifpromisc(ifs, 0);
-			error = ENOMEM;
+		NET_LOCK();
+		error = ifpromisc(ifs, 1);
+		NET_UNLOCK();
+		if (error != 0) {
+			free(bif, M_DEVBUF, sizeof(*bif));
 			break;
 		}
 
@@ -327,8 +327,8 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		SIMPLEQ_INIT(&bif->bif_brlin);
 		SIMPLEQ_INIT(&bif->bif_brlout);
 		ifs->if_bridgeidx = ifp->if_index;
-		bif->bif_dhcookie = hook_establish(ifs->if_detachhooks, 0,
-		    bridge_ifdetach, bif);
+		task_set(&bif->bif_dtask, bridge_ifdetach, bif);
+		if_detachhook_add(ifs, &bif->bif_dtask);
 		if_ih_insert(bif->ifp, bridge_input, NULL);
 		SMR_SLIST_INSERT_HEAD_LOCKED(&sc->sc_iflist, bif, bif_next);
 		break;
@@ -363,7 +363,10 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			break;
 		}
 		if (ifs->if_bridgeidx != 0) {
-			error = EBUSY;
+			if (ifs->if_bridgeidx == ifp->if_index)
+				error = EEXIST;
+			else
+				error = EBUSY;
 			break;
 		}
 		SMR_SLIST_FOREACH_LOCKED(bif, &sc->sc_spanlist, bif_next) {
@@ -384,8 +387,8 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		bif->bif_flags = IFBIF_SPAN;
 		SIMPLEQ_INIT(&bif->bif_brlin);
 		SIMPLEQ_INIT(&bif->bif_brlout);
-		bif->bif_dhcookie = hook_establish(ifs->if_detachhooks, 0,
-		    bridge_spandetach, bif);
+		task_set(&bif->bif_dtask, bridge_spandetach, bif);
+		if_detachhook_add(ifs, &bif->bif_dtask);
 		SMR_SLIST_INSERT_HEAD_LOCKED(&sc->sc_spanlist, bif, bif_next);
 		break;
 	case SIOCBRDGDELS:
@@ -546,7 +549,7 @@ bridge_ifremove(struct bridge_iflist *bif)
 	int error;
 
 	SMR_SLIST_REMOVE_LOCKED(&sc->sc_iflist, bif, bridge_iflist, bif_next);
-	hook_disestablish(bif->ifp->if_detachhooks, bif->bif_dhcookie);
+	if_detachhook_del(bif->ifp, &bif->bif_dtask);
 	if_ih_remove(bif->ifp, bridge_input, NULL);
 
 	smr_barrier();
@@ -557,7 +560,9 @@ bridge_ifremove(struct bridge_iflist *bif)
 	}
 
 	bif->ifp->if_bridgeidx = 0;
+	NET_LOCK();
 	error = ifpromisc(bif->ifp, 0);
+	NET_UNLOCK();
 
 	bridge_rtdelete(sc, bif->ifp, 0);
 	bridge_flushrule(bif);
@@ -574,7 +579,7 @@ bridge_spanremove(struct bridge_iflist *bif)
 	struct bridge_softc *sc = bif->bridge_sc;
 
 	SMR_SLIST_REMOVE_LOCKED(&sc->sc_spanlist, bif, bridge_iflist, bif_next);
-	hook_disestablish(bif->ifp->if_detachhooks, bif->bif_dhcookie);
+	if_detachhook_del(bif->ifp, &bif->bif_dtask);
 
 	smr_barrier();
 
@@ -930,10 +935,6 @@ bridgeintr_frame(struct ifnet *brifp, struct ifnet *src_if, struct mbuf *m)
 	bif = bridge_getbif(src_if);
 	KASSERT(bif != NULL);
 
-	if (m->m_pkthdr.len < sizeof(eh)) {
-		m_freem(m);
-		return;
-	}
 	m_copydata(m, 0, ETHER_HDR_LEN, (caddr_t)&eh);
 	dst = (struct ether_addr *)&eh.ether_dhost[0];
 	src = (struct ether_addr *)&eh.ether_shost[0];
@@ -943,10 +944,8 @@ bridgeintr_frame(struct ifnet *brifp, struct ifnet *src_if, struct mbuf *m)
 	 * is not broadcast or multicast, record its address.
 	 */
 	if ((bif->bif_flags & IFBIF_LEARNING) &&
-	    (eh.ether_shost[0] & 1) == 0 &&
-	    !(eh.ether_shost[0] == 0 && eh.ether_shost[1] == 0 &&
-	    eh.ether_shost[2] == 0 && eh.ether_shost[3] == 0 &&
-	    eh.ether_shost[4] == 0 && eh.ether_shost[5] == 0))
+	    !ETHER_IS_MULTICAST(eh.ether_shost) &&
+	    !ETHER_IS_ANYADDR(eh.ether_shost))
 		bridge_rtupdate(sc, src, src_if, 0, IFBAF_DYNAMIC, m);
 
 	if ((bif->bif_flags & IFBIF_STP) &&
@@ -971,8 +970,7 @@ bridgeintr_frame(struct ifnet *brifp, struct ifnet *src_if, struct mbuf *m)
 			return;
 		}
 	} else {
-		if (memcmp(etherbroadcastaddr, eh.ether_dhost,
-		    sizeof(etherbroadcastaddr)) == 0)
+		if (ETHER_IS_BROADCAST(eh.ether_dhost))
 			m->m_flags |= M_BCAST;
 		else
 			m->m_flags |= M_MCAST;
@@ -1117,7 +1115,7 @@ bridge_process(struct ifnet *ifp, struct mbuf *m)
 {
 	struct ifnet *brifp;
 	struct bridge_softc *sc;
-	struct bridge_iflist *bif, *bif0;
+	struct bridge_iflist *bif = NULL, *bif0 = NULL;
 	struct ether_header *eh;
 	struct mbuf *mc;
 #if NBPFILTER > 0
@@ -1129,6 +1127,9 @@ bridge_process(struct ifnet *ifp, struct mbuf *m)
 	brifp = if_get(ifp->if_bridgeidx);
 	if ((brifp == NULL) || !ISSET(brifp->if_flags, IFF_RUNNING))
 		goto reenqueue;
+
+	if (m->m_pkthdr.len < sizeof(*eh))
+		goto bad;
 
 #if NVLAN > 0
 	/*
@@ -1148,17 +1149,20 @@ bridge_process(struct ifnet *ifp, struct mbuf *m)
 		bpf_mtap_ether(if_bpf, m, BPF_DIRECTION_IN);
 #endif
 
+	eh = mtod(m, struct ether_header *);
+
 	sc = brifp->if_softc;
 	SMR_SLIST_FOREACH_LOCKED(bif, &sc->sc_iflist, bif_next) {
+		if (bridge_ourether(bif->ifp, eh->ether_shost))
+			goto bad;
 		if (bif->ifp == ifp)
-			break;
+			bif0 = bif;
 	}
-	if (bif == NULL)
+	if (bif0 == NULL)
 		goto reenqueue;
 
 	bridge_span(brifp, m);
 
-	eh = mtod(m, struct ether_header *);
 	if (ETHER_IS_MULTICAST(eh->ether_dhost)) {
 		/*
 		 * Reserved destination MAC addresses (01:80:C2:00:00:0x)
@@ -1171,7 +1175,8 @@ bridge_process(struct ifnet *ifp, struct mbuf *m)
 		    ETHER_ADDR_LEN - 1) == 0) {
 			if (eh->ether_dhost[ETHER_ADDR_LEN - 1] == 0) {
 				/* STP traffic */
-				m = bstp_input(sc->sc_stp, bif->bif_stp, eh, m);
+				m = bstp_input(sc->sc_stp, bif0->bif_stp, eh,
+				    m);
 				if (m == NULL)
 					goto bad;
 			} else if (eh->ether_dhost[ETHER_ADDR_LEN - 1] <= 0xf)
@@ -1181,8 +1186,8 @@ bridge_process(struct ifnet *ifp, struct mbuf *m)
 		/*
 		 * No need to process frames for ifs in the discarding state
 		 */
-		if ((bif->bif_flags & IFBIF_STP) &&
-		    (bif->bif_state == BSTP_IFSTATE_DISCARDING))
+		if ((bif0->bif_flags & IFBIF_STP) &&
+		    (bif0->bif_state == BSTP_IFSTATE_DISCARDING))
 			goto reenqueue;
 
 		mc = m_dup_pkt(m, ETHER_ALIGN, M_NOWAIT);
@@ -1199,29 +1204,32 @@ bridge_process(struct ifnet *ifp, struct mbuf *m)
 	/*
 	 * Unicast, make sure it's not for us.
 	 */
-	bif0 = bif;
-	SMR_SLIST_FOREACH_LOCKED(bif, &sc->sc_iflist, bif_next) {
-		if (bif->ifp->if_type != IFT_ETHER)
-			continue;
-		if (bridge_ourether(bif->ifp, eh->ether_dhost)) {
-			if (bif0->bif_flags & IFBIF_LEARNING)
-				bridge_rtupdate(sc,
-				    (struct ether_addr *)&eh->ether_shost,
-				    ifp, 0, IFBAF_DYNAMIC, m);
-			if (bridge_filterrule(&bif0->bif_brlin, eh, m) ==
-			    BRL_ACTION_BLOCK) {
-			    	goto bad;
-			}
-
-			/* Count for the bridge */
-			brifp->if_ipackets++;
-			brifp->if_ibytes += m->m_pkthdr.len;
-
-			ifp = bif->ifp;
-			goto reenqueue;
+	if (bridge_ourether(bif0->ifp, eh->ether_dhost)) {
+		bif = bif0;
+	} else {
+		SMR_SLIST_FOREACH_LOCKED(bif, &sc->sc_iflist, bif_next) {
+			if (bif->ifp == ifp)
+				continue;
+			if (bridge_ourether(bif->ifp, eh->ether_dhost))
+				break;
 		}
-		if (bridge_ourether(bif->ifp, eh->ether_shost))
+	}
+	if (bif != NULL) {
+		if (bif0->bif_flags & IFBIF_LEARNING)
+			bridge_rtupdate(sc,
+			    (struct ether_addr *)&eh->ether_shost,
+			    ifp, 0, IFBAF_DYNAMIC, m);
+		if (bridge_filterrule(&bif0->bif_brlin, eh, m) ==
+		    BRL_ACTION_BLOCK) {
 			goto bad;
+		}
+
+		/* Count for the bridge */
+		brifp->if_ipackets++;
+		brifp->if_ibytes += m->m_pkthdr.len;
+
+		ifp = bif->ifp;
+		goto reenqueue;
 	}
 
 	bridgeintr_frame(brifp, ifp, m);
@@ -1533,7 +1541,7 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 		if (tdb != NULL && (tdb->tdb_flags & TDBF_INVALID) == 0 &&
 		    tdb->tdb_xform != NULL) {
 			if (tdb->tdb_first_use == 0) {
-				tdb->tdb_first_use = time_second;
+				tdb->tdb_first_use = gettime();
 				if (tdb->tdb_flags & TDBF_FIRSTUSE)
 					timeout_add_sec(&tdb->tdb_first_tmo,
 					    tdb->tdb_exp_first_use);
@@ -1578,7 +1586,7 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 			if ((af == AF_INET) &&
 			    ip_mtudisc && (ip->ip_off & htons(IP_DF)) &&
 			    tdb->tdb_mtu && ntohs(ip->ip_len) > tdb->tdb_mtu &&
-			    tdb->tdb_mtutimeout > time_second)
+			    tdb->tdb_mtutimeout > gettime())
 				bridge_send_icmp_err(ifp, eh, m,
 				    hassnap, llc, tdb->tdb_mtu,
 				    ICMP_UNREACH, ICMP_UNREACH_NEEDFRAG);

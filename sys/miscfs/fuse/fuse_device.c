@@ -1,4 +1,4 @@
-/* $OpenBSD: fuse_device.c,v 1.29 2018/06/27 13:58:22 helg Exp $ */
+/* $OpenBSD: fuse_device.c,v 1.34 2020/05/13 08:13:42 mpi Exp $ */
 /*
  * Copyright (c) 2012-2013 Sylvestre Gallon <ccna.syl@gmail.com>
  *
@@ -70,17 +70,10 @@ int	filt_fuse_read(struct knote *, long);
 void	filt_fuse_rdetach(struct knote *);
 
 const static struct filterops fuse_rd_filtops = {
-	1,
-	NULL,
-	filt_fuse_rdetach,
-	filt_fuse_read
-};
-
-const static struct filterops fuse_seltrue_filtops = {
-	1,
-	NULL,
-	filt_fuse_rdetach,
-	filt_seltrue
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_fuse_rdetach,
+	.f_event	= filt_fuse_read,
 };
 
 #ifdef FUSE_DEBUG
@@ -523,7 +516,7 @@ fusepoll(dev_t dev, int events, struct proc *p)
 
 	fd = fuse_lookup(minor(dev));
 	if (fd == NULL)
-		return (EINVAL);
+		return (POLLERR);
 
 	if (events & (POLLIN | POLLRDNORM))
 		if (!SIMPLEQ_EMPTY(&fd->fd_fbufs_in))
@@ -555,16 +548,14 @@ fusekqfilter(dev_t dev, struct knote *kn)
 		kn->kn_fop = &fuse_rd_filtops;
 		break;
 	case EVFILT_WRITE:
-		klist = &fd->fd_rsel.si_note;
-		kn->kn_fop = &fuse_seltrue_filtops;
-		break;
+		return (seltrue_kqfilter(dev, kn));
 	default:
 		return (EINVAL);
 	}
 
 	kn->kn_hook = fd;
 
-	SLIST_INSERT_HEAD(klist, kn, kn_selnext);
+	klist_insert(klist, kn);
 
 	return (0);
 }
@@ -575,7 +566,7 @@ filt_fuse_rdetach(struct knote *kn)
 	struct fuse_d *fd = kn->kn_hook;
 	struct klist *klist = &fd->fd_rsel.si_note;
 
-	SLIST_REMOVE(klist, kn, knote, kn_selnext);
+	klist_remove(klist, kn);
 }
 
 int

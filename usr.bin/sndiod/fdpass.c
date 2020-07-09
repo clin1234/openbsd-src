@@ -1,4 +1,4 @@
-/*	$OpenBSD: fdpass.c,v 1.5 2019/05/10 04:39:08 ratchov Exp $	*/
+/*	$OpenBSD: fdpass.c,v 1.10 2020/06/18 05:11:13 ratchov Exp $	*/
 /*
  * Copyright (c) 2015 Alexandre Ratchov <alex@caoua.org>
  *
@@ -32,9 +32,11 @@
 struct fdpass_msg {
 #define FDPASS_OPEN_SND		0	/* open an audio device */
 #define FDPASS_OPEN_MIDI	1	/* open a midi port */
+#define FDPASS_OPEN_CTL		2	/* open an audio control device */
 #define FDPASS_RETURN		3	/* return after above commands */
 	unsigned int cmd;		/* one of above */
 	unsigned int num;		/* audio device or midi port number */
+	unsigned int idx;		/* index in the path list */
 	unsigned int mode;		/* SIO_PLAY, SIO_REC, MIO_IN, ... */
 };
 
@@ -75,7 +77,7 @@ fdpass_log(struct fdpass *f)
 }
 
 static int
-fdpass_send(struct fdpass *f, int cmd, int num, int mode, int fd)
+fdpass_send(struct fdpass *f, int cmd, int num, int idx, int mode, int fd)
 {
 	struct fdpass_msg data;
 	struct msghdr msg;
@@ -89,6 +91,7 @@ fdpass_send(struct fdpass *f, int cmd, int num, int mode, int fd)
 
 	data.cmd = cmd;
 	data.num = num;
+	data.idx = idx;
 	data.mode = mode;
 	iov.iov_base = &data;
 	iov.iov_len = sizeof(struct fdpass_msg);
@@ -105,7 +108,7 @@ fdpass_send(struct fdpass *f, int cmd, int num, int mode, int fd)
 		*(int *)CMSG_DATA(cmsg) = fd;
 	}
 	n = sendmsg(f->fd, &msg, 0);
-	if (n < 0) {
+	if (n == -1) {
 		if (log_level >= 1) {
 			fdpass_log(f);
 			log_puts(": sendmsg failed\n");
@@ -128,6 +131,8 @@ fdpass_send(struct fdpass *f, int cmd, int num, int mode, int fd)
 		log_puti(cmd);
 		log_puts(", num = ");
 		log_puti(num);
+		log_puts(", idx = ");
+		log_puti(idx);
 		log_puts(", mode = ");
 		log_puti(mode);
 		log_puts(", fd = ");
@@ -141,7 +146,7 @@ fdpass_send(struct fdpass *f, int cmd, int num, int mode, int fd)
 }
 
 static int
-fdpass_recv(struct fdpass *f, int *cmd, int *num, int *mode, int *fd)
+fdpass_recv(struct fdpass *f, int *cmd, int *num, int *idx, int *mode, int *fd)
 {
 	struct fdpass_msg data;
 	struct msghdr msg;
@@ -161,7 +166,7 @@ fdpass_recv(struct fdpass *f, int *cmd, int *num, int *mode, int *fd)
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 	n = recvmsg(f->fd, &msg, MSG_WAITALL);
-	if (n < 0 && errno == EMSGSIZE) {
+	if (n == -1 && errno == EMSGSIZE) {
 		if (log_level >= 1) {
 			fdpass_log(f);
 			log_puts(": out of fds\n");
@@ -172,7 +177,7 @@ fdpass_recv(struct fdpass *f, int *cmd, int *num, int *mode, int *fd)
 		 */
 		n = recvmsg(f->fd, &msg, MSG_WAITALL);
 	}
-	if (n < 0) {
+	if (n == -1) {
 		if (log_level >= 1) {
 			fdpass_log(f);
 			log_puts(": recvmsg failed\n");
@@ -212,6 +217,7 @@ fdpass_recv(struct fdpass *f, int *cmd, int *num, int *mode, int *fd)
 	}
 	*cmd = data.cmd;
 	*num = data.num;
+	*idx = data.idx;
 	*mode = data.mode;
 #ifdef DEBUG
 	if (log_level >= 3) {
@@ -220,6 +226,8 @@ fdpass_recv(struct fdpass *f, int *cmd, int *num, int *mode, int *fd)
 		log_puti(*cmd);
 		log_puts(", num = ");
 		log_puti(*num);
+		log_puts(", idx = ");
+		log_puti(*idx);
 		log_puts(", mode = ");
 		log_puti(*mode);
 		log_puts(", fd = ");
@@ -235,7 +243,7 @@ fdpass_waitret(struct fdpass *f, int *retfd)
 {
 	int cmd, unused;
 
-	if (!fdpass_recv(fdpass_peer, &cmd, &unused, &unused, retfd))
+	if (!fdpass_recv(fdpass_peer, &cmd, &unused, &unused, &unused, retfd))
 		return 0;
 	if (cmd != FDPASS_RETURN) {
 		if (log_level >= 1) {
@@ -249,13 +257,13 @@ fdpass_waitret(struct fdpass *f, int *retfd)
 }
 
 struct sio_hdl *
-fdpass_sio_open(int num, unsigned int mode)
+fdpass_sio_open(int num, int idx, unsigned int mode)
 {
 	int fd;
 
 	if (fdpass_peer == NULL)
 		return NULL;
-	if (!fdpass_send(fdpass_peer, FDPASS_OPEN_SND, num, mode, -1))
+	if (!fdpass_send(fdpass_peer, FDPASS_OPEN_SND, num, idx, mode, -1))
 		return NULL;
 	if (!fdpass_waitret(fdpass_peer, &fd))
 		return NULL;
@@ -265,19 +273,35 @@ fdpass_sio_open(int num, unsigned int mode)
 }
 
 struct mio_hdl *
-fdpass_mio_open(int num, unsigned int mode)
+fdpass_mio_open(int num, int idx, unsigned int mode)
 {
 	int fd;
 
 	if (fdpass_peer == NULL)
 		return NULL;
-	if (!fdpass_send(fdpass_peer, FDPASS_OPEN_MIDI, num, mode, -1))
+	if (!fdpass_send(fdpass_peer, FDPASS_OPEN_MIDI, num, idx, mode, -1))
 		return NULL;
 	if (!fdpass_waitret(fdpass_peer, &fd))
 		return NULL;
 	if (fd < 0)
 		return NULL;
 	return mio_rmidi_fdopen(fd, mode, 1);
+}
+
+struct sioctl_hdl *
+fdpass_sioctl_open(int num, int idx, unsigned int mode)
+{
+	int fd;
+
+	if (fdpass_peer == NULL)
+		return NULL;
+	if (!fdpass_send(fdpass_peer, FDPASS_OPEN_CTL, num, idx, mode, -1))
+		return NULL;
+	if (!fdpass_waitret(fdpass_peer, &fd))
+		return NULL;
+	if (fd < 0)
+		return NULL;
+	return sioctl_sun_fdopen(fd, mode, 1);
 }
 
 void
@@ -296,12 +320,14 @@ fdpass_in_worker(void *arg)
 void
 fdpass_in_helper(void *arg)
 {
-	int cmd, num, mode, fd;
+	int cmd, num, idx, mode, fd;
 	struct fdpass *f = arg;
 	struct dev *d;
+	struct dev_alt *da;
 	struct port *p;
+	char *path;
 
-	if (!fdpass_recv(f, &cmd, &num, &mode, &fd))
+	if (!fdpass_recv(f, &cmd, &num, &idx, &mode, &fd))
 		return;
 	switch (cmd) {
 	case FDPASS_OPEN_SND:
@@ -314,7 +340,15 @@ fdpass_in_helper(void *arg)
 			fdpass_close(f);
 			return;
 		}
-		fd = sio_sun_getfd(d->path, mode, 1);
+		for (da = d->alt_list; ; da = da->next) {
+			if (da == NULL) {
+				fdpass_close(f);
+				return;
+			}
+			if (da->idx == idx)
+				break;
+		}
+		fd = sio_sun_getfd(da->name, mode, 1);
 		break;
 	case FDPASS_OPEN_MIDI:
 		p = port_bynum(num);
@@ -326,13 +360,38 @@ fdpass_in_helper(void *arg)
 			fdpass_close(f);
 			return;
 		}
-		fd = mio_rmidi_getfd(p->path, mode, 1);
+		path = namelist_byindex(&p->path_list, idx);
+		if (path == NULL) {
+			fdpass_close(f);
+			return;
+		}
+		fd = mio_rmidi_getfd(path, mode, 1);
+		break;
+	case FDPASS_OPEN_CTL:
+		d = dev_bynum(num);
+		if (d == NULL || !(mode & (SIOCTL_READ | SIOCTL_WRITE))) {
+			if (log_level >= 1) {
+				fdpass_log(f);
+				log_puts(": bad audio control device\n");
+			}
+			fdpass_close(f);
+			return;
+		}
+		for (da = d->alt_list; ; da = da->next) {
+			if (da == NULL) {
+				fdpass_close(f);
+				return;
+			}
+			if (da->idx == idx)
+				break;
+		}
+		fd = sioctl_sun_getfd(da->name, mode, 1);
 		break;
 	default:
 		fdpass_close(f);
 		return;
 	}
-	fdpass_send(f, FDPASS_RETURN, 0, 0, fd);
+	fdpass_send(f, FDPASS_RETURN, 0, 0, 0, fd);
 }
 
 void

@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_extent.c,v 1.60 2018/11/14 17:52:48 mpi Exp $	*/
+/*	$OpenBSD: subr_extent.c,v 1.63 2020/01/11 14:30:24 mpi Exp $	*/
 /*	$NetBSD: subr_extent.c,v 1.7 1996/11/21 18:46:34 cgd Exp $	*/
 
 /*-
@@ -58,7 +58,7 @@
 #define	malloc(s, t, flags)		malloc(s)
 #define	free(p, t, s)			free(p)
 
-#define	tsleep(chan, pri, str, timo)	(EWOULDBLOCK)
+#define	tsleep_nsec(c, p, s, t)		(EWOULDBLOCK)
 #define	wakeup(chan)			((void)0)
 
 struct pool {
@@ -489,9 +489,9 @@ extent_alloc_region(struct extent *ex, u_long start, u_long size, int flags)
 			 */
 			if (flags & EX_WAITSPACE) {
 				ex->ex_flags |= EXF_WANTED;
-				error = tsleep(ex,
+				error = tsleep_nsec(ex,
 				    PRIBIO | ((flags & EX_CATCH) ? PCATCH : 0),
-				    "extnt", 0);
+				    "extnt", INFSLP);
 				if (error)
 					return (error);
 				goto alloc_start;
@@ -901,8 +901,9 @@ skip:
 	 */
 	if (flags & EX_WAITSPACE) {
 		ex->ex_flags |= EXF_WANTED;
-		error = tsleep(ex,
-		    PRIBIO | ((flags & EX_CATCH) ? PCATCH : 0), "extnt", 0);
+		error = tsleep_nsec(ex,
+		    PRIBIO | ((flags & EX_CATCH) ? PCATCH : 0),
+		    "extnt", INFSLP);
 		if (error)
 			return (error);
 		goto alloc_start;
@@ -962,8 +963,10 @@ int
 extent_free(struct extent *ex, u_long start, u_long size, int flags)
 {
 	struct extent_region *rp, *nrp = NULL;
+	struct extent_region *tmp;
 	u_long end = start + (size - 1);
 	int exflags;
+	int error = 0;
 
 #ifdef DIAGNOSTIC
 	/* Check arguments. */
@@ -1018,8 +1021,12 @@ extent_free(struct extent *ex, u_long start, u_long size, int flags)
 	 *
 	 * Cases 2, 3, and 4 require that the EXF_NOCOALESCE flag
 	 * is not set.
+	 *
+	 * If the EX_CONFLICTOK flag is set, partially overlapping
+	 * regions are allowed.  This is handled in cases 1a, 2a and
+	 * 3a below.
 	 */
-	LIST_FOREACH(rp, &ex->ex_regions, er_link) {
+	LIST_FOREACH_SAFE(rp, &ex->ex_regions, er_link, tmp) {
 		/*
 		 * Save ourselves some comparisons; does the current
 		 * region end before chunk to be freed begins?  If so,
@@ -1079,7 +1086,28 @@ extent_free(struct extent *ex, u_long start, u_long size, int flags)
 			nrp = NULL;
 			goto done;
 		}
+
+		if ((flags & EX_CONFLICTOK) == 0)
+			continue;
+
+		/* Case 1a. */
+		if ((start <= rp->er_start && end >= rp->er_end)) {
+			LIST_REMOVE(rp, er_link);
+			extent_free_region_descriptor(ex, rp);
+			continue;
+		}
+
+		/* Case 2a. */
+		if ((start <= rp->er_start) && (end >= rp->er_start))
+			rp->er_start = (end + 1);
+
+		/* Case 3a. */
+		if ((start <= rp->er_end) && (end >= rp->er_end))
+			rp->er_end = (start - 1);
 	}
+
+	if (flags & EX_CONFLICTOK)
+		goto done;
 
 	/* Region not found, or request otherwise invalid. */
 #if defined(DIAGNOSTIC) || defined(DDB)
@@ -1095,7 +1123,7 @@ extent_free(struct extent *ex, u_long start, u_long size, int flags)
 		ex->ex_flags &= ~EXF_WANTED;
 		wakeup(ex);
 	}
-	return (0);
+	return (error);
 }
 
 static struct extent_region *
@@ -1113,9 +1141,9 @@ extent_alloc_region_descriptor(struct extent *ex, int flags)
 			if ((flags & EX_WAITOK) == 0)
 				return (NULL);
 			ex->ex_flags |= EXF_FLWANTED;
-			if (tsleep(&fex->fex_freelist,
+			if (tsleep_nsec(&fex->fex_freelist,
 			    PRIBIO | ((flags & EX_CATCH) ? PCATCH : 0),
-			    "extnt", 0))
+			    "extnt", INFSLP))
 				return (NULL);
 		}
 		rp = LIST_FIRST(&fex->fex_freelist);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpi.c,v 1.206 2018/08/14 05:22:21 jmatthew Exp $ */
+/*	$OpenBSD: mpi.c,v 1.214 2020/06/27 14:29:45 krw Exp $ */
 
 /*
  * Copyright (c) 2005, 2006, 2009 David Gwynne <dlg@openbsd.org>
@@ -64,17 +64,12 @@ struct cfdriver mpi_cd = {
 
 void			mpi_scsi_cmd(struct scsi_xfer *);
 void			mpi_scsi_cmd_done(struct mpi_ccb *);
-void			mpi_minphys(struct buf *bp, struct scsi_link *sl);
 int			mpi_scsi_probe(struct scsi_link *);
 int			mpi_scsi_ioctl(struct scsi_link *, u_long, caddr_t,
 			    int);
 
 struct scsi_adapter mpi_switch = {
-	mpi_scsi_cmd,
-	mpi_minphys,
-	mpi_scsi_probe,
-	NULL,
-	mpi_scsi_ioctl
+	mpi_scsi_cmd, NULL, mpi_scsi_probe, NULL, mpi_scsi_ioctl
 };
 
 struct mpi_dmamem	*mpi_dmamem_alloc(struct mpi_softc *, size_t);
@@ -180,7 +175,7 @@ void		mpi_refresh_sensors(void *);
 #define mpi_pop_reply(s)	bus_space_read_4((s)->sc_iot, (s)->sc_ioh, \
 				    MPI_REPLY_QUEUE)
 #define mpi_push_reply_db(s, v) bus_space_write_4((s)->sc_iot, (s)->sc_ioh, \
-				    MPI_REPLY_QUEUE, (v))	
+				    MPI_REPLY_QUEUE, (v))
 
 #define mpi_wait_db_int(s)	mpi_wait_ne((s), MPI_INTR_STATUS, \
 				    MPI_INTR_STATUS_DOORBELL, 0)
@@ -299,7 +294,8 @@ mpi_attach(struct mpi_softc *sc)
 	}
 
 	if (mpi_manufacturing(sc) != 0) {
-		printf("%s: unable to fetch manufacturing info\n", DEVNAME(sc));		goto free_replies;
+		printf("%s: unable to fetch manufacturing info\n", DEVNAME(sc));
+		goto free_replies;
 	}
 
 	switch (sc->sc_porttype) {
@@ -353,7 +349,7 @@ mpi_attach(struct mpi_softc *sc)
 
 			sc->sc_vol_list = (struct mpi_cfg_raid_vol *)
 			    (sc->sc_vol_page + 1);
- 
+
 			sc->sc_ioctl = mpi_ioctl;
 		}
 	}
@@ -367,7 +363,6 @@ mpi_attach(struct mpi_softc *sc)
 	sc->sc_link.openings = MAX(sc->sc_maxcmds / sc->sc_buswidth, 16);
 	sc->sc_link.pool = &sc->sc_iopool;
 
-	memset(&saa, 0, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	/* config_found() returns the scsibus attached to us */
@@ -1281,7 +1276,7 @@ mpi_wait(struct mpi_softc *sc, struct mpi_ccb *ccb)
 
 	mtx_enter(&cookie);
 	while (ccb->ccb_cookie != NULL)
-		msleep(ccb, &cookie, PRIBIO, "mpiwait", 0);
+		msleep_nsec(ccb, &cookie, PRIBIO, "mpiwait", INFSLP);
 	mtx_leave(&cookie);
 
 	done(ccb);
@@ -1602,15 +1597,6 @@ mpi_load_xs(struct mpi_ccb *ccb)
 	    BUS_DMASYNC_PREWRITE);
 
 	return (0);
-}
-
-void
-mpi_minphys(struct buf *bp, struct scsi_link *sl)
-{
-	/* XXX */
-	if (bp->b_bcount > MAXPHYS)
-		bp->b_bcount = MAXPHYS;
-	minphys(bp);
 }
 
 int
@@ -3413,7 +3399,7 @@ mpi_create_sensors(struct mpi_softc *sc)
 		/* skip if not a virtual disk */
 		if (!(link->flags & SDEV_VIRTUAL))
 			continue;
-		
+
 		vol++;
 	}
 	if (vol == 0)

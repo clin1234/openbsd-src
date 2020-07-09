@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-pkcs11-helper.c,v 1.18 2019/05/16 08:47:27 dtucker Exp $ */
+/* $OpenBSD: ssh-pkcs11-helper.c,v 1.23 2020/03/06 18:26:21 markus Exp $ */
 /*
  * Copyright (c) 2010 Markus Friedl.  All rights reserved.
  *
@@ -19,6 +19,7 @@
 #include <sys/queue.h>
 #include <sys/time.h>
 
+#include <stdlib.h>
 #include <errno.h>
 #include <poll.h>
 #include <stdarg.h>
@@ -34,11 +35,13 @@
 #include "ssh-pkcs11.h"
 #include "ssherr.h"
 
+#ifdef WITH_OPENSSL
+
 /* borrows code from sftp-server and ssh-agent */
 
 struct pkcs11_keyinfo {
 	struct sshkey	*key;
-	char		*providername;
+	char		*providername, *label;
 	TAILQ_ENTRY(pkcs11_keyinfo) next;
 };
 
@@ -51,13 +54,14 @@ struct sshbuf *iqueue;
 struct sshbuf *oqueue;
 
 static void
-add_key(struct sshkey *k, char *name)
+add_key(struct sshkey *k, char *name, char *label)
 {
 	struct pkcs11_keyinfo *ki;
 
 	ki = xcalloc(1, sizeof(*ki));
 	ki->providername = xstrdup(name);
 	ki->key = k;
+	ki->label = xstrdup(label);
 	TAILQ_INSERT_TAIL(&pkcs11_keylist, ki, next);
 }
 
@@ -71,6 +75,7 @@ del_keys_by_name(char *name)
 		if (!strcmp(ki->providername, name)) {
 			TAILQ_REMOVE(&pkcs11_keylist, ki, next);
 			free(ki->providername);
+			free(ki->label);
 			sshkey_free(ki->key);
 			free(ki);
 		}
@@ -84,7 +89,7 @@ lookup_key(struct sshkey *k)
 	struct pkcs11_keyinfo *ki;
 
 	TAILQ_FOREACH(ki, &pkcs11_keylist, next) {
-		debug("check %p %s", ki, ki->providername);
+		debug("check %p %s %s", ki, ki->providername, ki->label);
 		if (sshkey_equal(k, ki->key))
 			return (ki->key);
 	}
@@ -109,13 +114,14 @@ process_add(void)
 	u_char *blob;
 	size_t blen;
 	struct sshbuf *msg;
+	char **labels = NULL;
 
 	if ((msg = sshbuf_new()) == NULL)
 		fatal("%s: sshbuf_new failed", __func__);
 	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0 ||
 	    (r = sshbuf_get_cstring(iqueue, &pin, NULL)) != 0)
 		fatal("%s: buffer error: %s", __func__, ssh_err(r));
-	if ((nkeys = pkcs11_add_provider(name, pin, &keys)) > 0) {
+	if ((nkeys = pkcs11_add_provider(name, pin, &keys, &labels)) > 0) {
 		if ((r = sshbuf_put_u8(msg,
 		    SSH2_AGENT_IDENTITIES_ANSWER)) != 0 ||
 		    (r = sshbuf_put_u32(msg, nkeys)) != 0)
@@ -127,11 +133,12 @@ process_add(void)
 				continue;
 			}
 			if ((r = sshbuf_put_string(msg, blob, blen)) != 0 ||
-			    (r = sshbuf_put_cstring(msg, name)) != 0)
+			    (r = sshbuf_put_cstring(msg, labels[i])) != 0)
 				fatal("%s: buffer error: %s",
 				    __func__, ssh_err(r));
 			free(blob);
-			add_key(keys[i], name);
+			add_key(keys[i], name, labels[i]);
+			free(labels[i]);
 		}
 	} else {
 		if ((r = sshbuf_put_u8(msg, SSH_AGENT_FAILURE)) != 0)
@@ -139,7 +146,8 @@ process_add(void)
 		if ((r = sshbuf_put_u32(msg, -nkeys)) != 0)
 			fatal("%s: buffer error: %s", __func__, ssh_err(r));
 	}
-	free(keys);
+	free(labels);
+	free(keys); /* keys themselves are transferred to pkcs11_keylist */
 	free(pin);
 	free(name);
 	send_msg(msg);
@@ -305,7 +313,7 @@ cleanup_exit(int i)
 int
 main(int argc, char **argv)
 {
-	int r, ch, in, out, max, log_stderr = 0;
+	int r, ch, in, out, log_stderr = 0;
 	ssize_t len;
 	SyslogFacility log_facility = SYSLOG_FACILITY_AUTH;
 	LogLevel log_level = SYSLOG_LEVEL_ERROR;
@@ -313,7 +321,6 @@ main(int argc, char **argv)
 	extern char *__progname;
 	struct pollfd pfd[2];
 
-	ssh_malloc_init();	/* must be called before any mallocs */
 	TAILQ_INIT(&pkcs11_keylist);
 
 	log_init(__progname, log_level, log_facility, log_stderr);
@@ -338,12 +345,6 @@ main(int argc, char **argv)
 	pkcs11_init(0);
 	in = STDIN_FILENO;
 	out = STDOUT_FILENO;
-
-	max = 0;
-	if (in > max)
-		max = in;
-	if (out > max)
-		max = out;
 
 	if ((iqueue = sshbuf_new()) == NULL)
 		fatal("%s: sshbuf_new failed", __func__);
@@ -413,3 +414,18 @@ main(int argc, char **argv)
 			fatal("%s: buffer error: %s", __func__, ssh_err(r));
 	}
 }
+
+#else /* WITH_OPENSSL */
+void
+cleanup_exit(int i)
+{
+	_exit(i);
+}
+
+int
+main(int argc, char **argv)
+{
+	fprintf(stderr, "PKCS#11 code is not enabled\n");
+	return 1;
+}
+#endif /* WITH_OPENSSL */

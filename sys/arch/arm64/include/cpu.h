@@ -1,4 +1,4 @@
-/* $OpenBSD: cpu.h,v 1.12 2018/12/05 10:28:21 jsg Exp $ */
+/* $OpenBSD: cpu.h,v 1.18 2020/06/05 23:16:24 naddy Exp $ */
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -22,11 +22,15 @@
  * User-visible definitions
  */
 
-/*  CTL_MACHDEP definitions. */
-/* None for now */
-#define	CPU_MAXID		0	/* number of valid machdep ids */
+/* 
+ * CTL_MACHDEP definitions.
+ */
+#define	CPU_COMPATIBLE		1	/* compatible property */
+#define	CPU_MAXID		2	/* number of valid machdep ids */
 
 #define	CTL_MACHDEP_NAMES { \
+	{ 0, 0 }, \
+	{ "compatible", CTLTYPE_STRING }, \
 }
 
 #ifdef _KERNEL
@@ -110,6 +114,7 @@ struct cpu_info {
 
 	struct opp_table	*ci_opp_table;
 	volatile int		ci_opp_idx;
+	volatile int		ci_opp_max;
 	uint32_t		ci_cpu_supply;
 
 #ifdef MULTIPROCESSOR
@@ -167,7 +172,7 @@ extern struct cpu_info *cpu_info_list;
 #define CPU_INFO_FOREACH(cii, ci)	for (cii = 0, ci = cpu_info_list; \
 					    ci != NULL; ci = ci->ci_next)
 #define CPU_INFO_UNIT(ci)	((ci)->ci_dev ? (ci)->ci_dev->dv_unit : 0)
-#define MAXCPUS	24
+#define MAXCPUS	32
 
 extern struct cpu_info *cpu_info[MAXCPUS];
 
@@ -177,6 +182,17 @@ void cpu_boot_secondary_processors(void);
 #define CPU_BUSY_CYCLE()	__asm volatile("yield" : : : "memory")
 
 #define curpcb		curcpu()->ci_curpcb
+
+static inline unsigned int
+cpu_rnd_messybits(void)
+{
+	uint64_t val, rval;
+
+	__asm volatile("mrs %0, CNTVCT_EL0; rbit %1, %0;"
+	    : "=r" (val), "=r" (rval));
+
+	return (val ^ rval);
+}
 
 /*
  * Scheduling glue

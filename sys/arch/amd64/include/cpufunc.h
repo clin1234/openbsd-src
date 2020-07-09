@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpufunc.h,v 1.33 2019/03/26 19:32:46 mlarkin Exp $	*/
+/*	$OpenBSD: cpufunc.h,v 1.35 2020/07/03 17:54:27 kettenis Exp $	*/
 /*	$NetBSD: cpufunc.h,v 1.3 2003/05/08 10:27:43 fvdl Exp $	*/
 
 /*-
@@ -267,7 +267,7 @@ wrmsr_locked(u_int msr, u_int code, u_int64_t newval)
 static __inline void
 wbinvd(void)
 {
-	__asm volatile("wbinvd");
+	__asm volatile("wbinvd" : : : "memory");
 }
 
 static __inline void
@@ -288,6 +288,15 @@ rdtsc(void)
 	uint32_t hi, lo;
 
 	__asm volatile("rdtsc" : "=d" (hi), "=a" (lo));
+	return (((uint64_t)hi << 32) | (uint64_t) lo);
+}
+
+static __inline u_int64_t
+rdtsc_lfence(void)
+{
+	uint32_t hi, lo;
+
+	__asm volatile("lfence; rdtsc" : "=d" (hi), "=a" (lo));
 	return (((uint64_t)hi << 32) | (uint64_t) lo);
 }
 

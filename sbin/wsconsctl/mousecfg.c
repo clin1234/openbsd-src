@@ -1,4 +1,4 @@
-/* $OpenBSD: mousecfg.c,v 1.5 2018/07/30 15:57:04 jcs Exp $ */
+/* $OpenBSD: mousecfg.c,v 1.7 2020/04/02 17:17:04 deraadt Exp $ */
 
 /*
  * Copyright (c) 2017 Ulf Brosziewski
@@ -20,8 +20,9 @@
  * Read/write wsmouse parameters for touchpad configuration.
  */
 
+#include <sys/types.h>
 #include <sys/ioctl.h>
-#include <sys/param.h>
+#include <sys/time.h>
 #include <dev/wscons/wsconsio.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,8 +31,12 @@
 #include <errno.h>
 #include "mousecfg.h"
 
+#ifndef nitems
+#define nitems(_a)       (sizeof((_a)) / sizeof((_a)[0]))
+#endif
+
 #define BASE_FIRST		WSMOUSECFG_DX_SCALE
-#define BASE_LAST		WSMOUSECFG_Y_INV
+#define BASE_LAST		WSMOUSECFG_REVERSE_SCROLLING
 #define TP_FILTER_FIRST		WSMOUSECFG_DX_MAX
 #define TP_FILTER_LAST		WSMOUSECFG_SMOOTHING
 #define TP_FEATURES_FIRST	WSMOUSECFG_SOFTBUTTONS
@@ -95,6 +100,12 @@ struct wsmouse_parameters cfg_swapsides = {
 struct wsmouse_parameters cfg_disable = {
 	(struct wsmouse_param[]) {
 	    { WSMOUSECFG_DISABLE, 0 }, },
+	1
+};
+
+struct wsmouse_parameters cfg_revscroll = {
+	(struct wsmouse_param[]) {
+	    { WSMOUSECFG_REVERSE_SCROLLING, 0 }, },
 	1
 };
 

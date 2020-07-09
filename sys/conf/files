@@ -1,4 +1,4 @@
-#	$OpenBSD: files,v 1.671 2019/05/04 11:34:47 kettenis Exp $
+#	$OpenBSD: files,v 1.690 2020/07/06 04:09:46 dlg Exp $
 #	$NetBSD: files,v 1.87 1996/05/19 17:17:50 jonathan Exp $
 
 #	@(#)files.newconf	7.5 (Berkeley) 5/10/93
@@ -20,6 +20,7 @@ define	i2cbus {}
 define	gpiobus {}
 define	onewirebus {}
 define	video {}
+define	intrmap {}
 
 # filesystem firmware loading attribute
 define firmload
@@ -62,10 +63,10 @@ define	ether
 define	mpls
 define	sppp
 define	wlan
+define	stoeplitz
 
 # "Chipset" attributes.  These are the machine-independent portions
 # of device drivers.
-define	ncr5380sbc	# NCR 5380 SCSI Bus Controller
 define	dp8390nic	# 8390-family Ethernet controllers
 define	rtl80x9		# Realtek 8019/8029 NE2000-compatible
 define	dl10019		# DL10019/10022-family Ethernet controllers
@@ -138,10 +139,6 @@ file	dev/ic/aic79xx_openbsd.c	ahd
 device	aic: scsi
 file	dev/ic/aic6360.c	aic & (aic_isa | aic_pcmcia | aic_isapnp)
 
-# DPT EATA SCSI controllers
-device	dpt: scsi
-file	dev/ic/dpt.c			dpt
-
 # AdvanSys 1200A, 1200B and ULTRA SCSI controllers
 device	adv: scsi
 file	dev/ic/adv.c			adv
@@ -198,10 +195,6 @@ file	dev/ic/nvme.c			nvme needs-flag
 # LSI Logic Fusion-MPT Message Passing Interface
 device	mpi: scsi
 file	dev/ic/mpi.c			mpi
-
-# Emulex Light Pulse Fibre Channel (Service Level Interface)
-device	sli: scsi
-file	dev/ic/sli.c			sli
 
 # Silicon Image 3124/3132/3531 SATALink
 device	sili: scsi, atascsi
@@ -312,13 +305,12 @@ file	dev/ic/i82596.c			ie & (ie_pci | ie_eisa | ie_gsc)
 device	gem: ether, ifnet, ifmedia, mii
 file	dev/ic/gem.c			gem
 
-# Synopsis Designware GMAC core, as found on Allwinner A20
-# and other SoCs
-device	dwge: ether, ifnet, ifmedia, mii
-file	dev/ic/dwc_gmac.c		dwge
-
 device	ti: ether, ifnet, ifmedia, mii, firmload
 file	dev/ic/ti.c			ti
+
+# Broadcom BCM7XXX Ethernet controller
+device	bse: ether, ifnet, ifmedia, mii
+file	dev/ic/bcmgenet.c		bse
 
 # 8250/16[45]50-based "com" ports
 device	com: tty
@@ -532,6 +524,11 @@ file	dev/spdmem.c			spdmem
 device	oaic: scsi
 file	dev/ic/aic6250.c		oaic
 
+# Synopsys DesignWare HDMI transmitter
+define	dwhdmi
+file	dev/ic/dwhdmi.c			dwhdmi
+file	dev/ic/dwhdmiphy.c		dwhdmi
+
 # Synopsys DesignWare I2C controller
 device	dwiic: i2cbus
 file	dev/ic/dwiic.c			dwiic
@@ -559,9 +556,10 @@ pseudo-device carp: ifnet, ether
 pseudo-device sppp: ifnet
 pseudo-device gif: ifnet
 pseudo-device gre: ifnet
-pseudo-device mobileip: ifnet
 pseudo-device crypto: ifnet
 pseudo-device trunk: ifnet, ether, ifmedia
+pseudo-device aggr: ifnet, ether, ifmedia
+pseudo-device tpmr: ifnet, ether, ifmedia
 pseudo-device mpe: ifnet, mpls
 pseudo-device mpw: ifnet, mpls, ether
 pseudo-device mpip: ifnet, mpls
@@ -570,9 +568,13 @@ pseudo-device vether: ifnet, ether
 pseudo-device pppx: ifnet
 pseudo-device vxlan: ifnet, ether, ifmedia
 pseudo-device switch: ifnet, ether
+pseudo-device wg: ifnet
 
 pseudo-device ksyms
 file	dev/ksyms.c			ksyms needs-flag
+
+pseudo-device kstat
+file	dev/kstat.c			kstat needs-flag
 
 pseudo-device fuse
 file	miscfs/fuse/fuse_device.c	fuse	needs-flag
@@ -615,6 +617,12 @@ file 	net/if_pppoe.c			pppoe	needs-flag
 pseudo-device kcov
 file	dev/kcov.c			kcov	needs-flag
 
+pseudo-device dt
+file	dev/dt/dt_dev.c			dt	needs-flag
+file	dev/dt/dt_prov_profile.c	dt
+file	dev/dt/dt_prov_syscall.c	dt
+file	dev/dt/dt_prov_static.c		dt
+
 # XXX machine-independent SCSI files should live somewhere here, maybe
 
 # kernel sources
@@ -641,8 +649,6 @@ file dev/audio.c			audio			needs-flag
 file dev/cons.c
 file dev/diskmap.c
 file dev/firmload.c			firmload
-file dev/flash.c			flash			needs-flag
-file dev/ic/ncr5380sbc.c		ncr5380sbc
 file dev/ic/dp8390.c			dp8390nic
 file dev/ic/rtl80x9.c			rtl80x9
 file dev/ic/tea5757.c			tea5757
@@ -691,6 +697,7 @@ file kern/kern_resource.c
 file kern/kern_pledge.c
 file kern/kern_unveil.c
 file kern/kern_sched.c
+file kern/kern_intrmap.c		intrmap
 file kern/kern_sensors.c
 file kern/kern_sig.c
 file kern/kern_smr.c
@@ -811,20 +818,25 @@ file net/rtable.c
 file net/route.c
 file net/rtsock.c
 file net/slcompress.c			ppp
-file net/if_enc.c			enc			needs-count
+file net/if_enc.c			enc
 file net/if_gre.c			gre			needs-count
-file net/if_mobileip.c			mobileip		needs-count
-file net/if_trunk.c			trunk			needs-count
+file net/if_trunk.c			trunk
 file net/trunklacp.c			trunk
-file net/if_mpe.c			mpe			needs-count
-file net/if_mpw.c			mpw			needs-count
+file net/if_aggr.c			aggr
+file net/if_tpmr.c			tpmr
+file net/if_mpe.c			mpe
+file net/if_mpw.c			mpw
 file net/if_mpip.c			mpip
 file net/if_bpe.c			bpe			needs-count
-file net/if_vether.c			vether			needs-count
-file net/if_pair.c			pair			needs-count
+file net/if_vether.c			vether
+file net/if_pair.c			pair
 file net/if_pppx.c			pppx			needs-count
 file net/if_vxlan.c			vxlan			needs-count
+file net/if_wg.c			wg
+file net/wg_noise.c			wg
+file net/wg_cookie.c			wg
 file net/bfd.c				bfd
+file net/toeplitz.c			stoeplitz		needs-flag
 file net80211/ieee80211.c		wlan
 file net80211/ieee80211_amrr.c		wlan
 file net80211/ieee80211_crypto.c	wlan
@@ -867,7 +879,6 @@ file netinet/ip_gre.c
 file netinet/ip_ipsp.c			ipsec | tcp_signature
 file netinet/ip_spd.c			ipsec | tcp_signature
 file netinet/ip_ipip.c
-file netinet/ip_ether.c			gif
 file netinet/ipsec_input.c		ipsec
 file netinet/ipsec_output.c		ipsec
 file netinet/ip_esp.c			ipsec
@@ -900,6 +911,8 @@ file crypto/idgen.c			inet6 | nfsclient | nfsserver
 file crypto/chachapoly.c		ipsec | crypto
 file crypto/poly1305.c			ipsec | crypto
 file crypto/siphash.c
+file crypto/blake2s.c			wg
+file crypto/curve25519.c		wg
 file netmpls/mpls_input.c		mpls
 file netmpls/mpls_output.c		mpls
 file netmpls/mpls_proto.c		mpls
@@ -968,11 +981,9 @@ file uvm/uvm_page.c
 file uvm/uvm_pager.c
 file uvm/uvm_pdaemon.c
 file uvm/uvm_pmemrange.c
-file uvm/uvm_stat.c
 file uvm/uvm_swap.c
 file uvm/uvm_swap_encrypt.c		uvm_swap_encrypt
 file uvm/uvm_unix.c
-file uvm/uvm_user.c
 file uvm/uvm_vnode.c
 
 # IPv6

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.53 2018/12/05 10:28:21 jsg Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.59 2020/05/31 06:23:57 dlg Exp $	*/
 /*	$NetBSD: cpu.h,v 1.34 2003/06/23 11:01:08 martin Exp $	*/
 
 /*
@@ -67,7 +67,8 @@
 #define	CPU_MAXSPEED		11	/* int: number of valid machdep ids */
 		/*		12	   formerly int: CPU_LIDSUSPEND */
 #define CPU_LIDACTION		13	/* action caused by lid close */
-#define	CPU_MAXID		14	/* number of valid machdep ids */
+#define	CPU_COMPATIBLE		14	/* compatible property */
+#define	CPU_MAXID		15	/* number of valid machdep ids */
 
 #define	CTL_MACHDEP_NAMES { \
 	{ 0, 0 }, \
@@ -84,6 +85,7 @@
 	{ "maxspeed", CTLTYPE_INT }, \
 	{ 0, 0 }, \
 	{ "lidaction", CTLTYPE_INT }, \
+	{ "compatible", CTLTYPE_STRING }, \
 }
 
 #ifdef _KERNEL
@@ -152,40 +154,59 @@ void	arm32_vector_init(vaddr_t, int);
 #include <sys/srp.h>
 
 struct cpu_info {
-	struct device *ci_dev;		/* Device corresponding to this CPU */
-	struct cpu_info *ci_next;
+	struct device		*ci_dev; /* Device corresponding to this CPU */
+	struct cpu_info		*ci_next;
 	struct schedstate_percpu ci_schedstate; /* scheduler state */
 
-	struct proc *ci_curproc;
-	struct proc *ci_fpuproc;
-	u_int32_t ci_cpuid;
-	u_int32_t ci_randseed;
+	u_int32_t		ci_cpuid;
+	uint64_t		ci_mpidr;
+	int			ci_node;
+	struct cpu_info		*ci_self;
 
-	struct pcb *ci_curpcb;
-	struct pcb *ci_idle_pcb;
+	struct proc		*ci_curproc;
+	struct proc		*ci_fpuproc;
+	u_int32_t		ci_randseed;
 
-	u_int32_t ci_arm_cpuid;		/* aggregate CPU id */
-	u_int32_t ci_arm_cputype;	/* CPU type */
-	u_int32_t ci_arm_cpurev;	/* CPU revision */
-	u_int32_t ci_ctrl;		/* The CPU control register */
+	struct pcb		*ci_curpcb;
+	struct pcb		*ci_idle_pcb;
 
-	uint32_t ci_cpl;
-	uint32_t ci_ipending;
-	uint32_t ci_idepth;
+	uint32_t		ci_cpl;
+	uint32_t		ci_ipending;
+	uint32_t		ci_idepth;
 #ifdef DIAGNOSTIC
-	int	ci_mutex_level;
+	int			ci_mutex_level;
 #endif
+	int			ci_want_resched;
+
+	void			(*ci_flush_bp)(void);
+
+	struct opp_table	*ci_opp_table;
+	volatile int		ci_opp_idx;
+	volatile int		ci_opp_max;
+	uint32_t		ci_cpu_supply;
 
 #ifdef MULTIPROCESSOR
 	struct srp_hazard	ci_srp_hazards[SRP_HAZARD_NUM];
+	volatile int		ci_flags;
+	uint32_t		ci_ttbr0;
+	vaddr_t			ci_pl1_stkend;
+	vaddr_t			ci_irq_stkend;
+	vaddr_t			ci_abt_stkend;
+	vaddr_t			ci_und_stkend;
 #endif
 
 #ifdef GPROF
 	struct gmonparam *ci_gmon;
 #endif
-
-	void (*ci_flush_bp)(void);
 };
+
+#define CPUF_PRIMARY 		(1<<0)
+#define CPUF_AP	 		(1<<1)
+#define CPUF_IDENTIFY		(1<<2)
+#define CPUF_IDENTIFIED		(1<<3)
+#define CPUF_PRESENT		(1<<4)
+#define CPUF_GO			(1<<5)
+#define CPUF_RUNNING		(1<<6)
 
 static inline struct cpu_info *
 curcpu(void)
@@ -206,6 +227,7 @@ extern struct cpu_info *cpu_info_list;
 	for (cii = 0, ci = curcpu(); ci != NULL; ci = NULL)
 #define CPU_INFO_UNIT(ci)	0
 #define MAXCPUS	1
+#define cpu_kick(ci)
 #define cpu_unidle(ci)
 #else
 #define cpu_number()		(curcpu()->ci_cpuid)
@@ -213,10 +235,10 @@ extern struct cpu_info *cpu_info_list;
 #define CPU_INFO_ITERATOR		int
 #define CPU_INFO_FOREACH(cii, ci)	for (cii = 0, ci = cpu_info_list; \
 					    ci != NULL; ci = ci->ci_next)
-
 #define CPU_INFO_UNIT(ci)	((ci)->ci_dev ? (ci)->ci_dev->dv_unit : 0)
 #define MAXCPUS	4
-#define cpu_unidle(ci)
+void cpu_kick(struct cpu_info *);
+void cpu_unidle(struct cpu_info *ci);
 
 extern struct cpu_info *cpu_info[MAXCPUS];
 
@@ -226,6 +248,8 @@ void cpu_boot_secondary_processors(void);
 #define CPU_BUSY_CYCLE()	do {} while (0)
 
 #define curpcb		curcpu()->ci_curpcb
+
+unsigned int cpu_rnd_messybits(void);
 
 /*
  * Scheduling glue
@@ -298,6 +322,8 @@ intr_restore(u_long cpsr)
 {
 	__asm volatile ("msr cpsr_c, %0" :: "r"(cpsr));
 }
+
+void	cpu_startclock(void);
 
 #endif /* _KERNEL */
 

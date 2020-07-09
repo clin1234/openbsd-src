@@ -1,4 +1,4 @@
-/*	$OpenBSD: atascsi.c,v 1.129 2017/08/23 05:13:01 jsg Exp $ */
+/*	$OpenBSD: atascsi.c,v 1.137 2020/07/02 21:59:34 krw Exp $ */
 
 /*
  * Copyright (c) 2007 David Gwynne <dlg@openbsd.org>
@@ -96,11 +96,7 @@ void		atascsi_free(struct scsi_link *);
 
 /* template */
 struct scsi_adapter atascsi_switch = {
-	atascsi_cmd,		/* scsi_cmd */
-	scsi_minphys,		/* scsi_minphys */
-	atascsi_probe,		/* dev_probe */
-	atascsi_free,		/* dev_free */
-	NULL,			/* ioctl */
+	atascsi_cmd, NULL, atascsi_probe, atascsi_free, NULL
 };
 
 void		ata_swapcopy(void *, void *, size_t);
@@ -181,20 +177,19 @@ atascsi_attach(struct device *self, struct atascsi_attach_args *aaa)
 	/* copy from template and modify for ourselves */
 	as->as_switch = atascsi_switch;
 	if (aaa->aaa_minphys != NULL)
-		as->as_switch.scsi_minphys = aaa->aaa_minphys;
+		as->as_switch.dev_minphys = aaa->aaa_minphys;
+
+	as->as_host_ports = mallocarray(aaa->aaa_nports,
+	    sizeof(struct atascsi_host_port *),	M_DEVBUF, M_WAITOK | M_ZERO);
 
 	/* fill in our scsi_link */
 	as->as_link.adapter = &as->as_switch;
 	as->as_link.adapter_softc = as;
 	as->as_link.adapter_buswidth = aaa->aaa_nports;
 	as->as_link.luns = SATA_PMP_MAX_PORTS;
-	as->as_link.adapter_target = aaa->aaa_nports;
+	as->as_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	as->as_link.openings = 1;
 
-	as->as_host_ports = mallocarray(aaa->aaa_nports,
-	    sizeof(struct atascsi_host_port *),	M_DEVBUF, M_WAITOK | M_ZERO);
-
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &as->as_link;
 
 	/* stash the scsibus so we can do hotplug on it */
@@ -217,26 +212,6 @@ atascsi_detach(struct atascsi *as, int flags)
 	free(as, M_DEVBUF, sizeof(*as));
 
 	return (0);
-}
-
-int
-atascsi_probe_dev(struct atascsi *as, int port, int lun)
-{
-	if (lun == 0) {
-		return (scsi_probe_target(as->as_scsibus, port));
-	} else {
-		return (scsi_probe_lun(as->as_scsibus, port, lun));
-	}
-}
-
-int
-atascsi_detach_dev(struct atascsi *as, int port, int lun, int flags)
-{
-	if (lun == 0) {
-		return (scsi_detach_target(as->as_scsibus, port, flags));
-	} else {
-		return (scsi_detach_lun(as->as_scsibus, port, lun, flags));
-	}
 }
 
 struct atascsi_port *
@@ -414,7 +389,7 @@ atascsi_probe(struct scsi_link *link)
 		}
 	}
 
-	if (ISSET(letoh16(ap->ap_identify.data_set_mgmt), 
+	if (ISSET(letoh16(ap->ap_identify.data_set_mgmt),
 	    ATA_ID_DATA_SET_MGMT_TRIM))
 		SET(ap->ap_features, ATA_PORT_F_TRIM);
 
@@ -1277,7 +1252,7 @@ ata_identify_blocksize(struct ata_identify *id)
 {
 	u_int			blocksize = 512;
 	u_int16_t		p2l_sect = letoh16(id->p2l_sect);
-	
+
 	if ((p2l_sect & ATA_ID_P2L_SECT_MASK) == ATA_ID_P2L_SECT_VALID &&
 	    ISSET(p2l_sect, ATA_ID_P2L_SECT_SIZESET)) {
 		blocksize = letoh16(id->words_lsec[1]);
@@ -1294,7 +1269,7 @@ ata_identify_block_l2p_exp(struct ata_identify *id)
 {
 	u_int			exponent = 0;
 	u_int16_t		p2l_sect = letoh16(id->p2l_sect);
-	
+
 	if ((p2l_sect & ATA_ID_P2L_SECT_MASK) == ATA_ID_P2L_SECT_VALID &&
 	    ISSET(p2l_sect, ATA_ID_P2L_SECT_SET)) {
 		exponent = (p2l_sect & ATA_ID_P2L_SECT_SIZE);
@@ -1309,7 +1284,7 @@ ata_identify_block_logical_align(struct ata_identify *id)
 	u_int			align = 0;
 	u_int16_t		p2l_sect = letoh16(id->p2l_sect);
 	u_int16_t		logical_align = letoh16(id->logical_align);
-	
+
 	if ((p2l_sect & ATA_ID_P2L_SECT_MASK) == ATA_ID_P2L_SECT_VALID &&
 	    ISSET(p2l_sect, ATA_ID_P2L_SECT_SET) &&
 	    (logical_align & ATA_ID_LALIGN_MASK) == ATA_ID_LALIGN_VALID)
@@ -1372,7 +1347,7 @@ atascsi_disk_capacity16(struct scsi_xfer *xs)
 	if (ISSET(ap->ap_features, ATA_PORT_F_TRIM)) {
 		SET(lowest_aligned, READ_CAP_16_TPE);
 
-		if (ISSET(letoh16(ap->ap_identify.add_support), 
+		if (ISSET(letoh16(ap->ap_identify.add_support),
 		    ATA_ID_ADD_SUPPORT_DRT))
 			SET(lowest_aligned, READ_CAP_16_TPRZ);
 	}

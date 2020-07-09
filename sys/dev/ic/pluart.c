@@ -1,4 +1,4 @@
-/*	$OpenBSD: pluart.c,v 1.2 2018/08/12 18:32:18 kettenis Exp $	*/
+/*	$OpenBSD: pluart.c,v 1.5 2020/01/10 04:10:15 cheloha Exp $	*/
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2005 Dale Rahn <drahn@dalerahn.com>
@@ -188,25 +188,25 @@ pluart_intr(void *arg)
 	bus_space_tag_t iot = sc->sc_iot;
 	bus_space_handle_t ioh = sc->sc_ioh;
 	struct tty *tp = sc->sc_tty;
-	u_int16_t fr;
+	u_int16_t is;
 	u_int16_t *p;
 	u_int16_t c;
 
-	bus_space_write_4(iot, ioh, UART_ICR, -1);
+	is = bus_space_read_4(iot, ioh, UART_RIS);
+	bus_space_write_4(iot, ioh, UART_ICR, is);
 
 	if (sc->sc_tty == NULL)
-		return(0);
+		return 0;
 
-	fr = bus_space_read_4(iot, ioh, UART_FR);
-	if (ISSET(fr, UART_FR_TXFE) && ISSET(tp->t_state, TS_BUSY)) {
+	if (!ISSET(is, UART_IMSC_RXIM) && !ISSET(is, UART_IMSC_TXIM))
+		return 0;
+
+	if (ISSET(is, UART_IMSC_TXIM) && ISSET(tp->t_state, TS_BUSY)) {
 		CLR(tp->t_state, TS_BUSY | TS_FLUSH);
 		if (sc->sc_halt > 0)
 			wakeup(&tp->t_outq);
 		(*linesw[tp->t_line].l_start)(tp);
 	}
-
-	if(!ISSET(bus_space_read_4(iot, ioh, UART_FR), UART_FR_RXFF))
-		return 0;
 
 	p = sc->sc_ibufp;
 
@@ -225,7 +225,7 @@ pluart_intr(void *arg)
 		if (p >= sc->sc_ibufend) {
 			sc->sc_floods++;
 			if (sc->sc_errors++ == 0)
-				timeout_add(&sc->sc_diag_tmo, 60 * hz);
+				timeout_add_sec(&sc->sc_diag_tmo, 60);
 		} else {
 			*p++ = c;
 			if (p == sc->sc_ibufhigh && ISSET(tp->t_cflag, CRTSCTS)) {
@@ -287,7 +287,7 @@ pluart_param(struct tty *tp, struct termios *t)
 		while (ISSET(tp->t_state, TS_BUSY)) {
 			++sc->sc_halt;
 			error = ttysleep(tp, &tp->t_outq,
-			    TTOPRI | PCATCH, "pluartprm", 0);
+			    TTOPRI | PCATCH, "pluartprm");
 			--sc->sc_halt;
 			if (error) {
 				pluart_start(tp);
@@ -326,35 +326,22 @@ pluart_start(struct tty *tp)
 	struct pluart_softc *sc = pluart_cd.cd_devs[DEVUNIT(tp->t_dev)];
 	bus_space_tag_t iot = sc->sc_iot;
 	bus_space_handle_t ioh = sc->sc_ioh;
-
+	u_int16_t fr;
 	int s;
+
 	s = spltty();
 	if (ISSET(tp->t_state, TS_BUSY | TS_TIMEOUT | TS_TTSTOP))
 		goto out;
-	if (tp->t_outq.c_cc <= tp->t_lowat) {
-		if (ISSET(tp->t_state, TS_ASLEEP)) {
-			CLR(tp->t_state, TS_ASLEEP);
-			wakeup(&tp->t_outq);
-		}
-		if (tp->t_outq.c_cc == 0)
-			goto out;
-		selwakeup(&tp->t_wsel);
-	}
+	ttwakeupwr(tp);
+	if (tp->t_outq.c_cc == 0)
+		goto out;
 	SET(tp->t_state, TS_BUSY);
 
-	if (ISSET(sc->sc_hwflags, COM_HW_FIFO)) {
-		u_char buffer[64];	/* largest fifo */
-		int i, n;
-
-		n = q_to_b(&tp->t_outq, buffer,
-		    min(sc->sc_fifolen, sizeof buffer));
-		for (i = 0; i < n; i++) {
-			bus_space_write_4(iot, ioh, UART_DR, buffer[i]);
-		}
-		bzero(buffer, n);
-	} else if (tp->t_outq.c_cc != 0)
+	fr = bus_space_read_4(iot, ioh, UART_FR);
+	while (tp->t_outq.c_cc != 0 && ISSET(fr, UART_FR_TXFE)) {
 		bus_space_write_4(iot, ioh, UART_DR, getc(&tp->t_outq));
-
+		fr = bus_space_read_4(iot, ioh, UART_FR);
+	}
 out:
 	splx(s);
 }
@@ -441,7 +428,7 @@ pluart_softint(void *arg)
 		if (ISSET(c, IMXUART_RX_OVERRUN)) {
 			sc->sc_overflows++;
 			if (sc->sc_errors++ == 0)
-				timeout_add(&sc->sc_diag_tmo, 60 * hz);
+				timeout_add_sec(&sc->sc_diag_tmo, 60);
 		}
 		*/
 		/* This is ugly, but fast. */
@@ -576,7 +563,7 @@ pluartopen(dev_t dev, int flag, int mode, struct proc *p)
 				!ISSET(tp->t_state, TS_CARR_ON))) {
 				SET(tp->t_state, TS_WOPEN);
 				error = ttysleep(tp, &tp->t_rawq,
-				    TTIPRI | PCATCH, ttopen, 0);
+				    TTIPRI | PCATCH, ttopen);
 				/*
 				 * If TS_WOPEN has been reset, that means the
 				 * cua device has been closed.  We don't want
@@ -618,7 +605,7 @@ pluartclose(dev_t dev, int flag, int mode, struct proc *p)
 		/* tty device is waiting for carrier; drop dtr then re-raise */
 		//CLR(sc->sc_ucr3, IMXUART_CR3_DSR);
 		//bus_space_write_4(iot, ioh, IMXUART_UCR3, sc->sc_ucr3);
-		timeout_add(&sc->sc_dtr_tmo, hz * 2);
+		timeout_add_sec(&sc->sc_dtr_tmo, 2);
 	} else {
 		/* no one else waiting; turn off the uart */
 		pluart_pwroff(sc);

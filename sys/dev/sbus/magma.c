@@ -1,4 +1,4 @@
-/*	$OpenBSD: magma.c,v 1.28 2018/02/19 08:59:52 mpi Exp $	*/
+/*	$OpenBSD: magma.c,v 1.32 2020/05/23 09:44:20 mpi Exp $	*/
 
 /*-
  * Copyright (c) 1998 Iain Hibbert
@@ -904,7 +904,7 @@ mttyopen(dev_t dev, int flags, int mode, struct proc *p)
 			int error;
 
 			SET(tp->t_state, TS_WOPEN);
-			error = ttysleep(tp, &tp->t_rawq, TTIPRI | PCATCH, "mttydcd", 0);
+			error = ttysleep(tp, &tp->t_rawq, TTIPRI | PCATCH, "mttydcd");
 			if (error != 0) {
 				splx(s);
 				CLR(tp->t_state, TS_WOPEN);
@@ -1340,6 +1340,7 @@ mtty_param(struct tty *tp, struct termios *t)
  *	mbppwrite	write to mbpp
  *	mbppioctl	do ioctl on mbpp
  *	mbpppoll	do poll on mbpp
+ *	mbppkqfilter	kqueue on mbpp
  *	mbpp_rw		general rw routine
  *	mbpp_timeout	rw timeout
  *	mbpp_start	rw start after delay
@@ -1410,8 +1411,8 @@ mbppopen(dev_t dev, int flags, int mode, struct proc *p)
 
 	/* set defaults */
 	mp->mp_burst = BPP_BURST;
-	mp->mp_timeout = mbpp_mstohz(BPP_TIMEOUT);
-	mp->mp_delay = mbpp_mstohz(BPP_DELAY);
+	mp->mp_timeout = BPP_TIMEOUT;
+	mp->mp_delay = BPP_DELAY;
 
 	/* init chips */
 	if (mp->mp_cd1400) {	/* CD1400 */
@@ -1482,15 +1483,15 @@ mbppioctl(dev_t dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 			error = EINVAL;
 		} else {
 			mp->mp_burst = bp->bp_burst;
-			mp->mp_timeout = mbpp_mstohz(bp->bp_timeout);
-			mp->mp_delay = mbpp_mstohz(bp->bp_delay);
+			mp->mp_timeout = bp->bp_timeout;
+			mp->mp_delay = bp->bp_delay;
 		}
 		break;
 	case BPPIOCGPARAM:
 		bp = (struct bpp_param *)data;
 		bp->bp_burst = mp->mp_burst;
-		bp->bp_timeout = mbpp_hztoms(mp->mp_timeout);
-		bp->bp_delay = mbpp_hztoms(mp->mp_delay);
+		bp->bp_timeout = mp->mp_timeout;
+		bp->bp_delay = mp->mp_delay;
 		break;
 	case BPPIOCGSTAT:
 		/* XXX make this more generic */
@@ -1513,6 +1514,12 @@ int
 mbpppoll(dev_t dev, int events, struct proc *p)
 {
 	return (seltrue(dev, events, p));
+}
+
+int
+mbppkqfilter(dev_t dev, struct knote *kn)
+{
+	return (seltrue_kqfilter(dev, kn));
 }
 
 int
@@ -1540,7 +1547,7 @@ mbpp_rw(dev_t dev, struct uio *uio)
 	 */
 	if (mp->mp_timeout > 0) {
 		SET(mp->mp_flags, MBPPF_TIMEOUT);
-		timeout_add(&mp->mp_timeout_tmo, mp->mp_timeout);
+		timeout_add_msec(&mp->mp_timeout_tmo, mp->mp_timeout);
 	}
 
 	len = cnt = 0;
@@ -1588,8 +1595,9 @@ mbpp_rw(dev_t dev, struct uio *uio)
 		if (mp->mp_delay > 0) {
 			s = spltty();	/* XXX */
 			SET(mp->mp_flags, MBPPF_DELAY);
-			timeout_add(&mp->mp_start_tmo, mp->mp_delay);
-			error = tsleep(mp, PCATCH | PZERO, "mbppdelay", 0);
+			timeout_add_msec(&mp->mp_start_tmo, mp->mp_delay);
+			error = tsleep_nsec(mp, PCATCH | PZERO, "mbppdelay",
+			    INFSLP);
 			splx(s);
 			if (error)
 				break;
@@ -1673,7 +1681,7 @@ mbpp_send(struct mbpp_port *mp, caddr_t ptr, int len)
 	}
 
 	/* ZZzzz... */
-	tsleep(mp, PCATCH | PZERO, "mbpp_send", 0);
+	tsleep_nsec(mp, PCATCH | PZERO, "mbpp_send", INFSLP);
 
 	/* stop transmitting */
 	if (cd) {
@@ -1724,7 +1732,7 @@ mbpp_recv(struct mbpp_port *mp, caddr_t ptr, int len)
 	}
 
 	/* ZZzzz... */
-	tsleep(mp, PCATCH | PZERO, "mbpp_recv", 0);
+	tsleep_nsec(mp, PCATCH | PZERO, "mbpp_recv", INFSLP);
 
 	/* stop receiving */
 	if (cd) {
@@ -1738,27 +1746,4 @@ mbpp_recv(struct mbpp_port *mp, caddr_t ptr, int len)
 
 	/* return number of chars received */
 	return (len - mp->mp_cnt);
-}
-
-int
-mbpp_hztoms(int h)
-{
-	int m = h;
-
-	if (m > 0)
-		m = m * 1000 / hz;
-	return (m);
-}
-
-int
-mbpp_mstohz(int m)
-{
-	int h = m;
-
-	if (h > 0) {
-		h = h * hz / 1000;
-		if (h == 0)
-			h = 1000 / hz;
-	}
-	return (h);
 }

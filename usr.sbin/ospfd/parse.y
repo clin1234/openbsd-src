@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.97 2019/05/16 05:49:22 denis Exp $ */
+/*	$OpenBSD: parse.y,v 1.100 2020/01/21 20:38:52 remi Exp $ */
 
 /*
  * Copyright (c) 2004, 2005 Esben Norby <norby@openbsd.org>
@@ -103,6 +103,7 @@ struct config_defaults {
 	enum auth_type	auth_type;
 	u_int8_t	auth_keyid;
 	u_int8_t	priority;
+	u_int8_t	p2p;
 };
 
 struct config_defaults	 globaldefs;
@@ -119,6 +120,7 @@ typedef struct {
 		int64_t		 number;
 		char		*string;
 		struct redistribute *redist;
+		struct in_addr	 id;
 	} v;
 	int lineno;
 } YYSTYPE;
@@ -128,7 +130,7 @@ typedef struct {
 %token	AREA INTERFACE ROUTERID FIBPRIORITY FIBUPDATE REDISTRIBUTE RTLABEL
 %token	RDOMAIN RFC1583COMPAT STUB ROUTER SPFDELAY SPFHOLDTIME EXTTAG
 %token	AUTHKEY AUTHTYPE AUTHMD AUTHMDKEYID
-%token	METRIC PASSIVE
+%token	METRIC P2P PASSIVE
 %token	HELLOINTERVAL FASTHELLOINTERVAL TRANSMITDELAY
 %token	RETRANSMITINTERVAL ROUTERDEADTIME ROUTERPRIORITY
 %token	SET TYPE
@@ -144,6 +146,7 @@ typedef struct {
 %type	<v.number>	deadtime
 %type	<v.string>	string dependon
 %type	<v.redist>	redistribute
+%type	<v.id>		areaid
 
 %%
 
@@ -558,6 +561,9 @@ defaults	: METRIC NUMBER {
 			}
 			defs->rxmt_interval = $2;
 		}
+		| TYPE P2P		{
+			defs->p2p = 1;
+		}
 		| authtype
 		| authkey
 		| authmdkeyid
@@ -587,15 +593,8 @@ comma		: ','
 		| /*empty*/
 		;
 
-area		: AREA STRING {
-			struct in_addr	id;
-			if (inet_aton($2, &id) == 0) {
-				yyerror("error parsing area");
-				free($2);
-				YYERROR;
-			}
-			free($2);
-			area = conf_get_area(id);
+area		: AREA areaid {
+			area = conf_get_area($2);
 
 			memcpy(&areadefs, defs, sizeof(areadefs));
 			md_list_copy(&areadefs.md_list, &defs->md_list);
@@ -609,6 +608,23 @@ area		: AREA STRING {
 
 demotecount	: NUMBER	{ $$ = $1; }
 		| /*empty*/	{ $$ = 1; }
+		;
+
+areaid		: NUMBER {
+			if ($1 < 0 || $1 > 0xffffffff) {
+				yyerror("invalid area id");
+				YYERROR;
+			}
+			$$.s_addr = htonl($1);
+		}
+		| STRING {
+			if (inet_aton($1, &$$) == 0) {
+				yyerror("error parsing area");
+				free($1);
+				YYERROR;
+			}
+			free($1);
+		}
 		;
 
 areaopts_l	: areaopts_l areaoptsl nl
@@ -711,6 +727,8 @@ interface	: INTERFACE STRING	{
 			iface->priority = defs->priority;
 			iface->auth_type = defs->auth_type;
 			iface->auth_keyid = defs->auth_keyid;
+			if (defs->p2p == 1)
+				iface->type = IF_TYPE_POINTOPOINT;
 			memcpy(iface->auth_key, defs->auth_key,
 			    sizeof(iface->auth_key));
 			md_list_copy(&iface->auth_md_list, &defs->md_list);
@@ -821,6 +839,7 @@ lookup(char *s)
 		{"msec",		MSEC},
 		{"no",			NO},
 		{"on",			ON},
+		{"p2p",			P2P},
 		{"passive",		PASSIVE},
 		{"rdomain",		RDOMAIN},
 		{"redistribute",	REDISTRIBUTE},
@@ -1208,6 +1227,7 @@ parse_config(char *filename, int opts)
 	defs->rxmt_interval = DEFAULT_RXMT_INTERVAL;
 	defs->metric = DEFAULT_METRIC;
 	defs->priority = DEFAULT_PRIORITY;
+	defs->p2p = 0;
 
 	conf->spf_delay = DEFAULT_SPF_DELAY;
 	conf->spf_hold_time = DEFAULT_SPF_HOLDTIME;

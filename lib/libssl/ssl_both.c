@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_both.c,v 1.15 2019/03/25 16:35:48 jsing Exp $ */
+/* $OpenBSD: ssl_both.c,v 1.18 2020/05/19 16:35:20 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -248,7 +248,7 @@ ssl3_get_finished(SSL *s, int a, int b)
 	CBS cbs;
 
 	/* should actually be 36+4 :-) */
-	n = s->method->internal->ssl_get_message(s, a, b, SSL3_MT_FINISHED, 64, &ok);
+	n = ssl3_get_message(s, a, b, SSL3_MT_FINISHED, 64, &ok);
 	if (!ok)
 		return ((int)n);
 
@@ -447,6 +447,9 @@ ssl3_get_message(SSL *s, int st1, int stn, int mt, long max, int *ok)
 	CBS cbs;
 	uint8_t u8;
 
+	if (SSL_IS_DTLS(s))
+		return (dtls1_get_message(s, st1, stn, mt, max, ok));
+
 	if (S3I(s)->tmp.reuse_message) {
 		S3I(s)->tmp.reuse_message = 0;
 		if ((mt >= 0) && (S3I(s)->tmp.message_type != mt)) {
@@ -588,7 +591,7 @@ ssl_cert_type(X509 *x, EVP_PKEY *pkey)
 
 	i = pk->type;
 	if (i == EVP_PKEY_RSA) {
-		ret = SSL_PKEY_RSA_ENC;
+		ret = SSL_PKEY_RSA;
 	} else if (i == EVP_PKEY_EC) {
 		ret = SSL_PKEY_ECC;
 	} else if (i == NID_id_GostR3410_2001 ||
@@ -699,7 +702,7 @@ ssl3_setup_read_buffer(SSL *s)
 	if (S3I(s)->rbuf.buf == NULL) {
 		len = SSL3_RT_MAX_PLAIN_LENGTH +
 		    SSL3_RT_MAX_ENCRYPTED_OVERHEAD + headerlen + align;
-		if ((p = malloc(len)) == NULL)
+		if ((p = calloc(1, len)) == NULL)
 			goto err;
 		S3I(s)->rbuf.buf = p;
 		S3I(s)->rbuf.len = len;
@@ -733,7 +736,7 @@ ssl3_setup_write_buffer(SSL *s)
 			len += headerlen + align +
 			    SSL3_RT_SEND_MAX_ENCRYPTED_OVERHEAD;
 
-		if ((p = malloc(len)) == NULL)
+		if ((p = calloc(1, len)) == NULL)
 			goto err;
 		S3I(s)->wbuf.buf = p;
 		S3I(s)->wbuf.len = len;

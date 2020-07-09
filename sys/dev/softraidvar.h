@@ -1,4 +1,4 @@
-/* $OpenBSD: softraidvar.h,v 1.168 2019/01/06 14:59:56 kn Exp $ */
+/* $OpenBSD: softraidvar.h,v 1.170 2020/02/13 15:11:32 krw Exp $ */
 /*
  * Copyright (c) 2006 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2008 Chris Kuethe <ckuethe@openbsd.org>
@@ -328,7 +328,6 @@ extern u_int32_t		sr_debug;
 #define DNPRINTF(n,x...)
 #endif
 
-#define	SR_MAXFER		MAXPHYS
 #define	SR_MAX_LD		256
 #define	SR_MAX_CMDS		16
 #define	SR_MAX_STATES		7
@@ -495,6 +494,7 @@ struct sr_volume {
 
 struct sr_discipline {
 	struct sr_softc		*sd_sc;		/* link back to sr softc */
+	size_t			sd_wu_size;	/* alloc and free size */
 	u_int8_t		sd_type;	/* type of discipline */
 #define	SR_MD_RAID0		0
 #define	SR_MD_RAID1		1
@@ -648,7 +648,7 @@ void			sr_ccb_put(struct sr_ccb *);
 struct sr_ccb		*sr_ccb_rw(struct sr_discipline *, int, daddr_t,
 			    long, u_int8_t *, int, int);
 void			sr_ccb_done(struct sr_ccb *);
-int			sr_wu_alloc(struct sr_discipline *, int);
+int			sr_wu_alloc(struct sr_discipline *);
 void			sr_wu_free(struct sr_discipline *);
 void			*sr_wu_get(void *);
 void			sr_wu_put(void *, void *);

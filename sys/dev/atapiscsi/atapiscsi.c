@@ -1,4 +1,4 @@
-/*      $OpenBSD: atapiscsi.c,v 1.106 2017/12/30 20:46:59 guenther Exp $     */
+/*      $OpenBSD: atapiscsi.c,v 1.112 2020/07/02 21:59:34 krw Exp $     */
 
 /*
  * This code is derived from code with the copyright below.
@@ -133,7 +133,6 @@ void  wdc_atapi_reset_2(struct channel_softc *, struct wdc_xfer *,
 
 void  wdc_atapi_tape_done(struct channel_softc *, struct wdc_xfer *,
 	int, struct atapi_return_args *);
-#define MAX_SIZE MAXPHYS
 
 struct atapiscsi_softc;
 struct atapiscsi_xfer;
@@ -155,17 +154,11 @@ struct atapiscsi_softc {
 	int drive;
 };
 
-void  wdc_atapi_minphys(struct buf *bp, struct scsi_link *sl);
 int   wdc_atapi_ioctl(struct scsi_link *, u_long, caddr_t, int);
 void  wdc_atapi_send_cmd(struct scsi_xfer *sc_xfer);
 
-static struct scsi_adapter atapiscsi_switch =
-{
-	wdc_atapi_send_cmd,
-	wdc_atapi_minphys,
-	NULL,
-	NULL,
-	wdc_atapi_ioctl
+static struct scsi_adapter atapiscsi_switch = {
+	wdc_atapi_send_cmd, NULL, NULL, NULL, wdc_atapi_ioctl
 };
 
 /* Inital version shares bus_link structure so it can easily
@@ -225,14 +218,6 @@ atapiscsi_attach(struct device *parent, struct device *self, void *aux)
 
 	as->chp = chp;
 	as->drive = drvp->drive;
-	as->sc_adapterlink.adapter_softc = as;
-	as->sc_adapterlink.adapter_target = 7;
-	as->sc_adapterlink.adapter_buswidth = 2;
-	as->sc_adapterlink.adapter = &atapiscsi_switch;
-	as->sc_adapterlink.luns = 1;
-	as->sc_adapterlink.openings = 1;
-	as->sc_adapterlink.flags = SDEV_ATAPI;
-	as->sc_adapterlink.pool = &wdc_xfer_iopool;
 
 	strlcpy(drvp->drive_name, as->sc_dev.dv_xname,
 	    sizeof(drvp->drive_name));
@@ -266,7 +251,15 @@ atapiscsi_attach(struct device *parent, struct device *self, void *aux)
 	WDCDEBUG_PRINT(("driver caps %04x\n", drvp->atapi_cap),
 	    DEBUG_PROBE);
 
-	bzero(&saa, sizeof(saa));
+	as->sc_adapterlink.adapter_softc = as;
+	as->sc_adapterlink.adapter_target = SDEV_NO_ADAPTER_TARGET;
+	as->sc_adapterlink.adapter_buswidth = 2;
+	as->sc_adapterlink.adapter = &atapiscsi_switch;
+	as->sc_adapterlink.luns = 1;
+	as->sc_adapterlink.openings = 1;
+	as->sc_adapterlink.flags = SDEV_ATAPI;
+	as->sc_adapterlink.pool = &wdc_xfer_iopool;
+
 	saa.saa_sc_link = &as->sc_adapterlink;
 
 	child = config_found((struct device *)as, &saa, scsiprint);
@@ -423,14 +416,6 @@ wdc_atapi_send_cmd(struct scsi_xfer *sc_xfer)
 
 	wdc_exec_xfer(chp, xfer);
 	splx(s);
-}
-
-void
-wdc_atapi_minphys (struct buf *bp, struct scsi_link *sl)
-{
-	if (bp->b_bcount > MAX_SIZE)
-		bp->b_bcount = MAX_SIZE;
-	minphys(bp);
 }
 
 int

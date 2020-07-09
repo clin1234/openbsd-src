@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_rwlock.c,v 1.39 2019/05/11 17:45:59 sashan Exp $	*/
+/*	$OpenBSD: kern_rwlock.c,v 1.45 2020/03/02 17:07:49 visa Exp $	*/
 
 /*
  * Copyright (c) 2002, 2003 Artur Grabowski <art@openbsd.org>
@@ -24,6 +24,8 @@
 #include <sys/limits.h>
 #include <sys/atomic.h>
 #include <sys/witness.h>
+
+void	rw_do_exit(struct rwlock *, unsigned long);
 
 /* XXX - temporary measure until proc0 is properly aligned */
 #define RW_PROC(p) (((long)p) & ~RWLOCK_MASK)
@@ -129,31 +131,31 @@ rw_enter_write(struct rwlock *rwl)
 void
 rw_exit_read(struct rwlock *rwl)
 {
-	unsigned long owner = rwl->rwl_owner;
+	unsigned long owner;
 
 	rw_assert_rdlock(rwl);
+	WITNESS_UNLOCK(&rwl->rwl_lock_obj, 0);
 
 	membar_exit_before_atomic();
+	owner = rwl->rwl_owner;
 	if (__predict_false((owner & RWLOCK_WAIT) ||
 	    rw_cas(&rwl->rwl_owner, owner, owner - RWLOCK_READ_INCR)))
-		rw_exit(rwl);
-	else
-		WITNESS_UNLOCK(&rwl->rwl_lock_obj, 0);
+		rw_do_exit(rwl, 0);
 }
 
 void
 rw_exit_write(struct rwlock *rwl)
 {
-	unsigned long owner = rwl->rwl_owner;
+	unsigned long owner;
 
 	rw_assert_wrlock(rwl);
+	WITNESS_UNLOCK(&rwl->rwl_lock_obj, LOP_EXCLUSIVE);
 
 	membar_exit_before_atomic();
+	owner = rwl->rwl_owner;
 	if (__predict_false((owner & RWLOCK_WAIT) ||
 	    rw_cas(&rwl->rwl_owner, owner, 0)))
-		rw_exit(rwl);
-	else
-		WITNESS_UNLOCK(&rwl->rwl_lock_obj, LOP_EXCLUSIVE);
+		rw_do_exit(rwl, RWLOCK_WRLOCK);
 }
 
 #ifdef DIAGNOSTIC
@@ -231,7 +233,7 @@ rw_enter(struct rwlock *rwl, int flags)
 	 */
 	unsigned int spin = (_kernel_lock_held()) ? 0 : RW_SPINS;
 #endif
-	int error;
+	int error, prio;
 #ifdef WITNESS
 	int lop_flags;
 
@@ -273,9 +275,12 @@ retry:
 		if (flags & RW_NOSLEEP)
 			return (EBUSY);
 
-		sleep_setup(&sls, rwl, op->wait_prio, rwl->rwl_name);
+		prio = op->wait_prio;
 		if (flags & RW_INTR)
-			sleep_setup_signal(&sls, op->wait_prio | PCATCH);
+			prio |= PCATCH;
+		sleep_setup(&sls, rwl, prio, rwl->rwl_name);
+		if (flags & RW_INTR)
+			sleep_setup_signal(&sls);
 
 		do_sleep = !rw_cas(&rwl->rwl_owner, o, set);
 
@@ -311,22 +316,29 @@ retry:
 void
 rw_exit(struct rwlock *rwl)
 {
-	unsigned long owner = rwl->rwl_owner;
-	int wrlock = owner & RWLOCK_WRLOCK;
-	unsigned long set;
+	unsigned long wrlock;
 
 	/* Avoid deadlocks after panic or in DDB */
 	if (panicstr || db_active)
 		return;
 
+	wrlock = rwl->rwl_owner & RWLOCK_WRLOCK;
 	if (wrlock)
 		rw_assert_wrlock(rwl);
 	else
 		rw_assert_rdlock(rwl);
-
 	WITNESS_UNLOCK(&rwl->rwl_lock_obj, wrlock ? LOP_EXCLUSIVE : 0);
 
 	membar_exit_before_atomic();
+	rw_do_exit(rwl, wrlock);
+}
+
+/* membar_exit_before_atomic() has to precede call of this function. */
+void
+rw_do_exit(struct rwlock *rwl, unsigned long wrlock)
+{
+	unsigned long owner, set;
+
 	do {
 		owner = rwl->rwl_owner;
 		if (wrlock)
@@ -334,7 +346,7 @@ rw_exit(struct rwlock *rwl)
 		else
 			set = (owner - RWLOCK_READ_INCR) &
 				~(RWLOCK_WAIT|RWLOCK_WRWANT);
-	} while (rw_cas(&rwl->rwl_owner, owner, set));
+	} while (__predict_false(rw_cas(&rwl->rwl_owner, owner, set)));
 
 	if (owner & RWLOCK_WAIT)
 		wakeup(rwl);
@@ -363,11 +375,15 @@ rw_assert_wrlock(struct rwlock *rwl)
 	if (panicstr || db_active)
 		return;
 
+#ifdef WITNESS
+	witness_assert(&rwl->rwl_lock_obj, LA_XLOCKED);
+#else
 	if (!(rwl->rwl_owner & RWLOCK_WRLOCK))
 		panic("%s: lock not held", rwl->rwl_name);
 
-	if (RWLOCK_OWNER(rwl) != (struct proc *)RW_PROC(curproc))
+	if (RW_PROC(curproc) != RW_PROC(rwl->rwl_owner))
 		panic("%s: lock not held by this process", rwl->rwl_name);
+#endif
 }
 
 void
@@ -376,8 +392,12 @@ rw_assert_rdlock(struct rwlock *rwl)
 	if (panicstr || db_active)
 		return;
 
-	if (!RWLOCK_OWNER(rwl) || (rwl->rwl_owner & RWLOCK_WRLOCK))
+#ifdef WITNESS
+	witness_assert(&rwl->rwl_lock_obj, LA_SLOCKED);
+#else
+	if (!RW_PROC(rwl->rwl_owner) || (rwl->rwl_owner & RWLOCK_WRLOCK))
 		panic("%s: lock not shared", rwl->rwl_name);
+#endif
 }
 
 void
@@ -386,12 +406,16 @@ rw_assert_anylock(struct rwlock *rwl)
 	if (panicstr || db_active)
 		return;
 
+#ifdef WITNESS
+	witness_assert(&rwl->rwl_lock_obj, LA_LOCKED);
+#else
 	switch (rw_status(rwl)) {
 	case RW_WRITE_OTHER:
 		panic("%s: lock held by different process", rwl->rwl_name);
 	case 0:
 		panic("%s: lock not held", rwl->rwl_name);
 	}
+#endif
 }
 
 void
@@ -400,14 +424,18 @@ rw_assert_unlocked(struct rwlock *rwl)
 	if (panicstr || db_active)
 		return;
 
-	if (rwl->rwl_owner != 0L)
+#ifdef WITNESS
+	witness_assert(&rwl->rwl_lock_obj, LA_UNLOCKED);
+#else
+	if (RW_PROC(curproc) == RW_PROC(rwl->rwl_owner))
 		panic("%s: lock held", rwl->rwl_name);
+#endif
 }
 #endif
 
 /* recursive rwlocks; */
 void
-_rrw_init_flags(struct rrwlock *rrwl, char *name, int flags,
+_rrw_init_flags(struct rrwlock *rrwl, const char *name, int flags,
     const struct lock_type *type)
 {
 	memset(rrwl, 0, sizeof(struct rrwlock));
@@ -420,8 +448,7 @@ rrw_enter(struct rrwlock *rrwl, int flags)
 {
 	int	rv;
 
-	if (RWLOCK_OWNER(&rrwl->rrwl_lock) ==
-	    (struct proc *)RW_PROC(curproc)) {
+	if (RW_PROC(rrwl->rrwl_lock.rwl_owner) == RW_PROC(curproc)) {
 		if (flags & RW_RECURSEFAIL)
 			return (EDEADLK);
 		else {
@@ -443,8 +470,7 @@ void
 rrw_exit(struct rrwlock *rrwl)
 {
 
-	if (RWLOCK_OWNER(&rrwl->rrwl_lock) ==
-	    (struct proc *)RW_PROC(curproc)) {
+	if (RW_PROC(rrwl->rrwl_lock.rwl_owner) == RW_PROC(curproc)) {
 		KASSERT(rrwl->rrwl_wcnt > 0);
 		rrwl->rrwl_wcnt--;
 		if (rrwl->rrwl_wcnt != 0) {

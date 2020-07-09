@@ -179,19 +179,10 @@ cmd_step_common(char *p, LWCHAR ch, int len, int *pwidth, int *bswidth)
 				if (bswidth != NULL)
 					*bswidth = prlen;
 			} else {
-				LWCHAR prev_ch = step_char(&p, -1, cmdbuf);
-				if (is_combining_char(prev_ch, ch)) {
-					if (pwidth != NULL)
-						*pwidth = 0;
-					if (bswidth != NULL)
-						*bswidth = 0;
-				} else {
-					if (pwidth != NULL)
-						*pwidth	= is_wide_char(ch)
-						    ? 2 : 1;
-					if (bswidth != NULL)
-						*bswidth = 1;
-				}
+				if (pwidth != NULL)
+					*pwidth	= is_wide_char(ch) ? 2 : 1;
+				if (bswidth != NULL)
+					*bswidth = 1;
 			}
 		}
 	}
@@ -1299,7 +1290,7 @@ save_cmdhist(void)
 
 	/* Make history file readable only by owner. */
 	r = fstat(fileno(f), &statbuf);
-	if (r < 0 || !S_ISREG(statbuf.st_mode))
+	if (r == -1 || !S_ISREG(statbuf.st_mode))
 		/* Don't chmod if not a regular file. */
 		do_chmod = 0;
 	if (do_chmod)

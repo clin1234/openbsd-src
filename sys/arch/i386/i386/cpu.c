@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.97 2019/01/18 01:34:50 pd Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.104 2020/05/29 04:42:23 deraadt Exp $	*/
 /* $NetBSD: cpu.c,v 1.1.2.7 2000/06/26 02:04:05 sommerfeld Exp $ */
 
 /*-
@@ -92,7 +92,6 @@
 #include <machine/segments.h>
 #include <machine/gdt.h>
 #include <machine/pio.h>
-#include <dev/rndvar.h>
 
 #if NLAPIC > 0
 #include <machine/apicvar.h>
@@ -316,6 +315,7 @@ cpu_attach(struct device *parent, struct device *self, void *aux)
 #ifndef SMALL_KERNEL
 		cpu_ucode_apply(ci);
 #endif
+		cpu_tsx_disable(ci);
 		identifycpu(ci);
 #ifdef MTRR
 		mem_range_attach();
@@ -330,6 +330,7 @@ cpu_attach(struct device *parent, struct device *self, void *aux)
 #ifndef SMALL_KERNEL
 		cpu_ucode_apply(ci);
 #endif
+		cpu_tsx_disable(ci);
 		identifycpu(ci);
 #ifdef MTRR
 		mem_range_attach();
@@ -361,6 +362,7 @@ cpu_attach(struct device *parent, struct device *self, void *aux)
 #ifndef SMALL_KERNEL
 		cpu_ucode_apply(ci);
 #endif
+		cpu_tsx_disable(ci);
 		identifycpu(ci);
 		sched_init_cpu(ci);
 		ci->ci_next = cpu_info_list->ci_next;
@@ -467,6 +469,28 @@ cpu_init(struct cpu_info *ci)
 }
 
 void
+cpu_tsx_disable(struct cpu_info *ci)
+{
+	uint64_t msr;
+	uint32_t dummy, sefflags_edx;
+
+	/* this runs before identifycpu() populates ci_feature_sefflags_edx */
+	if (cpuid_level < 0x07)
+		return;
+	CPUID_LEAF(0x7, 0, dummy, dummy, dummy, sefflags_edx);
+
+	if (strcmp(cpu_vendor, "GenuineIntel") == 0 &&
+	    (sefflags_edx & SEFF0EDX_ARCH_CAP)) {
+		msr = rdmsr(MSR_ARCH_CAPABILITIES);
+		if (msr & ARCH_CAPABILITIES_TSX_CTRL) {
+			msr = rdmsr(MSR_TSX_CTRL);
+			msr |= TSX_CTRL_RTM_DISABLE | TSX_CTRL_TSX_CPUID_CLEAR;
+			wrmsr(MSR_TSX_CTRL, msr);
+		}
+	}
+}
+
+void
 patinit(struct cpu_info *ci)
 {
 	extern int	pmap_pg_wc;
@@ -502,12 +526,16 @@ rdrand(void *v)
 	extern int      has_rdrand;
 	extern int      has_rdseed;
 	uint32_t r;
-	uint8_t valid;
+	uint64_t tsc = 0;
+	uint8_t valid = 0;
 	int i;
 
 	if (has_rdrand == 0 && has_rdseed == 0)
 		return;
+
 	for (i = 0; i < 4; i++) {
+		if (cpu_feature & CPUID_TSC)
+			tsc = rdtsc();
 		if (has_rdseed)
 			__asm volatile(
 			    "rdseed	%0\n\t"
@@ -518,8 +546,12 @@ rdrand(void *v)
 			    "rdrand	%0\n\t"
 			    "setc	%1\n"
 			    : "=r" (r), "=qm" (valid) );
-		if (valid)
-			enqueue_randomness(r);
+		r ^= tsc;
+		r ^= valid;		/* potential rdrand empty */
+		if (has_rdrand)
+			if (cpu_feature & CPUID_TSC)
+				r += rdtsc();	/* potential vmexit latency */
+		enqueue_randomness(r);
 	}
 
 	if (tmo)

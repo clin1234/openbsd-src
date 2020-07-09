@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_url.c,v 1.84 2018/10/02 19:49:10 stsp Exp $ */
+/*	$OpenBSD: if_url.c,v 1.86 2020/02/22 14:01:34 jasper Exp $ */
 /*	$NetBSD: if_url.c,v 1.6 2002/09/29 10:19:21 martin Exp $	*/
 /*
  * Copyright (c) 2001, 2002
@@ -146,7 +146,6 @@ static const struct url_type {
 #define URL_EXT_PHY	0x0001
 } url_devs [] = {
 	{{ USB_VENDOR_ABOCOM, USB_PRODUCT_ABOCOM_LCS8138TX}, 0},
-	{{ USB_VENDOR_ABOCOM, USB_PRODUCT_ABOCOM_RTL8151}, 0},
 	{{ USB_VENDOR_MELCO, USB_PRODUCT_MELCO_LUAKTX }, 0},
 	{{ USB_VENDOR_MICRONET, USB_PRODUCT_MICRONET_SP128AR}, 0},
 	{{ USB_VENDOR_OQO, USB_PRODUCT_OQO_ETHER01}, 0},
@@ -216,13 +215,13 @@ url_attach(struct device *parent, struct device *self, void *aux)
 			printf("%s: couldn't get endpoint %d\n", devname, i);
 			goto bad;
 		}
-		if ((ed->bmAttributes & UE_XFERTYPE) == UE_BULK &&
+		if (UE_GET_XFERTYPE(ed->bmAttributes) == UE_BULK &&
 		    UE_GET_DIR(ed->bEndpointAddress) == UE_DIR_IN)
 			sc->sc_bulkin_no = ed->bEndpointAddress; /* RX */
-		else if ((ed->bmAttributes & UE_XFERTYPE) == UE_BULK &&
+		else if (UE_GET_XFERTYPE(ed->bmAttributes) == UE_BULK &&
 			 UE_GET_DIR(ed->bEndpointAddress) == UE_DIR_OUT)
 			sc->sc_bulkout_no = ed->bEndpointAddress; /* TX */
-		else if ((ed->bmAttributes & UE_XFERTYPE) == UE_INTERRUPT &&
+		else if (UE_GET_XFERTYPE(ed->bmAttributes) == UE_INTERRUPT &&
 			 UE_GET_DIR(ed->bEndpointAddress) == UE_DIR_IN)
 			sc->sc_intrin_no = ed->bEndpointAddress; /* Status */
 	}

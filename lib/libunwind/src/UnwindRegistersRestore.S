@@ -476,11 +476,11 @@ DEFINE_LIBUNWIND_PRIVATE_FUNCTION(_ZN9libunwind13Registers_ppc6jumptoEv)
   cmpwi  %r5,0
   beq    Lnovec
 
-  subi  %r4,%r1,16
-  rlwinm  %r4,%r4,0,0,27  // mask low 4-bits
-  // r4 is now a 16-byte aligned pointer into the red zone
-  // the _vectorRegisters may not be 16-byte aligned so copy via red zone temp buffer
-
+  stwu   %r1,-32(%r1)  // allocate a stack frame
+  addi   %r4,%r1,16
+  clrrwi %r4,%r4,4
+  // r4 is now a 16-byte aligned pointer
+  // the _vectorRegisters may not be 16-byte aligned so copy via r4
 
 #define LOAD_VECTOR_UNALIGNEDl(_index) \
   andis.  %r0,%r5,(1<<(15-_index))  ;\
@@ -543,6 +543,8 @@ Ldone  ## _index:
   LOAD_VECTOR_UNALIGNEDh(29)
   LOAD_VECTOR_UNALIGNEDh(30)
   LOAD_VECTOR_UNALIGNEDh(31)
+
+  addi   %r1,%r1,32  // drop the stack frame
 
 Lnovec:
   lwz    %r0, 136(%r3) // __cr
@@ -801,49 +803,6 @@ DEFINE_LIBUNWIND_PRIVATE_FUNCTION(_ZN9libunwind14Registers_or1k6jumptoEv)
   l.jr     r9
    l.nop
 
-#elif defined(__sparc__) && defined(__arch64__)
-
-DEFINE_LIBUNWIND_PRIVATE_FUNCTION(_ZN9libunwind17Registers_sparc646jumptoEv)
-#
-# void libunwind::Registers_sparc64::jumpto()
-#
-# On entry:
-#  thread_state pointer is in %o0
-#
-  flushw
-  ldx  [%o0 + 0x08], %g1
-  ldx  [%o0 + 0x10], %g2
-  ldx  [%o0 + 0x18], %g3
-  ldx  [%o0 + 0x20], %g4
-  ldx  [%o0 + 0x28], %g5
-  ldx  [%o0 + 0x30], %g6
-  ldx  [%o0 + 0x38], %g7
-  ldx  [%o0 + 0x48], %o1
-  ldx  [%o0 + 0x50], %o2
-  ldx  [%o0 + 0x58], %o3
-  ldx  [%o0 + 0x60], %o4
-  ldx  [%o0 + 0x68], %o5
-  ldx  [%o0 + 0x70], %o6
-  ldx  [%o0 + 0x78], %o7
-  ldx  [%o0 + 0x80], %l0
-  ldx  [%o0 + 0x88], %l1
-  ldx  [%o0 + 0x90], %l2
-  ldx  [%o0 + 0x98], %l3
-  ldx  [%o0 + 0xa0], %l4
-  ldx  [%o0 + 0xa8], %l5
-  ldx  [%o0 + 0xb0], %l6
-  ldx  [%o0 + 0xb8], %l7
-  ldx  [%o0 + 0xc0], %i0
-  ldx  [%o0 + 0xc8], %i1
-  ldx  [%o0 + 0xd0], %i2
-  ldx  [%o0 + 0xd8], %i3
-  ldx  [%o0 + 0xe0], %i4
-  ldx  [%o0 + 0xe8], %i5
-  ldx  [%o0 + 0xf0], %i6
-  ldx  [%o0 + 0xf8], %i7
-  jmpl %o7 + 8, %g0
-   ldx [%o0 + 0x40], %o0
-
 #elif defined(__mips__) && defined(_ABIO32) && _MIPS_SIM == _ABIO32
 
 //
@@ -858,7 +817,7 @@ DEFINE_LIBUNWIND_PRIVATE_FUNCTION(_ZN9libunwind18Registers_mips_o326jumptoEv)
   .set noreorder
   .set nomacro
 #ifdef __mips_hard_float
-#if __mips_fpr == 32
+#if __mips_fpr != 64
   ldc1  $f0, (4 * 36 + 8 * 0)($4)
   ldc1  $f2, (4 * 36 + 8 * 2)($4)
   ldc1  $f4, (4 * 36 + 8 * 4)($4)
@@ -1042,6 +1001,71 @@ DEFINE_LIBUNWIND_PRIVATE_FUNCTION(_ZN9libunwind21Registers_mips_newabi6jumptoEv)
   jr    $31
   ld    $4, (8 * 4)($4)
   .set pop
+
+#elif defined(__sparc__) && defined(__arch64__)
+
+DEFINE_LIBUNWIND_PRIVATE_FUNCTION(_ZN9libunwind17Registers_sparc646jumptoEv)
+#
+# void libunwind::Registers_sparc64::jumpto()
+#
+# On entry:
+#  thread_state pointer is in %o0
+#
+  flushw
+  ldx  [%o0 + 0x08], %g1
+  ldx  [%o0 + 0x10], %g2
+  ldx  [%o0 + 0x18], %g3
+  ldx  [%o0 + 0x20], %g4
+  ldx  [%o0 + 0x28], %g5
+  ldx  [%o0 + 0x30], %g6
+  ldx  [%o0 + 0x38], %g7
+  ldx  [%o0 + 0x48], %o1
+  ldx  [%o0 + 0x50], %o2
+  ldx  [%o0 + 0x58], %o3
+  ldx  [%o0 + 0x60], %o4
+  ldx  [%o0 + 0x68], %o5
+  ldx  [%o0 + 0x70], %o6
+  ldx  [%o0 + 0x78], %o7
+  ldx  [%o0 + 0x80], %l0
+  ldx  [%o0 + 0x88], %l1
+  ldx  [%o0 + 0x90], %l2
+  ldx  [%o0 + 0x98], %l3
+  ldx  [%o0 + 0xa0], %l4
+  ldx  [%o0 + 0xa8], %l5
+  ldx  [%o0 + 0xb0], %l6
+  ldx  [%o0 + 0xb8], %l7
+  ldx  [%o0 + 0xc0], %i0
+  ldx  [%o0 + 0xc8], %i1
+  ldx  [%o0 + 0xd0], %i2
+  ldx  [%o0 + 0xd8], %i3
+  ldx  [%o0 + 0xe0], %i4
+  ldx  [%o0 + 0xe8], %i5
+  ldx  [%o0 + 0xf0], %i6
+  ldx  [%o0 + 0xf8], %i7
+  jmpl %o7 + 8, %g0
+   ldx [%o0 + 0x40], %o0
+
+#elif defined(__sparc__)
+
+//
+// void libunwind::Registers_sparc_o32::jumpto()
+//
+// On entry:
+//  thread_state pointer is in o0
+//
+DEFINE_LIBUNWIND_PRIVATE_FUNCTION(_ZN9libunwind15Registers_sparc6jumptoEv)
+  ta 3
+  ldd [%o0 + 64],  %l0
+  ldd [%o0 + 72],  %l2
+  ldd [%o0 + 80],  %l4
+  ldd [%o0 + 88],  %l6
+  ldd [%o0 + 96],  %i0
+  ldd [%o0 + 104], %i2
+  ldd [%o0 + 112], %i4
+  ldd [%o0 + 120], %i6
+  ld  [%o0 + 60],  %o7
+  jmp %o7
+   nop
 
 #endif
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: signalvar.h,v 1.36 2019/05/13 19:21:31 bluhm Exp $	*/
+/*	$OpenBSD: signalvar.h,v 1.41 2020/05/10 00:56:06 guenther Exp $	*/
 /*	$NetBSD: signalvar.h,v 1.17 1996/04/22 01:23:31 christos Exp $	*/
 
 /*
@@ -53,8 +53,7 @@ struct	sigacts {
 	sigset_t ps_siginfo;		/* signals that provide siginfo */
 	sigset_t ps_sigignore;		/* signals being ignored */
 	sigset_t ps_sigcatch;		/* signals being caught by user */
-	int	ps_flags;		/* signal flags, below */
-	int	ps_refcnt;		/* reference count */
+	int	ps_sigflags;		/* signal flags, below */
 };
 
 /* signal flags */
@@ -87,9 +86,9 @@ struct	sigacts {
  * Clear a pending signal from a process.
  */
 #define CLRSIG(p, sig)	do {						\
-	int _mask = sigmask(sig);					\
-	atomic_clearbits_int(&(p)->p_siglist, _mask);			\
-	atomic_clearbits_int(&(p)->p_p->ps_siglist, _mask);		\
+	int __mask = sigmask(sig);					\
+	atomic_clearbits_int(&(p)->p_siglist, __mask);			\
+	atomic_clearbits_int(&(p)->p_p->ps_siglist, __mask);		\
 } while (0)
 
 /*
@@ -105,49 +104,6 @@ struct	sigacts {
 #define	SA_CONT		0x20		/* continue if suspended */
 #define	SA_CANTMASK	0x40		/* non-maskable, catchable */
 
-#ifdef	SIGPROP
-int sigprop[NSIG + 1] = {
-	0,			/* unused */
-	SA_KILL,		/* SIGHUP */
-	SA_KILL,		/* SIGINT */
-	SA_KILL|SA_CORE,	/* SIGQUIT */
-	SA_KILL|SA_CORE,	/* SIGILL */
-	SA_KILL|SA_CORE,	/* SIGTRAP */
-	SA_KILL|SA_CORE,	/* SIGABRT */
-	SA_KILL|SA_CORE,	/* SIGEMT */
-	SA_KILL|SA_CORE,	/* SIGFPE */
-	SA_KILL,		/* SIGKILL */
-	SA_KILL|SA_CORE,	/* SIGBUS */
-	SA_KILL|SA_CORE,	/* SIGSEGV */
-	SA_KILL|SA_CORE,	/* SIGSYS */
-	SA_KILL,		/* SIGPIPE */
-	SA_KILL,		/* SIGALRM */
-	SA_KILL,		/* SIGTERM */
-	SA_IGNORE,		/* SIGURG */
-	SA_STOP,		/* SIGSTOP */
-	SA_STOP|SA_TTYSTOP,	/* SIGTSTP */
-	SA_IGNORE|SA_CONT,	/* SIGCONT */
-	SA_IGNORE,		/* SIGCHLD */
-	SA_STOP|SA_TTYSTOP,	/* SIGTTIN */
-	SA_STOP|SA_TTYSTOP,	/* SIGTTOU */
-	SA_IGNORE,		/* SIGIO */
-	SA_KILL,		/* SIGXCPU */
-	SA_KILL,		/* SIGXFSZ */
-	SA_KILL,		/* SIGVTALRM */
-	SA_KILL,		/* SIGPROF */
-	SA_IGNORE,		/* SIGWINCH  */
-	SA_IGNORE,		/* SIGINFO */
-	SA_KILL,		/* SIGUSR1 */
-	SA_KILL,		/* SIGUSR2 */
-	SA_IGNORE,		/* SIGTHR */
-};
-
-#define	contsigmask	(sigmask(SIGCONT))
-#define	stopsigmask	(sigmask(SIGSTOP) | sigmask(SIGTSTP) | \
-			    sigmask(SIGTTIN) | sigmask(SIGTTOU))
-
-#endif /* SIGPROP */
-
 #define	sigcantmask	(sigmask(SIGKILL) | sigmask(SIGSTOP))
 
 #ifdef _KERNEL
@@ -160,7 +116,6 @@ struct sigio_ref;
  */
 int	coredump(struct proc *p);
 void	execsigs(struct proc *p);
-void	csignal(pid_t pgid, int signum, uid_t uid, uid_t euid);
 int	issignal(struct proc *p);
 void	pgsigio(struct sigio_ref *sir, int sig, int checkctty);
 void	pgsignal(struct pgrp *pgrp, int sig, int checkctty);
@@ -178,9 +133,7 @@ int	killpg1(struct proc *, int, int, int);
 void	signal_init(void);
 
 struct sigacts *sigactsinit(struct process *);
-struct sigacts *sigactsshare(struct process *);
 void	sigstkinit(struct sigaltstack *);
-void	sigactsunshare(struct process *);
 void	sigactsfree(struct process *);
 
 /*

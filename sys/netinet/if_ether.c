@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ether.c,v 1.238 2019/01/20 23:43:13 claudio Exp $	*/
+/*	$OpenBSD: if_ether.c,v 1.243 2020/06/24 22:03:43 cheloha Exp $	*/
 /*	$NetBSD: if_ether.c,v 1.31 1996/05/11 12:59:58 mycroft Exp $	*/
 
 /*
@@ -120,7 +120,7 @@ arptimer(void *arg)
 	LIST_FOREACH_SAFE(la, &arp_list, la_list, nla) {
 		struct rtentry *rt = la->la_rt;
 
-		if (rt->rt_expire && rt->rt_expire < time_uptime)
+		if (rt->rt_expire && rt->rt_expire < getuptime())
 			arptfree(rt); /* timer has expired; clear */
 	}
 	NET_UNLOCK();
@@ -143,7 +143,8 @@ arp_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 		timeout_add_sec(&arptimer_to, arpt_prune);
 	}
 
-	if (ISSET(rt->rt_flags, RTF_GATEWAY|RTF_BROADCAST|RTF_MULTICAST))
+	if (ISSET(rt->rt_flags,
+	    RTF_GATEWAY|RTF_BROADCAST|RTF_MULTICAST|RTF_MPLS))
 		return;
 
 	switch (req) {
@@ -191,7 +192,7 @@ arp_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 		la->la_rt = rt;
 		rt->rt_flags |= RTF_LLINFO;
 		if ((rt->rt_flags & RTF_LOCAL) == 0)
-			rt->rt_expire = time_uptime;
+			rt->rt_expire = getuptime();
 		LIST_INSERT_HEAD(&arp_list, la, la_list);
 		break;
 
@@ -206,6 +207,8 @@ arp_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 		break;
 
 	case RTM_INVALIDATE:
+		if (la == NULL)
+			break;
 		if (!ISSET(rt->rt_flags, RTF_LOCAL))
 			arpinvalidate(rt);
 		break;
@@ -317,7 +320,7 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	rt = rt_getll(rt0);
 
 	if (ISSET(rt->rt_flags, RTF_REJECT) &&
-	    (rt->rt_expire == 0 || rt->rt_expire > time_uptime )) {
+	    (rt->rt_expire == 0 || rt->rt_expire > getuptime() )) {
 		m_freem(m);
 		return (rt == rt0 ? EHOSTDOWN : EHOSTUNREACH);
 	}
@@ -345,15 +348,15 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	 * Check the address family and length is valid, the address
 	 * is resolved; otherwise, try to resolve.
 	 */
-	if ((rt->rt_expire == 0 || rt->rt_expire > time_uptime) &&
+	if ((rt->rt_expire == 0 || rt->rt_expire > getuptime()) &&
 	    sdl->sdl_family == AF_LINK && sdl->sdl_alen != 0) {
 		memcpy(desten, LLADDR(sdl), sdl->sdl_alen);
 
 		/* refresh ARP entry when timeout gets close */
 		if (rt->rt_expire != 0 &&
-		    rt->rt_expire - arpt_keep / 8 < time_uptime &&
-		    la->la_refreshed + 30 < time_uptime) {
-			la->la_refreshed = time_uptime;
+		    rt->rt_expire - arpt_keep / 8 < getuptime() &&
+		    la->la_refreshed + 30 < getuptime()) {
+			la->la_refreshed = getuptime();
 			arprequest(ifp,
 			    &satosin(rt->rt_ifa->ifa_addr)->sin_addr.s_addr,
 			    &satosin(dst)->sin_addr.s_addr,
@@ -393,13 +396,13 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 		/* This should never happen. (Should it? -gwr) */
 		printf("%s: unresolved and rt_expire == 0\n", __func__);
 		/* Set expiration time to now (expired). */
-		rt->rt_expire = time_uptime;
+		rt->rt_expire = getuptime();
 	}
 #endif
 	if (rt->rt_expire) {
 		rt->rt_flags &= ~RTF_REJECT;
-		if (la->la_asked == 0 || rt->rt_expire != time_uptime) {
-			rt->rt_expire = time_uptime;
+		if (la->la_asked == 0 || rt->rt_expire != getuptime()) {
+			rt->rt_expire = getuptime();
 			if (la->la_asked++ < arp_maxtries)
 				arprequest(ifp,
 				    &satosin(rt->rt_ifa->ifa_addr)->sin_addr.s_addr,
@@ -515,8 +518,8 @@ in_arpinput(struct ifnet *ifp, struct mbuf *m)
 	sin.sin_len = sizeof(sin);
 	sin.sin_family = AF_INET;
 
-	if (ETHER_IS_MULTICAST(&ea->arp_sha[0]) &&
-	    !memcmp(ea->arp_sha, etherbroadcastaddr, sizeof(ea->arp_sha))) {
+	if (ETHER_IS_MULTICAST(ea->arp_sha) &&
+	    ETHER_IS_BROADCAST(ea->arp_sha)) {
 		inet_ntop(AF_INET, &isaddr, addr, sizeof(addr));
 		log(LOG_ERR, "arp: ether address is broadcast for IP address "
 		    "%s!\n", addr);
@@ -658,7 +661,7 @@ arpcache(struct ifnet *ifp, struct ether_arp *ea, struct rtentry *rt)
 	sdl->sdl_alen = sizeof(ea->arp_sha);
 	memcpy(LLADDR(sdl), ea->arp_sha, sizeof(ea->arp_sha));
 	if (rt->rt_expire)
-		rt->rt_expire = time_uptime + arpt_keep;
+		rt->rt_expire = getuptime() + arpt_keep;
 	rt->rt_flags &= ~RTF_REJECT;
 
 	/* Notify userland that an ARP resolution has been done. */
@@ -913,7 +916,8 @@ revarpwhoarewe(struct ifnet *ifp, struct in_addr *serv_in,
 	revarp_ifidx = ifp->if_index;
 	while (count--) {
 		revarprequest(ifp);
-		result = tsleep((caddr_t)&revarp_myip, PSOCK, "revarp", hz/2);
+		result = tsleep_nsec(&revarp_myip, PSOCK, "revarp",
+		    MSEC_TO_NSEC(500));
 		if (result != EWOULDBLOCK)
 			break;
 	}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: rad.c,v 1.20 2019/03/31 03:36:18 yasuoka Exp $	*/
+/*	$OpenBSD: rad.c,v 1.23 2020/06/26 19:00:08 bket Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -260,19 +260,19 @@ main(int argc, char *argv[])
 		fatal("could not establish imsg links");
 
 	if ((icmp6sock = socket(AF_INET6, SOCK_RAW | SOCK_CLOEXEC,
-	    IPPROTO_ICMPV6)) < 0)
+	    IPPROTO_ICMPV6)) == -1)
 		fatal("ICMPv6 socket");
 
 	if (setsockopt(icmp6sock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
-	    sizeof(on)) < 0)
+	    sizeof(on)) == -1)
 		fatal("IPV6_RECVPKTINFO");
 
 	if (setsockopt(icmp6sock, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &on,
-	    sizeof(on)) < 0)
+	    sizeof(on)) == -1)
 		fatal("IPV6_RECVHOPLIMIT");
 
 	if (setsockopt(icmp6sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &off,
-	    sizeof(off)) < 0)
+	    sizeof(off)) == -1)
 		fatal("IPV6_RECVHOPLIMIT");
 
 	/* only router advertisements and solicitations */
@@ -284,13 +284,13 @@ main(int argc, char *argv[])
 		fatal("ICMP6_FILTER");
 
 	if ((frontend_routesock = socket(AF_ROUTE, SOCK_RAW | SOCK_CLOEXEC,
-	    AF_INET6)) < 0)
+	    AF_INET6)) == -1)
 		fatal("route socket");
 
 	rtfilter = ROUTE_FILTER(RTM_IFINFO) | ROUTE_FILTER(RTM_NEWADDR) |
 	    ROUTE_FILTER(RTM_DELADDR);
 	if (setsockopt(frontend_routesock, AF_ROUTE, ROUTE_MSGFILTER,
-	    &rtfilter, sizeof(rtfilter)) < 0)
+	    &rtfilter, sizeof(rtfilter)) == -1)
 		fatal("setsockopt(ROUTE_MSGFILTER)");
 
 	if ((control_fd = control_init(csock)) == -1)
@@ -433,7 +433,7 @@ main_dispatch_frontend(int fd, short event, void *bula)
 		case IMSG_CTL_LOG_VERBOSE:
 			if (IMSG_DATA_SIZE(imsg) != sizeof(verbose))
 				fatalx("%s: IMSG_CTL_LOG_VERBOSE wrong length: "
-				    "%lu", __func__, IMSG_DATA_SIZE(imsg));	
+				    "%lu", __func__, IMSG_DATA_SIZE(imsg));
 			memcpy(&verbose, imsg.data, sizeof(verbose));
 			log_setverbose(verbose);
 			break;
@@ -703,8 +703,6 @@ void
 merge_config(struct rad_conf *conf, struct rad_conf *xconf)
 {
 	struct ra_iface_conf	*ra_iface_conf;
-	struct ra_rdnss_conf	*ra_rdnss;
-	struct ra_dnssl_conf	*ra_dnssl;
 
 	/* Remove & discard existing interfaces. */
 	while ((ra_iface_conf = SIMPLEQ_FIRST(&conf->ra_iface_list)) != NULL) {
@@ -718,24 +716,13 @@ merge_config(struct rad_conf *conf, struct rad_conf *xconf)
 	SIMPLEQ_INIT(&conf->ra_options.ra_dnssl_list);
 
 	/* Add new interfaces. */
-	while ((ra_iface_conf = SIMPLEQ_FIRST(&xconf->ra_iface_list)) != NULL) {
-		SIMPLEQ_REMOVE_HEAD(&xconf->ra_iface_list, entry);
-		SIMPLEQ_INSERT_TAIL(&conf->ra_iface_list, ra_iface_conf, entry);
-	}
+	SIMPLEQ_CONCAT(&conf->ra_iface_list, &xconf->ra_iface_list);
 
 	/* Add dns options */
-	while ((ra_rdnss = SIMPLEQ_FIRST(&xconf->ra_options.ra_rdnss_list))
-	    != NULL) {
-		SIMPLEQ_REMOVE_HEAD(&xconf->ra_options.ra_rdnss_list, entry);
-		SIMPLEQ_INSERT_TAIL(&conf->ra_options.ra_rdnss_list, ra_rdnss,
-		    entry);
-	}
-	while ((ra_dnssl = SIMPLEQ_FIRST(&xconf->ra_options.ra_dnssl_list))
-	    != NULL) {
-		SIMPLEQ_REMOVE_HEAD(&xconf->ra_options.ra_dnssl_list, entry);
-		SIMPLEQ_INSERT_TAIL(&conf->ra_options.ra_dnssl_list, ra_dnssl,
-		    entry);
-	}
+	SIMPLEQ_CONCAT(&conf->ra_options.ra_rdnss_list,
+	    &xconf->ra_options.ra_rdnss_list);
+	SIMPLEQ_CONCAT(&conf->ra_options.ra_dnssl_list,
+	    &xconf->ra_options.ra_dnssl_list);
 	free(xconf);
 }
 
@@ -754,7 +741,7 @@ config_new_empty(void)
 	xconf->ra_options.cur_hl = 0;
 	xconf->ra_options.m_flag = 0;
 	xconf->ra_options.o_flag = 0;
-	xconf->ra_options.router_lifetime = 1800;
+	xconf->ra_options.router_lifetime = ADV_DEFAULT_LIFETIME;
 	xconf->ra_options.reachable_time = 0;
 	xconf->ra_options.retrans_timer = 0;
 	xconf->ra_options.mtu = 0;

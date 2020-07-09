@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.68 2019/04/10 04:19:32 deraadt Exp $	*/
+/*	$OpenBSD: conf.c,v 1.75 2020/06/14 16:06:25 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1996 Michael Shalayeff
@@ -30,6 +30,7 @@
 #include <netinet/in.h>
 #include <libsa.h>
 #include <lib/libsa/ufs.h>
+#include <lib/libsa/ufs2.h>
 #ifdef notdef
 #include <lib/libsa/cd9660.h>
 #include <lib/libsa/fat.h>
@@ -41,7 +42,7 @@
 #include <dev/cons.h>
 #include "debug.h"
 
-const char version[] = "3.37";
+const char version[] = "3.43";
 int	debug = 1;
 
 
@@ -65,7 +66,11 @@ int nibprobes = nitems(probe_list);
 
 struct fs_ops file_system[] = {
 	{ ufs_open,    ufs_close,    ufs_read,    ufs_write,    ufs_seek,
-	  ufs_stat,    ufs_readdir    },
+	  ufs_stat,    ufs_readdir,  ufs_fchmod },
+#ifndef FDBOOT
+	{ ufs2_open,   ufs2_close,   ufs2_read,   ufs2_write,   ufs2_seek,
+	  ufs2_stat,   ufs2_readdir, ufs2_fchmod },
+#endif
 #ifdef notdef
 	{ fat_open,    fat_close,    fat_read,    fat_write,    fat_seek,
 	  fat_stat,    fat_readdir    },

@@ -1,4 +1,4 @@
-/*	$OpenBSD: udp_usrreq.c,v 1.255 2019/02/04 21:40:52 bluhm Exp $	*/
+/*	$OpenBSD: udp_usrreq.c,v 1.259 2020/06/21 05:19:27 dlg Exp $	*/
 /*	$NetBSD: udp_usrreq.c,v 1.28 1996/03/16 23:54:03 christos Exp $	*/
 
 /*
@@ -496,28 +496,51 @@ udp_input(struct mbuf **mp, int *offp, int proto, int af)
 #endif /* INET6 */
 		inp = in_pcblookup_listen(&udbtable, ip->ip_dst,
 		    uh->uh_dport, m, m->m_pkthdr.ph_rtableid);
-		if (inp == 0) {
-			udpstat_inc(udps_noport);
-			if (m->m_flags & (M_BCAST | M_MCAST)) {
-				udpstat_inc(udps_noportbcast);
-				goto bad;
-			}
-#ifdef INET6
-			if (ip6) {
-				uh->uh_sum = savesum;
-				icmp6_error(m, ICMP6_DST_UNREACH,
-				    ICMP6_DST_UNREACH_NOPORT,0);
-			} else
-#endif /* INET6 */
-			{
-				*ip = save_ip;
-				uh->uh_sum = savesum;
-				icmp_error(m, ICMP_UNREACH, ICMP_UNREACH_PORT,
-				    0, 0);
-			}
-			return IPPROTO_DONE;
-		}
 	}
+
+#ifdef IPSEC
+	if (ipsec_in_use) {
+		mtag = m_tag_find(m, PACKET_TAG_IPSEC_IN_DONE, NULL);
+		if (mtag != NULL) {
+			tdbi = (struct tdb_ident *)(mtag + 1);
+			tdb = gettdb(tdbi->rdomain, tdbi->spi,
+			    &tdbi->dst, tdbi->proto);
+		} else
+			tdb = NULL;
+		ipsp_spd_lookup(m, af, iphlen, &error,
+		    IPSP_DIRECTION_IN, tdb, inp, 0);
+		if (error) {
+			udpstat_inc(udps_nosec);
+			goto bad;
+		}
+		/* create ipsec options while we know that tdb cannot be modified */
+		if (tdb && tdb->tdb_ids)
+			ipsecflowinfo = tdb->tdb_ids->id_flow;
+	}
+#endif /*IPSEC */
+
+	if (inp == 0) {
+		udpstat_inc(udps_noport);
+		if (m->m_flags & (M_BCAST | M_MCAST)) {
+			udpstat_inc(udps_noportbcast);
+			goto bad;
+		}
+#ifdef INET6
+		if (ip6) {
+			uh->uh_sum = savesum;
+			icmp6_error(m, ICMP6_DST_UNREACH,
+			    ICMP6_DST_UNREACH_NOPORT,0);
+		} else
+#endif /* INET6 */
+		{
+			*ip = save_ip;
+			uh->uh_sum = savesum;
+			icmp_error(m, ICMP_UNREACH, ICMP_UNREACH_PORT,
+			    0, 0);
+		}
+		return IPPROTO_DONE;
+	}
+
 	KASSERT(sotoinpcb(inp->inp_socket) == inp);
 	soassertlocked(inp->inp_socket);
 
@@ -536,25 +559,6 @@ udp_input(struct mbuf **mp, int *offp, int proto, int af)
 	if (inp->inp_socket->so_state & SS_ISCONNECTED)
 		pf_inp_link(m, inp);
 #endif
-
-#ifdef IPSEC
-	mtag = m_tag_find(m, PACKET_TAG_IPSEC_IN_DONE, NULL);
-	if (mtag != NULL) {
-		tdbi = (struct tdb_ident *)(mtag + 1);
-		tdb = gettdb(tdbi->rdomain, tdbi->spi,
-		    &tdbi->dst, tdbi->proto);
-	} else
-		tdb = NULL;
-	ipsp_spd_lookup(m, af, iphlen, &error,
-	    IPSP_DIRECTION_IN, tdb, inp, 0);
-	if (error) {
-		udpstat_inc(udps_nosec);
-		goto bad;
-	}
-	/* create ipsec options while we know that tdb cannot be modified */
-	if (tdb && tdb->tdb_ids)
-		ipsecflowinfo = tdb->tdb_ids->id_flow;
-#endif /*IPSEC */
 
 #ifdef PIPEX
 	if (pipex_enable && inp->inp_pipex) {
@@ -579,11 +583,20 @@ bad:
 
 void
 udp_sbappend(struct inpcb *inp, struct mbuf *m, struct ip *ip,
-    struct ip6_hdr *ip6, int iphlen, struct udphdr *uh,
+    struct ip6_hdr *ip6, int hlen, struct udphdr *uh,
     struct sockaddr *srcaddr, u_int32_t ipsecflowinfo)
 {
 	struct socket *so = inp->inp_socket;
 	struct mbuf *opts = NULL;
+
+	hlen += sizeof(*uh);
+
+	if (inp->inp_upcall != NULL) {
+		m = (*inp->inp_upcall)(inp->inp_upcall_arg, m,
+		    ip, ip6, uh, hlen);
+		if (m == NULL)
+			return;
+	}
 
 #ifdef INET6
 	if (ip6 && (inp->inp_flags & IN6P_CONTROLOPTS ||
@@ -621,7 +634,7 @@ udp_sbappend(struct inpcb *inp, struct mbuf *m, struct ip *ip,
 		    sizeof(u_int32_t), IP_IPSECFLOWINFO, IPPROTO_IP);
 	}
 #endif
-	m_adj(m, iphlen + sizeof(struct udphdr));
+	m_adj(m, hlen);
 	if (sbappendaddr(so, &so->so_rcv, srcaddr, m, opts) == 0) {
 		udpstat_inc(udps_fullsock);
 		m_freem(m);

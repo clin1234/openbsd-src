@@ -1,4 +1,4 @@
-/*	$OpenBSD: exec_i386.c,v 1.1 2019/05/10 21:20:42 mlarkin Exp $	*/
+/*	$OpenBSD: exec_i386.c,v 1.3 2019/12/12 13:09:35 bluhm Exp $	*/
 
 /*
  * Copyright (c) 1997-1998 Michael Shalayeff
@@ -33,6 +33,7 @@
 #include <dev/cons.h>
 #include <lib/libsa/loadfile.h>
 #include <machine/biosvar.h>
+#include <machine/pte.h>
 #include <machine/specialreg.h>
 #include <stand/boot/bootarg.h>
 
@@ -46,12 +47,18 @@
 #include "softraid_amd64.h"
 #endif
 
+#include <efi.h>
+#include <efiapi.h>
+#include "eficall.h"
 #include "efiboot.h"
+
+extern EFI_BOOT_SERVICES	*BS;
 
 typedef void (*startfuncp)(int, int, int, int, int, int, int, int)
     __attribute__ ((noreturn));
 
 void ucode_load(void);
+void protect_writeable(uint64_t, size_t);
 extern struct cmd_state cmd;
 
 char *bootmac = NULL;
@@ -146,6 +153,10 @@ run_loadfile(uint64_t *marks, int howto)
 	 * Move the loaded kernel image to the usual place after calling
 	 * ExitBootServices().
 	 */
+#ifdef __amd64__
+	protect_writeable(marks[MARK_START] + delta,
+	    marks[MARK_END] - marks[MARK_START]);
+#endif
 	memmove((void *)marks[MARK_START] + delta, (void *)marks[MARK_START],
 	    marks[MARK_END] - marks[MARK_START]);
 	for (i = 0; i < MARK_MAX; i++)
@@ -165,6 +176,7 @@ run_loadfile(uint64_t *marks, int howto)
 void
 ucode_load(void)
 {
+	EFI_PHYSICAL_ADDRESS addr;
 	uint32_t model, family, stepping;
 	uint32_t dummy, signature;
 	uint32_t vendor[4];
@@ -200,12 +212,13 @@ ucode_load(void)
 		return;
 
 	buflen = sb.st_size;
-	if (buflen > 128*1024) {
-		printf("ucode too large\n");
+	addr = 16 * 1024 * 1024;
+	if (EFI_CALL(BS->AllocatePages, AllocateMaxAddress, EfiLoaderData,
+	    EFI_SIZE_TO_PAGES(buflen), &addr) != EFI_SUCCESS) {
+		printf("cannot allocate memory for ucode\n");
 		return;
 	}
-
-	buf = (char *)(1*1024*1024);
+	buf = (char *)((paddr_t)addr);
 
 	if (read(fd, buf, buflen) != buflen) {
 		close(fd);
@@ -218,3 +231,29 @@ ucode_load(void)
 
 	close(fd);
 }
+
+#ifdef __amd64__
+void
+protect_writeable(uint64_t addr, size_t len)
+{
+	uint64_t end = addr + len;
+	uint64_t *cr3, *p;
+	size_t off;
+
+	__asm volatile("movq %%cr3, %0;" : "=r"(cr3) : :);
+
+	for (addr &= ~(uint64_t)PAGE_MASK; addr < end; addr += PAGE_SIZE) {
+		off = (addr & L4_MASK) >> L4_SHIFT;
+		p = (void *)(cr3[off] & ~(uint64_t)PAGE_MASK);
+		off = (addr & L3_MASK) >> L3_SHIFT;
+		p = (void *)(p[off] & ~(uint64_t)PAGE_MASK);
+		off = (addr & L2_MASK) >> L2_SHIFT;
+		p = (void *)(p[off] & ~(uint64_t)PAGE_MASK);
+		off = (addr & L1_MASK) >> L1_SHIFT;
+		p[off] |= PG_RW;
+	}
+
+	/* tlb flush */
+	__asm volatile("movq %0,%%cr3" : : "r"(cr3) :);
+}
+#endif

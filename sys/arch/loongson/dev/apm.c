@@ -1,4 +1,4 @@
-/*	$OpenBSD: apm.c,v 1.32 2017/03/27 18:24:08 deraadt Exp $	*/
+/*	$OpenBSD: apm.c,v 1.38 2020/06/24 22:03:40 cheloha Exp $	*/
 
 /*-
  * Copyright (c) 2001 Alexander Guy.  All rights reserved.
@@ -45,7 +45,6 @@
 #include <sys/event.h>
 #include <sys/reboot.h>
 #include <sys/hibernate.h>
-#include <dev/rndvar.h>
 
 #include <machine/autoconf.h>
 #include <machine/conf.h>
@@ -93,8 +92,12 @@ int apm_getdefaultinfo(struct apm_power_info *);
 
 int apm_suspend(int state);
 
-struct filterops apmread_filtops =
-	{ 1, NULL, filt_apmrdetach, filt_apmread};
+const struct filterops apmread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_apmrdetach,
+	.f_event	= filt_apmread,
+};
 
 int (*get_apminfo)(struct apm_power_info *) = apm_getdefaultinfo;
 
@@ -288,7 +291,7 @@ filt_apmrdetach(struct knote *kn)
 {
 	struct apm_softc *sc = (struct apm_softc *)kn->kn_hook;
 
-	SLIST_REMOVE(&sc->sc_note, kn, knote, kn_selnext);
+	klist_remove(&sc->sc_note, kn);
 }
 
 int
@@ -320,7 +323,7 @@ apmkqfilter(dev_t dev, struct knote *kn)
 	}
 
 	kn->kn_hook = (caddr_t)sc;
-	SLIST_INSERT_HEAD(&sc->sc_note, kn, kn_selnext);
+	klist_insert(&sc->sc_note, kn);
 
 	return (0);
 }
@@ -412,7 +415,7 @@ apm_suspend(int state)
 		if (rv == 0)
 			rv = sys_platform->resume();
 	}
-	inittodr(time_second);	/* Move the clock forward */
+	inittodr(gettime());	/* Move the clock forward */
 	config_suspend_all(DVACT_RESUME);
 
 	cold = 0;
@@ -429,6 +432,8 @@ apm_suspend(int state)
 #if NWSDISPLAY > 0
 	wsdisplay_resume();
 #endif
+
+	apm_record_event(APM_NORMAL_RESUME, "System", "resumed from sleep");
 
 	return rv;
 }

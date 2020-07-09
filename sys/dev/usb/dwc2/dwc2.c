@@ -1,4 +1,4 @@
-/*	$OpenBSD: dwc2.c,v 1.48 2019/03/14 04:28:10 visa Exp $	*/
+/*	$OpenBSD: dwc2.c,v 1.52 2020/04/03 20:11:47 patrick Exp $	*/
 /*	$NetBSD: dwc2.c,v 1.32 2014/09/02 23:26:20 macallan Exp $	*/
 
 /*-
@@ -474,7 +474,7 @@ dwc2_open(struct usbd_pipe *pipe)
 	case UE_CONTROL:
 		pipe->methods = &dwc2_device_ctrl_methods;
 		err = usb_allocmem(&sc->sc_bus, sizeof(usb_device_request_t),
-		    0, &dpipe->req_dma);
+		    0, USB_DMA_COHERENT, &dpipe->req_dma);
 		if (err)
 			return err;
 		break;
@@ -551,7 +551,7 @@ dwc2_abort_xfer(struct usbd_xfer *xfer, usbd_status status)
 		xfer->status = status;
 		dxfer->flags |= DWC2_XFER_ABORTWAIT;
 		while (dxfer->flags & DWC2_XFER_ABORTING)
-			tsleep(&dxfer->flags, PZERO, "dwc2xfer", 0);
+			tsleep_nsec(&dxfer->flags, PZERO, "dwc2xfer", INFSLP);
 		return;
 	}
 
@@ -1260,6 +1260,9 @@ dwc2_device_start(struct usbd_xfer *xfer)
 		dwc2_urb->usbdma = &xfer->dmabuf;
 		dwc2_urb->buf = KERNADDR(dwc2_urb->usbdma, 0);
 		dwc2_urb->dma = DMAADDR(dwc2_urb->usbdma, 0);
+		usb_syncmem(&xfer->dmabuf, 0, xfer->length,
+		    usbd_xfer_isread(xfer) ?
+		    BUS_DMASYNC_PREREAD : BUS_DMASYNC_PREWRITE);
  	}
 	dwc2_urb->length = len;
  	dwc2_urb->flags = flags;
@@ -1647,6 +1650,17 @@ void dwc2_host_complete(struct dwc2_hsotg *hsotg, struct dwc2_qtd *qtd,
 		dwc2_free_bus_bandwidth(hsotg,
 					dwc2_hcd_get_ep_bandwidth(hsotg, dpipe),
 					xfer);
+	}
+
+	if (xfer->status == USBD_NORMAL_COMPLETION) {
+		if (xfertype == UE_ISOCHRONOUS)
+			usb_syncmem(&xfer->dmabuf, 0, xfer->length,
+			    usbd_xfer_isread(xfer) ?
+			    BUS_DMASYNC_POSTREAD : BUS_DMASYNC_POSTWRITE);
+		else if (xfer->actlen)
+			usb_syncmem(&xfer->dmabuf, 0, xfer->actlen,
+			    usbd_xfer_isread(xfer) ?
+			    BUS_DMASYNC_POSTREAD : BUS_DMASYNC_POSTWRITE);
 	}
 
 	qtd->urb = NULL;

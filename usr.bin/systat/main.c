@@ -1,4 +1,4 @@
-/* $OpenBSD: main.c,v 1.69 2019/01/17 05:56:29 tedu Exp $	 */
+/* $OpenBSD: main.c,v 1.72 2020/01/12 20:51:08 martijn Exp $	 */
 /*
  * Copyright (c) 2001, 2007 Can Erkin Acar
  * Copyright (c) 2001 Daniel Hartmeier
@@ -212,7 +212,7 @@ void
 usage(void)
 {
 	extern char *__progname;
-	fprintf(stderr, "usage: %s [-aBbiNn] [-d count] "
+	fprintf(stderr, "usage: %s [-aBbhiNn] [-d count] "
 	    "[-s delay] [-w width] [view] [delay]\n", __progname);
 	exit(1);
 }
@@ -303,6 +303,10 @@ cmd_compat(const char *buf)
 	if (strncasecmp(buf, "order", 5) == 0) {
 		show_order();
 		need_update = 1;
+		return;
+	}
+	if (strncasecmp(buf, "human", 5) == 0) {
+		humanreadable = !humanreadable;
 		return;
 	}
 
@@ -428,7 +432,7 @@ main(int argc, char *argv[])
 	int ch;
 
 	ut = open(_PATH_UTMP, O_RDONLY);
-	if (ut < 0) {
+	if (ut == -1) {
 		warn("No utmp");
 	}
 
@@ -438,7 +442,7 @@ main(int argc, char *argv[])
 	if (setresgid(gid, gid, gid) == -1)
 		err(1, "setresgid");
 
-	while ((ch = getopt(argc, argv, "BNabd:ins:w:")) != -1) {
+	while ((ch = getopt(argc, argv, "BNabd:hins:w:")) != -1) {
 		switch (ch) {
 		case 'a':
 			maxlines = -1;
@@ -456,6 +460,9 @@ main(int argc, char *argv[])
 			countmax = strtonum(optarg, 1, INT_MAX, &errstr);
 			if (errstr)
 				errx(1, "-d %s: %s", optarg, errstr);
+			break;
+		case 'h':
+			humanreadable = 1;
 			break;
 		case 'i':
 			interactive = 1;
@@ -525,6 +532,11 @@ main(int argc, char *argv[])
 	}
 
 	setup_term(maxlines);
+
+	if (unveil("/", "r") == -1)
+		err(1, "unveil");
+	if (unveil(NULL, NULL) == -1)
+		err(1, "unveil");
 
 	if (rawmode && countmax == 0)
 		countmax = 1;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_trunk.c,v 1.140 2019/05/11 18:10:45 florian Exp $	*/
+/*	$OpenBSD: if_trunk.c,v 1.146 2020/06/17 06:45:22 dlg Exp $	*/
 
 /*
  * Copyright (c) 2005, 2006, 2007 Reyk Floeter <reyk@openbsd.org>
@@ -185,8 +185,6 @@ trunk_clone_create(struct if_clone *ifc, int unit)
 	ifp->if_flags = IFF_SIMPLEX | IFF_BROADCAST | IFF_MULTICAST;
 	ifp->if_capabilities = trunk_capabilities(tr);
 
-	IFQ_SET_MAXLEN(&ifp->if_snd, 1);
-
 	snprintf(ifp->if_xname, sizeof(ifp->if_xname), "%s%d",
 	    ifc->ifc_name, unit);
 
@@ -285,6 +283,7 @@ trunk_port_create(struct trunk_softc *tr, struct ifnet *ifp)
 {
 	struct trunk_softc *tr_ptr;
 	struct trunk_port *tp;
+	struct arpcom *ac0;
 	int error = 0;
 
 	/* Limit the maximal number of trunk ports */
@@ -299,13 +298,17 @@ trunk_port_create(struct trunk_softc *tr, struct ifnet *ifp)
 	if (ifp->if_type != IFT_ETHER)
 		return (EPROTONOSUPPORT);
 
+	ac0 = (struct arpcom *)ifp;
+	if (ac0->ac_trunkport != NULL)
+		return (EBUSY);
+
 	/* Take MTU from the first member port */
 	if (SLIST_EMPTY(&tr->tr_ports)) {
 		if (tr->tr_ifflags & IFF_DEBUG)
 			printf("%s: first port, setting trunk mtu %u\n",
 			    tr->tr_ifname, ifp->if_mtu);
 		tr->tr_ac.ac_if.if_mtu = ifp->if_mtu;
-		tr->tr_ac.ac_if.if_hardmtu = ifp->if_mtu;
+		tr->tr_ac.ac_if.if_hardmtu = ifp->if_hardmtu;
 	} else if (tr->tr_ac.ac_if.if_mtu != ifp->if_mtu) {
 		printf("%s: adding %s failed, MTU %u != %u\n", tr->tr_ifname,
 		    ifp->if_xname, ifp->if_mtu, tr->tr_ac.ac_if.if_mtu);
@@ -367,16 +370,17 @@ trunk_port_create(struct trunk_softc *tr, struct ifnet *ifp)
 	trunk_ether_cmdmulti(tp, SIOCADDMULTI);
 
 	/* Register callback for physical link state changes */
-	tp->lh_cookie = hook_establish(ifp->if_linkstatehooks, 1,
-	    trunk_port_state, tp);
+	task_set(&tp->tp_ltask, trunk_port_state, tp);
+	if_linkstatehook_add(ifp, &tp->tp_ltask);
 
 	/* Register callback if parent wants to unregister */
-	tp->dh_cookie = hook_establish(ifp->if_detachhooks, 0,
-	    trunk_port_ifdetach, tp);
+	task_set(&tp->tp_dtask, trunk_port_ifdetach, tp);
+	if_detachhook_add(ifp, &tp->tp_dtask);
 
 	if (tr->tr_port_create != NULL)
 		error = (*tr->tr_port_create)(tp);
 
+	ac0->ac_trunkport = tp;
 	/* Change input handler of the physical interface. */
 	if_ih_insert(ifp, trunk_input, tp);
 
@@ -406,9 +410,11 @@ trunk_port_destroy(struct trunk_port *tp)
 	struct trunk_softc *tr = (struct trunk_softc *)tp->tp_trunk;
 	struct trunk_port *tp_ptr;
 	struct ifnet *ifp = tp->tp_if;
+	struct arpcom *ac0 = (struct arpcom *)ifp;
 
 	/* Restore previous input handler. */
 	if_ih_remove(ifp, trunk_input, tp);
+	ac0->ac_trunkport = NULL;
 
 	/* Remove multicast addresses from this port */
 	trunk_ether_cmdmulti(tp, SIOCDELMULTI);
@@ -428,8 +434,8 @@ trunk_port_destroy(struct trunk_port *tp)
 	ifp->if_ioctl = tp->tp_ioctl;
 	ifp->if_output = tp->tp_output;
 
-	hook_disestablish(ifp->if_linkstatehooks, tp->lh_cookie);
-	hook_disestablish(ifp->if_detachhooks, tp->dh_cookie);
+	if_detachhook_del(ifp, &tp->tp_dtask);
+	if_linkstatehook_del(ifp, &tp->tp_ltask);
 
 	/* Finally, remove the port from the trunk */
 	SLIST_REMOVE(&tr->tr_ports, tp, trunk_port, tp_entries);
@@ -1039,8 +1045,8 @@ trunk_hashmbuf(struct mbuf *m, SIPHASH_KEY *key)
 #endif
 	SIPHASH_CTX ctx;
 
-	if (m->m_pkthdr.ph_flowid & M_FLOWID_VALID)
-		return (m->m_pkthdr.ph_flowid & M_FLOWID_MASK);
+	if (m->m_pkthdr.csum_flags & M_FLOWID)
+		return (m->m_pkthdr.ph_flowid);
 
 	SipHash24_Init(&ctx, key);
 	off = sizeof(*eh);

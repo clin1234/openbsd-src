@@ -1,4 +1,4 @@
-/*	$OpenBSD: umass_scsi.c,v 1.46 2018/05/01 18:14:46 landry Exp $ */
+/*	$OpenBSD: umass_scsi.c,v 1.52 2020/06/27 17:28:58 krw Exp $ */
 /*	$NetBSD: umass_scsipi.c,v 1.9 2003/02/16 23:14:08 augustss Exp $	*/
 /*
  * Copyright (c) 2001 The NetBSD Foundation, Inc.
@@ -66,12 +66,9 @@ struct umass_scsi_softc {
 
 int umass_scsi_probe(struct scsi_link *);
 void umass_scsi_cmd(struct scsi_xfer *);
-void umass_scsi_minphys(struct buf *, struct scsi_link *);
 
 struct scsi_adapter umass_scsi_switch = {
-	umass_scsi_cmd,
-	umass_scsi_minphys,
-	umass_scsi_probe
+	umass_scsi_cmd, NULL, umass_scsi_probe, NULL, NULL
 };
 
 void umass_scsi_cb(struct umass_softc *sc, void *priv, int residue,
@@ -104,7 +101,6 @@ umass_scsi_attach(struct umass_softc *sc)
 	scbus->sc_link.luns = sc->maxlun + 1;
 	scbus->sc_link.flags = SDEV_UMASS;
 
-	bzero(&saa, sizeof(saa));
 	saa.saa_sc_link = &scbus->sc_link;
 
 	switch (sc->sc_cmd) {
@@ -165,7 +161,7 @@ umass_scsi_probe(struct scsi_link *link)
 	/*
 	 * Create a fake devid using the vendor and product ids and the last
 	 * 12 characters of serial number, as recommended by Section 4.1.1 of
-	 * the USB Mass Storage Class - Bulk Only Transport spec. 
+	 * the USB Mass Storage Class - Bulk Only Transport spec.
 	 */
 	len = strlen(udi.udi_serial);
 	if (len >= 12) {
@@ -263,15 +259,6 @@ umass_scsi_cmd(struct scsi_xfer *xs)
 	/* Return if command finishes early. */
  done:
 	scsi_done(xs);
-}
-
-void
-umass_scsi_minphys(struct buf *bp, struct scsi_link *sl)
-{
-	if (bp->b_bcount > UMASS_MAX_TRANSFER_SIZE)
-		bp->b_bcount = UMASS_MAX_TRANSFER_SIZE;
-
-	minphys(bp);
 }
 
 void

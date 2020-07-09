@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmmvar.h,v 1.66 2019/05/17 19:07:16 guenther Exp $	*/
+/*	$OpenBSD: vmmvar.h,v 1.70 2020/04/08 07:39:48 pd Exp $	*/
 /*
  * Copyright (c) 2014 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -322,6 +322,10 @@ enum {
 };
 
 enum {
+	VEE_FAULT_PROTECT
+};
+
+enum {
 	VMM_CPU_MODE_REAL,
 	VMM_CPU_MODE_PROT,
 	VMM_CPU_MODE_PROT32,
@@ -349,6 +353,12 @@ struct vm_exit_inout {
 	uint8_t			vei_encoding;	/* operand encoding */
 	uint16_t		vei_port;	/* port */
 	uint32_t		vei_data;	/* data */
+};
+/*
+ *  vm_exit_eptviolation	: describes an EPT VIOLATION exit
+ */
+struct vm_exit_eptviolation {
+	uint8_t		vee_fault_type;
 };
 
 /*
@@ -447,7 +457,8 @@ struct vm_mem_range {
  */
 struct vm_exit {
 	union {
-		struct vm_exit_inout	vei;		/* IN/OUT exit */
+		struct vm_exit_inout		vei;	/* IN/OUT exit */
+		struct vm_exit_eptviolation	vee;	/* EPT VIOLATION exit*/
 	};
 
 	struct vcpu_reg_state		vrs;
@@ -525,6 +536,20 @@ struct vm_intr_params {
 	uint16_t		vip_intr;
 };
 
+#define VM_RWVMPARAMS_PVCLOCK_SYSTEM_GPA 0x1	/* read/write pvclock gpa */
+#define VM_RWVMPARAMS_PVCLOCK_VERSION	 0x2	/* read/write pvclock version */
+#define VM_RWVMPARAMS_ALL	(VM_RWVMPARAMS_PVCLOCK_SYSTEM_GPA | \
+    VM_RWVMPARAMS_PVCLOCK_VERSION)
+
+struct vm_rwvmparams_params {
+	/* Input parameters to VMM_IOC_READVMPARAMS/VMM_IOC_WRITEVMPARAMS */
+	uint32_t		vpp_vm_id;
+	uint32_t		vpp_vcpu_id;
+	uint32_t		vpp_mask;
+	paddr_t			vpp_pvclock_system_gpa;
+	uint32_t		vpp_pvclock_version;
+};
+
 #define VM_RWREGS_GPRS	0x1	/* read/write GPRs */
 #define VM_RWREGS_SREGS	0x2	/* read/write segment registers */
 #define VM_RWREGS_CRS	0x4	/* read/write CRs */
@@ -544,6 +569,15 @@ struct vm_rwregs_params {
 	struct vcpu_reg_state	vrwp_regs;
 };
 
+struct vm_mprotect_ept_params {
+	/* Input parameters to VMM_IOC_MPROTECT_EPT */
+	uint32_t		vmep_vm_id;
+	uint32_t		vmep_vcpu_id;
+	vaddr_t			vmep_sgpa;
+	size_t			vmep_size;
+	int			vmep_prot;
+};
+
 /* IOCTL definitions */
 #define VMM_IOC_CREATE _IOWR('V', 1, struct vm_create_params) /* Create VM */
 #define VMM_IOC_RUN _IOWR('V', 2, struct vm_run_params) /* Run VCPU */
@@ -553,7 +587,12 @@ struct vm_rwregs_params {
 #define VMM_IOC_INTR _IOW('V', 6, struct vm_intr_params) /* Intr pending */
 #define VMM_IOC_READREGS _IOWR('V', 7, struct vm_rwregs_params) /* Get regs */
 #define VMM_IOC_WRITEREGS _IOW('V', 8, struct vm_rwregs_params) /* Set regs */
-
+/* Get VM params */
+#define VMM_IOC_READVMPARAMS _IOWR('V', 9, struct vm_rwvmparams_params)
+/* Set VM params */
+#define VMM_IOC_WRITEVMPARAMS _IOW('V', 10, struct vm_rwvmparams_params)
+/* Control the protection of ept pages*/
+#define VMM_IOC_MPROTECT_EPT _IOW('V', 11, struct vm_mprotect_ept_params)
 
 /* CPUID masks */
 /*
@@ -665,7 +704,7 @@ enum {
 
 enum {
 	VMM_MEM_TYPE_REGULAR,
-	VMM_MEM_TYPE_UNKNOWN	
+	VMM_MEM_TYPE_UNKNOWN
 };
 
 /* Forward declarations */
@@ -724,7 +763,7 @@ struct vmcb {
 			uint64_t	v_pad5;			/* 0E8h-0EFh */
 			uint64_t	v_avic_logical_table;	/* 0F0h */
 			uint64_t	v_avic_phys;		/* 0F8h */
-			
+
 		};
 		uint8_t vmcb_control[0x400];
 	};
@@ -915,6 +954,8 @@ struct vcpu {
 	vaddr_t vc_vmx_msr_entry_load_va;
 	paddr_t vc_vmx_msr_entry_load_pa;
 	uint8_t vc_vmx_vpid_enabled;
+	uint64_t vc_vmx_cr0_fixed1;
+	uint64_t vc_vmx_cr0_fixed0;
 
 	/* SVM only */
 	vaddr_t vc_svm_hsa_va;

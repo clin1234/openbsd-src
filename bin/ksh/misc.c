@@ -1,4 +1,4 @@
-/*	$OpenBSD: misc.c,v 1.72 2018/11/20 08:12:26 deraadt Exp $	*/
+/*	$OpenBSD: misc.c,v 1.74 2020/07/07 10:33:58 jca Exp $	*/
 
 /*
  * Miscellaneous functions
@@ -147,6 +147,7 @@ const struct option sh_options[] = {
 	{ "notify",	'b',		OF_ANY },
 	{ "nounset",	'u',		OF_ANY },
 	{ "physical",	  0,		OF_ANY }, /* non-standard */
+	{ "pipefail",	  0,		OF_ANY }, /* non-standard */
 	{ "posix",	  0,		OF_ANY }, /* non-standard */
 	{ "privileged",	'p',		OF_ANY },
 	{ "restricted",	'r',	    OF_CMDLINE },
@@ -1085,7 +1086,7 @@ blocking_read(int fd, char *buf, int nbytes)
 	int ret;
 	int tried_reset = 0;
 
-	while ((ret = read(fd, buf, nbytes)) < 0) {
+	while ((ret = read(fd, buf, nbytes)) == -1) {
 		if (!tried_reset && errno == EAGAIN) {
 			int oerrno = errno;
 			if (reset_nonblock(fd) > 0) {
@@ -1108,12 +1109,12 @@ reset_nonblock(int fd)
 {
 	int flags;
 
-	if ((flags = fcntl(fd, F_GETFL)) < 0)
+	if ((flags = fcntl(fd, F_GETFL)) == -1)
 		return -1;
 	if (!(flags & O_NONBLOCK))
 		return 0;
 	flags &= ~O_NONBLOCK;
-	if (fcntl(fd, F_SETFL, flags) < 0)
+	if (fcntl(fd, F_SETFL, flags) == -1)
 		return -1;
 	return 1;
 }

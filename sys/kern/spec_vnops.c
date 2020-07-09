@@ -1,4 +1,4 @@
-/*	$OpenBSD: spec_vnops.c,v 1.95 2018/07/07 15:41:25 visa Exp $	*/
+/*	$OpenBSD: spec_vnops.c,v 1.102 2020/06/11 09:18:43 mpi Exp $	*/
 /*	$NetBSD: spec_vnops.c,v 1.29 1996/04/22 01:42:38 christos Exp $	*/
 
 /*
@@ -59,11 +59,10 @@
 #define v_lastr v_specinfo->si_lastr
 
 int	spec_open_clone(struct vop_open_args *);
-int	spec_close_clone(struct vop_close_args *);
 
-struct vnode *speclisth[SPECHSZ];
+struct vnodechain speclisth[SPECHSZ];
 
-struct vops spec_vops = {
+const struct vops spec_vops = {
 	.vop_lookup	= vop_generic_lookup,
 	.vop_create	= spec_badop,
 	.vop_mknod	= spec_badop,
@@ -387,11 +386,9 @@ spec_poll(void *v)
 	dev_t dev;
 
 	switch (ap->a_vp->v_type) {
-
 	default:
 		return (ap->a_events &
 		    (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM));
-
 	case VCHR:
 		dev = ap->a_vp->v_rdev;
 		return (*cdevsw[major(dev)].d_poll)(dev, ap->a_events, ap->a_p);
@@ -401,12 +398,19 @@ int
 spec_kqfilter(void *v)
 {
 	struct vop_kqfilter_args *ap = v;
-
 	dev_t dev;
 
 	dev = ap->a_vp->v_rdev;
-	if (cdevsw[major(dev)].d_kqfilter)
-		return (*cdevsw[major(dev)].d_kqfilter)(dev, ap->a_kn);
+
+	switch (ap->a_vp->v_type) {
+	default:
+		if (ap->a_kn->kn_flags & __EV_POLL)
+			return seltrue_kqfilter(dev, ap->a_kn);
+		break;
+	case VCHR:
+		if (cdevsw[major(dev)].d_kqfilter)
+			return (*cdevsw[major(dev)].d_kqfilter)(dev, ap->a_kn);
+	}
 	return (EOPNOTSUPP);
 }
 
@@ -441,7 +445,7 @@ loop:
 		goto loop;
 	}
 	if (ap->a_waitfor == MNT_WAIT) {
-		vwaitforio (vp, 0, "spec_fsync", 0);
+		vwaitforio (vp, 0, "spec_fsync", INFSLP);
 
 #ifdef DIAGNOSTIC
 		if (!LIST_EMPTY(&vp->v_dirtyblkhd)) {
@@ -481,6 +485,7 @@ spec_close(void *v)
 	dev_t dev = vp->v_rdev;
 	int (*devclose)(dev_t, int, int, struct proc *);
 	int mode, relock, error;
+	int clone = 0;
 
 	switch (vp->v_type) {
 
@@ -499,15 +504,17 @@ spec_close(void *v)
 			vrele(vp);
 			p->p_p->ps_pgrp->pg_session->s_ttyvp = NULL;
 		}
-		if (cdevsw[major(dev)].d_flags & D_CLONE)
-			return (spec_close_clone(ap));
-		/*
-		 * If the vnode is locked, then we are in the midst
-		 * of forcably closing the device, otherwise we only
-		 * close on last reference.
-		 */
-		if (vcount(vp) > 1 && (vp->v_flag & VXLOCK) == 0)
-			return (0);
+		if (cdevsw[major(dev)].d_flags & D_CLONE) {
+			clone = 1;
+		} else {
+			/*
+			 * If the vnode is locked, then we are in the midst
+			 * of forcably closing the device, otherwise we only
+			 * close on last reference.
+			 */
+			if (vcount(vp) > 1 && (vp->v_flag & VXLOCK) == 0)
+				return (0);
+		}
 		devclose = cdevsw[major(dev)].d_close;
 		mode = S_IFCHR;
 		break;
@@ -522,7 +529,7 @@ spec_close(void *v)
 		 */
 		if (!(vp->v_flag & VXLOCK))
 			vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-		error = vinvalbuf(vp, V_SAVE, ap->a_cred, p, 0, 0);
+		error = vinvalbuf(vp, V_SAVE, ap->a_cred, p, 0, INFSLP);
 		if (!(vp->v_flag & VXLOCK))
 			VOP_UNLOCK(vp);
 		if (error)
@@ -553,6 +560,15 @@ spec_close(void *v)
 	error = (*devclose)(dev, ap->a_fflag, mode, p);
 	if (relock)
 		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
+
+	if (error == 0 && clone) {
+		struct vnode *pvp;
+
+		pvp = vp->v_specparent; /* get parent device */
+		clrbit(pvp->v_specbitmap, minor(dev) >> CLONE_SHIFT);
+		vrele(pvp);
+	}
+
 	return (error);
 }
 
@@ -758,22 +774,4 @@ spec_open_clone(struct vop_open_args *ap)
 	DNPRINTF("clone of vnode %p is vnode %p\n", vp, cvp);
 
 	return (0); /* device cloned */
-}
-
-int
-spec_close_clone(struct vop_close_args *ap)
-{
-	struct vnode *pvp, *vp = ap->a_vp;
-	int error;
-
-	error = cdevsw[major(vp->v_rdev)].d_close(vp->v_rdev, ap->a_fflag,
-	    S_IFCHR, ap->a_p);
-	if (error)
-		return (error); /* device close failed */
-
-	pvp = vp->v_specparent; /* get parent device */
-	clrbit(pvp->v_specbitmap, minor(vp->v_rdev) >> CLONE_SHIFT);
-	vrele(pvp);
-
-	return (0); /* clone closed */
 }

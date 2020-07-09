@@ -1,4 +1,4 @@
-/* $OpenBSD: dwiic.c,v 1.4 2018/05/23 22:08:00 kettenis Exp $ */
+/* $OpenBSD: dwiic.c,v 1.11 2020/02/20 15:33:41 cheloha Exp $ */
 /*
  * Synopsys DesignWare I2C controller
  *
@@ -20,7 +20,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/kthread.h>
 
 #include <dev/acpi/acpireg.h>
 #include <dev/acpi/acpivar.h>
@@ -128,6 +127,8 @@ int
 dwiic_init(struct dwiic_softc *sc)
 {
 	uint32_t reg;
+	uint8_t tx_fifo_depth;
+	uint8_t rx_fifo_depth;
 
 	/* make sure we're talking to a device we know */
 	reg = dwiic_read(sc, DW_IC_COMP_TYPE);
@@ -136,6 +137,18 @@ dwiic_init(struct dwiic_softc *sc)
 		    sc->sc_dev.dv_xname, reg));
 		return 1;
 	}
+
+	/* fetch default timing parameters if not already specified */
+	if (!sc->ss_hcnt)
+		sc->ss_hcnt = dwiic_read(sc, DW_IC_SS_SCL_HCNT);
+	if (!sc->ss_lcnt)
+		sc->ss_lcnt = dwiic_read(sc, DW_IC_SS_SCL_LCNT);
+	if (!sc->fs_hcnt)
+		sc->fs_hcnt = dwiic_read(sc, DW_IC_FS_SCL_HCNT);
+	if (!sc->fs_lcnt)
+		sc->fs_lcnt = dwiic_read(sc, DW_IC_FS_SCL_LCNT);
+	if (!sc->sda_hold_time)
+		sc->sda_hold_time = dwiic_read(sc, DW_IC_SDA_HOLD);
 
 	/* disable the adapter */
 	dwiic_enable(sc, 0);
@@ -156,6 +169,14 @@ dwiic_init(struct dwiic_softc *sc)
 	/* FIFO threshold levels */
 	sc->tx_fifo_depth = 32;
 	sc->rx_fifo_depth = 32;
+	reg = dwiic_read(sc, DW_IC_COMP_PARAM_1);
+	tx_fifo_depth = DW_IC_TX_FIFO_DEPTH(reg);
+	rx_fifo_depth = DW_IC_RX_FIFO_DEPTH(reg);
+	if (tx_fifo_depth > 1 && tx_fifo_depth < sc->tx_fifo_depth)
+		sc->tx_fifo_depth = tx_fifo_depth;
+	if (rx_fifo_depth > 1 && rx_fifo_depth < sc->rx_fifo_depth)
+		sc->rx_fifo_depth = rx_fifo_depth;
+		
 	dwiic_write(sc, DW_IC_TX_TL, sc->tx_fifo_depth / 2);
 	dwiic_write(sc, DW_IC_RX_TL, 0);
 
@@ -250,7 +271,8 @@ dwiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr, const void *cmdbuf,
 		dwiic_read(sc, DW_IC_CLR_INTR);
 		dwiic_write(sc, DW_IC_INTR_MASK, DW_IC_INTR_TX_EMPTY);
 
-		if (tsleep(&sc->sc_writewait, PRIBIO, "dwiic", hz / 2) != 0)
+		if (tsleep_nsec(&sc->sc_writewait, PRIBIO, "dwiic",
+		    MSEC_TO_NSEC(500)) != 0)
 			printf("%s: timed out waiting for tx_empty intr\n",
 			    sc->sc_dev.dv_xname);
 		splx(s);
@@ -316,6 +338,13 @@ dwiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr, const void *cmdbuf,
 
 		dwiic_write(sc, DW_IC_DATA_CMD, cmd);
 
+		/*
+		 * For a block read, get the byte count before
+		 * continuing to read the data bytes.
+		 */
+		if (I2C_OP_READ_P(op) && I2C_OP_BLKMODE_P(op) && readpos == 0)
+			tx_limit = 1;
+
 		tx_limit--;
 		x++;
 
@@ -328,7 +357,7 @@ dwiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr, const void *cmdbuf,
 			    sc->sc_dev.dv_xname, __func__, tx_limit, x));
 
 			if (flags & I2C_F_POLL) {
-				for (retries = 100; retries > 0; retries--) {
+				for (retries = 1000; retries > 0; retries--) {
 					rx_avail = dwiic_read(sc, DW_IC_RXFLR);
 					if (rx_avail > 0)
 						break;
@@ -340,8 +369,8 @@ dwiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr, const void *cmdbuf,
 				dwiic_write(sc, DW_IC_INTR_MASK,
 				    DW_IC_INTR_RX_FULL);
 
-				if (tsleep(&sc->sc_readwait, PRIBIO, "dwiic",
-				    hz / 2) != 0)
+				if (tsleep_nsec(&sc->sc_readwait, PRIBIO,
+				    "dwiic", MSEC_TO_NSEC(500)) != 0)
 					printf("%s: timed out waiting for "
 					    "rx_full intr\n",
 					    sc->sc_dev.dv_xname);
@@ -352,8 +381,7 @@ dwiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr, const void *cmdbuf,
 
 			if (rx_avail == 0) {
 				printf("%s: timed out reading remaining %d\n",
-				    sc->sc_dev.dv_xname,
-				    (int)(len - 1 - readpos));
+				    sc->sc_dev.dv_xname, (int)(len - readpos));
 				sc->sc_i2c_xfer.error = 1;
 				sc->sc_busy = 0;
 
@@ -373,6 +401,13 @@ dwiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr, const void *cmdbuf,
 				rx_avail--;
 			}
 
+			/*
+			 * Update the transfer length when doing a
+			 * block read.
+			 */
+			if (I2C_OP_BLKMODE_P(op) && readpos > 0 && len > b[0])
+				len = b[0] + 1;
+
 			if (readpos >= len)
 				break;
 
@@ -385,14 +420,13 @@ dwiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr, const void *cmdbuf,
 
 	if (I2C_OP_STOP_P(op) && I2C_OP_WRITE_P(op)) {
 		if (flags & I2C_F_POLL) {
-			/* wait for bus to be idle */
 			for (retries = 100; retries > 0; retries--) {
-				st = dwiic_read(sc, DW_IC_STATUS);
-				if (!(st & DW_IC_STATUS_ACTIVITY))
+				st = dwiic_read(sc, DW_IC_RAW_INTR_STAT);
+				if (st & DW_IC_INTR_STOP_DET)
 					break;
 				DELAY(1000);
 			}
-			if (st & DW_IC_STATUS_ACTIVITY)
+			if (!(st & DW_IC_INTR_STOP_DET))
 				printf("%s: timed out waiting for bus idle\n",
 				    sc->sc_dev.dv_xname);
 		} else {
@@ -400,8 +434,8 @@ dwiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr, const void *cmdbuf,
 			while (sc->sc_busy) {
 				dwiic_write(sc, DW_IC_INTR_MASK,
 				    DW_IC_INTR_STOP_DET);
-				if (tsleep(&sc->sc_busy, PRIBIO, "dwiic",
-				    hz / 2) != 0)
+				if (tsleep_nsec(&sc->sc_busy, PRIBIO, "dwiic",
+				    MSEC_TO_NSEC(500)) != 0)
 					printf("%s: timed out waiting for "
 					    "stop intr\n",
 					    sc->sc_dev.dv_xname);

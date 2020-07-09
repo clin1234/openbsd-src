@@ -1,4 +1,4 @@
-/*	$OpenBSD: autri.c,v 1.42 2016/12/20 15:45:29 ratchov Exp $	*/
+/*	$OpenBSD: autri.c,v 1.44 2020/01/11 09:08:39 cheloha Exp $	*/
 
 /*
  * Copyright (c) 2001 SOMEYA Yoshihiko and KUROSAWA Takahiro.
@@ -995,7 +995,7 @@ autri_malloc(void *addr, int direction, size_t size, int pool, int flags)
 #endif
 	error = autri_allocmem(sc, size, 0x10000, p);
 	if (error) {
-		free(p, pool, 0);
+		free(p, pool, sizeof(*p));
 		return NULL;
 	}
 
@@ -1014,7 +1014,7 @@ autri_free(void *addr, void *ptr, int pool)
 		if (KERNADDR(p) == ptr) {
 			autri_freemem(sc, p);
 			*pp = p->next;
-			free(p, pool, 0);
+			free(p, pool, sizeof(*p));
 			return;
 		}
 	}
@@ -1352,7 +1352,8 @@ autri_midi_close(void *addr)
 
 	DPRINTF(("autri_midi_close()\n"));
 
-	tsleep(sc, PWAIT, "autri", hz/10); /* give uart a chance to drain */
+	/* give uart a chance to drain */
+	tsleep_nsec(sc, PWAIT, "autri", MSEC_TO_NSEC(100));
 
 	sc->sc_iintr = NULL;
 	sc->sc_ointr = NULL;

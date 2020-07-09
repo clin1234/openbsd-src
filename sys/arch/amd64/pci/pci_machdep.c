@@ -1,4 +1,4 @@
-/*	$OpenBSD: pci_machdep.c,v 1.69 2018/08/19 08:23:47 kettenis Exp $	*/
+/*	$OpenBSD: pci_machdep.c,v 1.75 2020/06/17 06:14:52 dlg Exp $	*/
 /*	$NetBSD: pci_machdep.c,v 1.3 2003/05/07 21:33:58 fvdl Exp $	*/
 
 /*-
@@ -163,64 +163,6 @@ void
 pci_attach_hook(struct device *parent, struct device *self,
     struct pcibus_attach_args *pba)
 {
-	pci_chipset_tag_t pc = pba->pba_pc;
-	pcitag_t tag;
-	pcireg_t id, class;
-
-	if (pba->pba_bus != 0)
-		return;
-
-	/*
-	 * In order to decide whether the system supports MSI we look
-	 * at the host bridge, which should be device 0 function 0 on
-	 * bus 0.  It is better to not enable MSI on systems that
-	 * support it than the other way around, so be conservative
-	 * here.  So we don't enable MSI if we don't find a host
-	 * bridge there.  We also deliberately don't enable MSI on
-	 * chipsets from low-end manifacturers like VIA and SiS.
-	 */
-	tag = pci_make_tag(pc, 0, 0, 0);
-	id = pci_conf_read(pc, tag, PCI_ID_REG);
-	class = pci_conf_read(pc, tag, PCI_CLASS_REG);
-
-	if (PCI_CLASS(class) != PCI_CLASS_BRIDGE ||
-	    PCI_SUBCLASS(class) != PCI_SUBCLASS_BRIDGE_HOST)
-		return;
-
-	switch (PCI_VENDOR(id)) {
-	case PCI_VENDOR_INTEL:
-		/*
-		 * In the wonderful world of virtualization you can
-		 * have the latest 64-bit AMD multicore CPU behind a
-		 * prehistoric Intel host bridge.  Give them what they
-		 * deserve.
-		 */
-		switch (PCI_PRODUCT(id)) {
-		case PCI_PRODUCT_INTEL_82441FX:	/* QEMU */
-		case PCI_PRODUCT_INTEL_82443BX:	/* VMWare */
-			break;
-		default:
-			pba->pba_flags |= PCI_FLAGS_MSI_ENABLED;
-			break;
-		}
-		break;
-	case PCI_VENDOR_NVIDIA:
-	case PCI_VENDOR_AMD:
-		pba->pba_flags |= PCI_FLAGS_MSI_ENABLED;
-		break;
-	}
-
-	/*
-	 * Don't enable MSI on a HyperTransport bus.  In order to
-	 * determine that bus 0 is a HyperTransport bus, we look at
-	 * device 24 function 0, which is the HyperTransport
-	 * host/primary interface integrated on most 64-bit AMD CPUs.
-	 * If that device has a HyperTransport capability, bus 0 must
-	 * be a HyperTransport bus and we disable MSI.
-	 */
-	tag = pci_make_tag(pc, 0, 24, 0);
-	if (pci_get_capability(pc, tag, PCI_CAP_HT, NULL, NULL))
-		pba->pba_flags &= ~PCI_FLAGS_MSI_ENABLED;
 }
 
 int
@@ -324,6 +266,46 @@ pci_conf_write(pci_chipset_tag_t pc, pcitag_t tag, int reg, pcireg_t data)
 	outl(PCI_MODE1_DATA_REG, data);
 	outl(PCI_MODE1_ADDRESS_REG, 0);
 	PCI_CONF_UNLOCK();
+}
+
+int
+pci_msix_table_map(pci_chipset_tag_t pc, pcitag_t tag,
+    bus_space_tag_t memt, bus_space_handle_t *memh)
+{
+	bus_addr_t base;
+	pcireg_t reg, table, type;
+	int bir, offset;
+	int off, tblsz;
+
+	if (pci_get_capability(pc, tag, PCI_CAP_MSIX, &off, &reg) == 0)
+		panic("%s: no msix capability", __func__);
+
+	table = pci_conf_read(pc, tag, off + PCI_MSIX_TABLE);
+	bir = (table & PCI_MSIX_TABLE_BIR);
+	offset = (table & PCI_MSIX_TABLE_OFF);
+	tblsz = PCI_MSIX_MC_TBLSZ(reg) + 1;
+
+	bir = PCI_MAPREG_START + bir * 4;
+	type = pci_mapreg_type(pc, tag, bir);
+	if (pci_mapreg_info(pc, tag, bir, type, &base, NULL, NULL) ||
+	    _bus_space_map(memt, base + offset, tblsz * 16, 0, memh))
+		return -1;
+
+	return 0;
+}
+
+void
+pci_msix_table_unmap(pci_chipset_tag_t pc, pcitag_t tag,
+    bus_space_tag_t memt, bus_space_handle_t memh)
+{
+	pcireg_t reg;
+	int tblsz;
+
+	if (pci_get_capability(pc, tag, PCI_CAP_MSIX, NULL, &reg) == 0)
+		panic("%s: no msix capability", __func__);
+
+	tblsz = PCI_MSIX_MC_TBLSZ(reg) + 1;
+	_bus_space_unmap(memt, memh, tblsz * 16, NULL);
 }
 
 void msi_hwmask(struct pic *, int);
@@ -452,30 +434,24 @@ msix_addroute(struct pic *pic, struct cpu_info *ci, int pin, int vec, int type)
 	pci_chipset_tag_t pc = NULL; /* XXX */
 	bus_space_tag_t memt = X86_BUS_SPACE_MEM; /* XXX */
 	bus_space_handle_t memh;
-	bus_addr_t base;
 	pcitag_t tag = PCI_MSIX_TAG(pin);
 	int entry = PCI_MSIX_VEC(pin);
-	pcireg_t reg, addr, table;
+	pcireg_t reg, addr;
 	uint32_t ctrl;
-	int bir, offset;
-	int off, tblsz;
+	int off;
 
 	if (pci_get_capability(pc, tag, PCI_CAP_MSIX, &off, &reg) == 0)
 		panic("%s: no msix capability", __func__);
 
-	addr = 0xfee00000UL | (ci->ci_apicid << 12);
+	KASSERT(entry <= PCI_MSIX_MC_TBLSZ(reg));
 
-	table = pci_conf_read(pc, tag, off + PCI_MSIX_TABLE);
-	bir = (table & PCI_MSIX_TABLE_BIR);
-	offset = (table & PCI_MSIX_TABLE_OFF);
-	tblsz = PCI_MSIX_MC_TBLSZ(reg) + 1;
-
-	bir = PCI_MAPREG_START + bir * 4;
-	if (pci_mem_find(pc, tag, bir, &base, NULL, NULL) ||
-	    _bus_space_map(memt, base + offset, tblsz * 16, 0, &memh))
+	if (pci_msix_table_map(pc, tag, memt, &memh))
 		panic("%s: cannot map registers", __func__);
 
-	bus_space_write_8(memt, memh, PCI_MSIX_MA(entry), addr);
+	addr = 0xfee00000UL | (ci->ci_apicid << 12);
+
+	bus_space_write_4(memt, memh, PCI_MSIX_MA(entry), addr);
+	bus_space_write_4(memt, memh, PCI_MSIX_MAU32(entry), 0);
 	bus_space_write_4(memt, memh, PCI_MSIX_MD(entry), vec);
 	bus_space_barrier(memt, memh, PCI_MSIX_MA(entry), 16,
 	    BUS_SPACE_BARRIER_WRITE);
@@ -483,7 +459,7 @@ msix_addroute(struct pic *pic, struct cpu_info *ci, int pin, int vec, int type)
 	bus_space_write_4(memt, memh, PCI_MSIX_VC(entry),
 	    ctrl & ~PCI_MSIX_VC_MASK);
 
-	_bus_space_unmap(memt, memh, tblsz * 16, NULL);
+	pci_msix_table_unmap(pc, tag, memt, memh);
 
 	pci_conf_write(pc, tag, off, reg | PCI_MSIX_MC_MSIXE);
 }
@@ -494,32 +470,24 @@ msix_delroute(struct pic *pic, struct cpu_info *ci, int pin, int vec, int type)
 	pci_chipset_tag_t pc = NULL; /* XXX */
 	bus_space_tag_t memt = X86_BUS_SPACE_MEM; /* XXX */
 	bus_space_handle_t memh;
-	bus_addr_t base;
 	pcitag_t tag = PCI_MSIX_TAG(pin);
 	int entry = PCI_MSIX_VEC(pin);
-	pcireg_t reg, table;
+	pcireg_t reg;
 	uint32_t ctrl;
-	int bir, offset;
-	int off, tblsz;
 
-	if (pci_get_capability(pc, tag, PCI_CAP_MSIX, &off, &reg) == 0)
+	if (pci_get_capability(pc, tag, PCI_CAP_MSIX, NULL, &reg) == 0)
 		return;
 
-	table = pci_conf_read(pc, tag, off + PCI_MSIX_TABLE);
-	bir = (table & PCI_MSIX_TABLE_BIR);
-	offset = (table & PCI_MSIX_TABLE_OFF);
-	tblsz = PCI_MSIX_MC_TBLSZ(reg) + 1;
+	KASSERT(entry <= PCI_MSIX_MC_TBLSZ(reg));
 
-	bir = PCI_MAPREG_START + bir * 4;
-	if (pci_mem_find(pc, tag, bir, &base, NULL, NULL) ||
-	    _bus_space_map(memt, base + offset, tblsz * 16, 0, &memh))
-		panic("%s: cannot map registers", __func__);
+	if (pci_msix_table_map(pc, tag, memt, &memh))
+		return;
 
 	ctrl = bus_space_read_4(memt, memh, PCI_MSIX_VC(entry));
 	bus_space_write_4(memt, memh, PCI_MSIX_VC(entry),
 	    ctrl | PCI_MSIX_VC_MASK);
 
-	_bus_space_unmap(memt, memh, tblsz * 16, NULL);
+	pci_msix_table_unmap(pc, tag, memt, memh);
 }
 
 int
@@ -701,6 +669,14 @@ void *
 pci_intr_establish(pci_chipset_tag_t pc, pci_intr_handle_t ih, int level,
     int (*func)(void *), void *arg, const char *what)
 {
+	return pci_intr_establish_cpu(pc, ih, level, NULL, func, arg, what);
+}
+
+void *
+pci_intr_establish_cpu(pci_chipset_tag_t pc, pci_intr_handle_t ih,
+    int level, struct cpu_info *ci,
+    int (*func)(void *), void *arg, const char *what)
+{
 	int pin, irq;
 	int bus, dev;
 	pcitag_t tag = ih.tag;
@@ -708,11 +684,11 @@ pci_intr_establish(pci_chipset_tag_t pc, pci_intr_handle_t ih, int level,
 
 	if (ih.line & APIC_INT_VIA_MSG) {
 		return intr_establish(-1, &msi_pic, tag, IST_PULSE, level,
-		    func, arg, what);
+		    ci, func, arg, what);
 	}
 	if (ih.line & APIC_INT_VIA_MSGX) {
 		return intr_establish(-1, &msix_pic, tag, IST_PULSE, level,
-		    func, arg, what);
+		    ci, func, arg, what);
 	}
 
 	pci_decompose_tag(pc, ih.tag, &bus, &dev, NULL);
@@ -738,7 +714,8 @@ pci_intr_establish(pci_chipset_tag_t pc, pci_intr_handle_t ih, int level,
 	}
 #endif
 
-	return intr_establish(irq, pic, pin, IST_LEVEL, level, func, arg, what);
+	return intr_establish(irq, pic, pin, IST_LEVEL, level, ci,
+	    func, arg, what);
 }
 
 void

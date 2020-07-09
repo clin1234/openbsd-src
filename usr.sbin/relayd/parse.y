@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.234 2019/05/10 09:15:00 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.245 2020/05/14 17:27:38 pvk Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -75,7 +75,9 @@ int		 popfile(void);
 int		 check_file_secrecy(int, const char *);
 int		 yyparse(void);
 int		 yylex(void);
-int		 yyerror(const char *, ...);
+int		 yyerror(const char *, ...)
+    __attribute__((__format__ (printf, 1, 2)))
+    __attribute__((__nonnull__ (1)));
 int		 kw_cmp(const void *, const void *);
 int		 lookup(char *);
 int		 igetc(void);
@@ -166,15 +168,15 @@ typedef struct {
 
 %}
 
-%token	ALL APPEND BACKLOG BACKUP BUFFER CA CACHE SET CHECK CIPHERS CODE
+%token	APPEND BACKLOG BACKUP BINARY BUFFER CA CACHE SET CHECK CIPHERS CODE
 %token	COOKIE DEMOTE DIGEST DISABLE ERROR EXPECT PASS BLOCK EXTERNAL FILENAME
 %token	FORWARD FROM HASH HEADER HEADERLEN HOST HTTP ICMP INCLUDE INET INET6
-%token	INTERFACE INTERVAL IP LABEL LISTEN VALUE LOADBALANCE LOG LOOKUP METHOD
-%token	MODE NAT NO DESTINATION NODELAY NOTHING ON PARENT PATH PFTAG PORT
+%token	INTERFACE INTERVAL IP KEYPAIR LABEL LISTEN VALUE LOADBALANCE LOG LOOKUP
+%token	METHOD MODE NAT NO DESTINATION NODELAY NOTHING ON PARENT PATH PFTAG PORT
 %token	PREFORK PRIORITY PROTO QUERYSTR REAL REDIRECT RELAY REMOVE REQUEST
 %token	RESPONSE RETRY QUICK RETURN ROUNDROBIN ROUTE SACK SCRIPT SEND SESSION
 %token	SNMP SOCKET SPLICE SSL STICKYADDR STYLE TABLE TAG TAGGED TCP TIMEOUT TLS
-%token	TO ROUTER RTLABEL TRANSPARENT TRAP UPDATES URL WITH TTL RTABLE
+%token	TO ROUTER RTLABEL TRANSPARENT TRAP URL WITH TTL RTABLE
 %token	MATCH PARAMS RANDOM LEASTSTATES SRCHASH KEY CERTIFICATE PASSWORD ECDHE
 %token	EDH TICKETS CONNECTION CONNECTIONS ERRORS STATE CHANGES CHECKS
 %token	WEBSOCKETS
@@ -350,7 +352,7 @@ port		: PORT HTTP {
 		}
 		| PORT NUMBER {
 			if ($2 <= 0 || $2 > (int)USHRT_MAX) {
-				yyerror("invalid port: %d", $2);
+				yyerror("invalid port: %lld", $2);
 				YYERROR;
 			}
 			$$.val[0] = htons($2);
@@ -387,9 +389,28 @@ sendbuf		: NOTHING		{
 		}
 		;
 
+sendbinbuf	: NOTHING		{
+			table->sendbinbuf = NULL;
+		}
+		| STRING		{
+			if (strlen($1) == 0) {
+				yyerror("empty binary send data");
+				free($1);
+				YYERROR;
+			}
+			table->sendbuf = strdup($1);
+			if (table->sendbuf == NULL)
+				fatal("out of memory");
+			table->sendbinbuf = string2binary($1);
+			if (table->sendbinbuf == NULL)
+				fatal("failed in binary send data");
+			free($1);
+		}
+		;
+
 main		: INTERVAL NUMBER	{
 			if ((conf->sc_conf.interval.tv_sec = $2) < 0) {
-				yyerror("invalid interval: %d", $2);
+				yyerror("invalid interval: %lld", $2);
 				YYERROR;
 			}
 		}
@@ -403,7 +424,7 @@ main		: INTERVAL NUMBER	{
 		| PREFORK NUMBER	{
 			if ($2 <= 0 || $2 > PROC_MAX_INSTANCES) {
 				yyerror("invalid number of preforked "
-				    "relays: %d", $2);
+				    "relays: %lld", $2);
 				YYERROR;
 			}
 			conf->sc_conf.prefork_relay = $2;
@@ -434,20 +455,8 @@ main		: INTERVAL NUMBER	{
 trap		: /* nothing */		{ $$ = 0; }
 		| TRAP			{ $$ = 1; }
 
-loglevel	: UPDATES		{ /* remove 6.4-current */
-					  $$ = RELAYD_OPT_LOGUPDATE;
-					  log_warnx("log updates deprecated, "
-					      "update configuration");
-					}
-		| STATE CHANGES		{ $$ = RELAYD_OPT_LOGUPDATE; }
+loglevel	: STATE CHANGES		{ $$ = RELAYD_OPT_LOGUPDATE; }
 		| HOST CHECKS		{ $$ = RELAYD_OPT_LOGHOSTCHECK; }
-		| ALL			{ /* remove 6.4-current */
-					  $$ = (RELAYD_OPT_LOGHOSTCHECK|
-						RELAYD_OPT_LOGCON|
-						RELAYD_OPT_LOGCONERR);
-					  log_warnx("log all deprecated, "
-					      "update configuration");
-					}
 		| CONNECTION		{ $$ = (RELAYD_OPT_LOGCON |
 						RELAYD_OPT_LOGCONERR); }
 		| CONNECTION ERRORS	{ $$ = RELAYD_OPT_LOGCONERR; }
@@ -895,7 +904,7 @@ tablecheck	: ICMP			{ table->conf.check = CHECK_ICMP; }
 			}
 			table->conf.check = CHECK_HTTP_CODE;
 			if ((table->conf.retcode = $5) <= 0) {
-				yyerror("invalid HTTP code: %d", $5);
+				yyerror("invalid HTTP code: %lld", $5);
 				free($2);
 				free($3);
 				YYERROR;
@@ -949,6 +958,36 @@ tablecheck	: ICMP			{ table->conf.check = CHECK_ICMP; }
 			translate_string(table->conf.exbuf);
 			free($4);
 		}
+		| BINARY SEND sendbinbuf EXPECT STRING opttls {
+			table->conf.check = CHECK_BINSEND_EXPECT;
+			if ($6) {
+				conf->sc_conf.flags |= F_TLS;
+				table->conf.flags |= F_TLS;
+			}
+			if (strlen($5) == 0) {
+				yyerror("empty binary expect data");
+				free($5);
+				YYERROR;
+			}
+			if (strlcpy(table->conf.exbuf, $5,
+			    sizeof(table->conf.exbuf))
+			    >= sizeof(table->conf.exbuf)) {
+				yyerror("expect buffer truncated");
+				free($5);
+				YYERROR;
+			}
+			struct ibuf *ibuf = string2binary($5);
+			if (ibuf == NULL) {
+				yyerror("failed in binary expect data buffer");
+				ibuf_free(ibuf);
+				free($5);
+				YYERROR;
+			}
+			memcpy(table->conf.exbinbuf, ibuf->buf,
+			    ibuf_size(ibuf));
+			ibuf_free(ibuf);
+			free($5);
+		}
 		| SCRIPT STRING {
 			table->conf.check = CHECK_SCRIPT;
 			if (strlcpy(table->conf.path, $2,
@@ -992,7 +1031,7 @@ optdigest	: digest			{
 		;
 
 proto		: relay_proto PROTO STRING	{
-			struct protocol *p;
+			struct protocol	*p;
 
 			if (!loadcfg) {
 				free($3);
@@ -1029,6 +1068,7 @@ proto		: relay_proto PROTO STRING	{
 			p->tcpbacklog = RELAY_BACKLOG;
 			p->httpheaderlen = RELAY_DEFHEADERLENGTH;
 			TAILQ_INIT(&p->rules);
+			TAILQ_INIT(&p->tlscerts);
 			(void)strlcpy(p->tlsciphers, TLSCIPHERS_DEFAULT,
 			    sizeof(p->tlsciphers));
 			(void)strlcpy(p->tlsecdhecurves, TLSECDHECURVES_DEFAULT,
@@ -1048,7 +1088,6 @@ proto		: relay_proto PROTO STRING	{
 				yyerror("invalid TLS protocol");
 				YYERROR;
 			}
-
 			TAILQ_INSERT_TAIL(conf->sc_protos, proto, entry);
 		}
 		;
@@ -1062,10 +1101,38 @@ protopts_l	: protopts_l protoptsl nl
 		| protoptsl optnl
 		;
 
-protoptsl	: ssltls tlsflags
-		| ssltls '{' tlsflags_l '}'
-		| TCP tcpflags
-		| TCP '{' tcpflags_l '}'
+protoptsl	: ssltls {
+			if (!(proto->type == RELAY_PROTO_TCP ||
+			    proto->type == RELAY_PROTO_HTTP)) {
+				yyerror("can set tls options only for "
+				    "tcp or http protocols");
+				YYERROR;
+			}
+		} tlsflags
+		| ssltls {
+			if (!(proto->type == RELAY_PROTO_TCP ||
+			    proto->type == RELAY_PROTO_HTTP)) {
+				yyerror("can set tls options only for "
+				    "tcp or http protocols");
+				YYERROR;
+			}
+		} '{' tlsflags_l '}'
+		| TCP {
+			if (!(proto->type == RELAY_PROTO_TCP ||
+			    proto->type == RELAY_PROTO_HTTP)) {
+				yyerror("can set tcp options only for "
+				    "tcp or http protocols");
+				YYERROR;
+			}
+		} tcpflags
+		| TCP {
+			if (!(proto->type == RELAY_PROTO_TCP ||
+			    proto->type == RELAY_PROTO_HTTP)) {
+				yyerror("can set tcp options only for "
+				    "tcp or http protocols");
+				YYERROR;
+			}
+		} '{' tcpflags_l '}'
 		| HTTP {
 			if (proto->type != RELAY_PROTO_HTTP) {
 				yyerror("can set http options only for "
@@ -1093,7 +1160,7 @@ httpflags_l	: httpflags comma httpflags_l
 
 httpflags	: HEADERLEN NUMBER	{
 			if ($2 < 0 || $2 > RELAY_MAXHEADERLENGTH) {
-				yyerror("invalid headerlen: %d", $2);
+				yyerror("invalid headerlen: %lld", $2);
 				YYERROR;
 			}
 			proto->httpheaderlen = $2;
@@ -1114,7 +1181,7 @@ tcpflags	: SACK			{ proto->tcpflags |= TCPFLAG_SACK; }
 		| NO SPLICE		{ proto->tcpflags |= TCPFLAG_NSPLICE; }
 		| BACKLOG NUMBER	{
 			if ($2 < 0 || $2 > RELAY_MAX_BACKLOG) {
-				yyerror("invalid backlog: %d", $2);
+				yyerror("invalid backlog: %lld", $2);
 				YYERROR;
 			}
 			proto->tcpbacklog = $2;
@@ -1122,13 +1189,13 @@ tcpflags	: SACK			{ proto->tcpflags |= TCPFLAG_SACK; }
 		| SOCKET BUFFER NUMBER	{
 			proto->tcpflags |= TCPFLAG_BUFSIZ;
 			if ((proto->tcpbufsiz = $3) < 0) {
-				yyerror("invalid socket buffer size: %d", $3);
+				yyerror("invalid socket buffer size: %lld", $3);
 				YYERROR;
 			}
 		}
 		| IP STRING NUMBER	{
 			if ($3 < 0) {
-				yyerror("invalid ttl: %d", $3);
+				yyerror("invalid ttl: %lld", $3);
 				free($2);
 				YYERROR;
 			}
@@ -1257,6 +1324,22 @@ tlsflags	: SESSION TICKETS { proto->tickets = 1; }
 			}
 			free($3);
 		}
+		| KEYPAIR STRING		{
+			struct keyname	*name;
+
+			if (strlen($2) >= PATH_MAX) {
+				yyerror("keypair name too long");
+				free($2);
+				YYERROR;
+			}
+			if ((name = calloc(1, sizeof(*name))) == NULL) {
+				yyerror("calloc");
+				free($2);
+				YYERROR;
+			}
+			name->name = $2;
+			TAILQ_INSERT_TAIL(&proto->tlscerts, name, entry);
+		}
 		| NO flag			{ proto->tlsflags &= ~($2); }
 		| flag				{ proto->tlsflags |= $1; }
 		;
@@ -1272,6 +1355,8 @@ flag		: STRING			{
 				$$ = TLSFLAG_TLSV1_1;
 			else if (strcmp("tlsv1.2", $1) == 0)
 				$$ = TLSFLAG_TLSV1_2;
+			else if (strcmp("tlsv1.3", $1) == 0)
+				$$ = TLSFLAG_TLSV1_3;
 			else if (strcmp("cipher-server-preference", $1) == 0)
 				$$ = TLSFLAG_CIPHER_SERVER_PREF;
 			else if (strcmp("client-renegotiation", $1) == 0)
@@ -1688,18 +1773,9 @@ relay		: RELAY STRING	{
 				YYACCEPT;
 			}
 
-			TAILQ_FOREACH(r, conf->sc_relays, rl_entry)
-				if (!strcmp(r->rl_conf.name, $2))
-					break;
-			if (r != NULL) {
-				yyerror("relay %s defined twice", $2);
-				free($2);
-				YYERROR;
-			}
-			TAILQ_INIT(&relays);
-
 			if ((r = calloc(1, sizeof (*r))) == NULL)
 				fatal("out of memory");
+			TAILQ_INIT(&relays);
 
 			if (strlcpy(r->rl_conf.name, $2,
 			    sizeof(r->rl_conf.name)) >=
@@ -1719,7 +1795,6 @@ relay		: RELAY STRING	{
 			r->rl_proto = NULL;
 			r->rl_conf.proto = EMPTY_ID;
 			r->rl_conf.dstretry = 0;
-			r->rl_tls_cert_fd = -1;
 			r->rl_tls_ca_fd = -1;
 			r->rl_tls_cacert_fd = -1;
 			TAILQ_INIT(&r->rl_tables);
@@ -1731,7 +1806,16 @@ relay		: RELAY STRING	{
 			dstmode = RELAY_DSTMODE_DEFAULT;
 			rlay = r;
 		} '{' optnl relayopts_l '}'	{
-			struct relay	*r;
+			struct relay		*r;
+			struct relay_config	*rlconf = &rlay->rl_conf;
+			struct keyname		*name;
+
+			if (relay_findbyname(conf, rlconf->name) != NULL ||
+			    relay_findbyaddr(conf, rlconf) != NULL) {
+				yyerror("relay %s or listener defined twice",
+				    rlconf->name);
+				YYERROR;
+			}
 
 			if (rlay->rl_conf.ss.ss_family == AF_UNSPEC) {
 				yyerror("relay %s has no listener",
@@ -1755,11 +1839,23 @@ relay		: RELAY STRING	{
 				rlay->rl_proto = &conf->sc_proto_default;
 				rlay->rl_conf.proto = conf->sc_proto_default.id;
 			}
-			if (relay_load_certfiles(rlay) == -1) {
+
+			if (TAILQ_EMPTY(&rlay->rl_proto->tlscerts) &&
+			    relay_load_certfiles(conf, rlay, NULL) == -1) {
 				yyerror("cannot load certificates for relay %s",
 				    rlay->rl_conf.name);
 				YYERROR;
 			}
+			TAILQ_FOREACH(name, &rlay->rl_proto->tlscerts, entry) {
+				if (relay_load_certfiles(conf,
+				    rlay, name->name) == -1) {
+					yyerror("cannot load keypair %s"
+					    " for relay %s", name->name,
+					    rlay->rl_conf.name);
+					YYERROR;
+				}
+			}
+
 			conf->sc_relaycount++;
 			SPLAY_INIT(&rlay->rl_sessions);
 			TAILQ_INSERT_TAIL(conf->sc_relays, rlay, rl_entry);
@@ -1838,6 +1934,11 @@ relayoptsl	: LISTEN ON STRING port opttls {
 		| PROTO STRING			{
 			struct protocol *p;
 
+			if (rlay->rl_conf.proto != EMPTY_ID) {
+				yyerror("more than one protocol specified");
+				YYERROR;
+			}
+				
 			TAILQ_FOREACH(p, conf->sc_protos, entry)
 				if (!strcmp(p->name, $2))
 					break;
@@ -1873,7 +1974,7 @@ forwardspec	: STRING port retry	{
 
 			TAILQ_INIT(&al);
 			if (host($1, &al, 1, &$2, NULL, -1) <= 0) {
-				yyerror("invalid listen ip: %s", $1);
+				yyerror("invalid forward ip: %s", $1);
 				free($1);
 				YYERROR;
 			}
@@ -2044,7 +2145,7 @@ routeoptsl	: ROUTE addrprefix {
 				YYERROR;
 			}
 			if ($2 < 0 || $2 > RT_TABLEID_MAX) {
-				yyerror("invalid rtable id %d", $2);
+				yyerror("invalid rtable id %lld", $2);
 				YYERROR;
 			}
 			router->rt_conf.rtable = $2;
@@ -2122,7 +2223,7 @@ hostflags	: RETRY NUMBER		{
 				YYERROR;
 			}
 			if ($2 < 0) {
-				yyerror("invalid retry value: %d\n", $2);
+				yyerror("invalid retry value: %lld\n", $2);
 				YYERROR;
 			}
 			hst->conf.retry = $2;
@@ -2133,7 +2234,7 @@ hostflags	: RETRY NUMBER		{
 				YYERROR;
 			}
 			if ($2 < 0) {
-				yyerror("invalid parent value: %d\n", $2);
+				yyerror("invalid parent value: %lld\n", $2);
 				YYERROR;
 			}
 			hst->conf.parentid = $2;
@@ -2144,7 +2245,7 @@ hostflags	: RETRY NUMBER		{
 				YYERROR;
 			}
 			if ($2 < 0 || $2 > RTP_MAX) {
-				yyerror("invalid priority value: %d\n", $2);
+				yyerror("invalid priority value: %lld\n", $2);
 				YYERROR;
 			}
 			hst->conf.priority = $2;
@@ -2155,7 +2256,7 @@ hostflags	: RETRY NUMBER		{
 				YYERROR;
 			}
 			if ($3 < 0) {
-				yyerror("invalid ttl value: %d\n", $3);
+				yyerror("invalid ttl value: %lld\n", $3);
 				YYERROR;
 			}
 			hst->conf.ttl = $3;
@@ -2192,7 +2293,7 @@ addrprefix	: address '/' NUMBER 		{
 			    ($3 > 32 || $3 < 0)) ||
 			    ($$.ss.ss_family == AF_INET6 &&
 			    ($3 > 128 || $3 < 0))) {
-				yyerror("invalid prefixlen %d", $3);
+				yyerror("invalid prefixlen %lld", $3);
 				YYERROR;
 			}
 			$$.prefixlen = $3;
@@ -2209,7 +2310,7 @@ addrprefix	: address '/' NUMBER 		{
 retry		: /* empty */		{ $$ = 0; }
 		| RETRY NUMBER		{
 			if (($$ = $2) < 0) {
-				yyerror("invalid retry value: %d\n", $2);
+				yyerror("invalid retry value: %lld\n", $2);
 				YYERROR;
 			}
 		}
@@ -2218,7 +2319,7 @@ retry		: /* empty */		{ $$ = 0; }
 timeout		: NUMBER
 		{
 			if ($1 < 0) {
-				yyerror("invalid timeout: %d\n", $1);
+				yyerror("invalid timeout: %lld\n", $1);
 				YYERROR;
 			}
 			$$.tv_sec = $1 / 1000;
@@ -2275,10 +2376,10 @@ lookup(char *s)
 {
 	/* this has to be sorted always */
 	static const struct keywords keywords[] = {
-		{ "all",		ALL },
 		{ "append",		APPEND },
 		{ "backlog",		BACKLOG },
 		{ "backup",		BACKUP },
+		{ "binary",		BINARY },
 		{ "block",		BLOCK },
 		{ "buffer",		BUFFER },
 		{ "ca",			CA },
@@ -2317,6 +2418,7 @@ lookup(char *s)
 		{ "interval",		INTERVAL },
 		{ "ip",			IP },
 		{ "key",		KEY },
+		{ "keypair",		KEYPAIR },
 		{ "label",		LABEL },
 		{ "least-states",	LEASTSTATES },
 		{ "listen",		LISTEN },
@@ -2381,7 +2483,6 @@ lookup(char *s)
 		{ "transparent",	TRANSPARENT },
 		{ "trap",		TRAP },
 		{ "ttl",		TTL },
-		{ "updates",		UPDATES },
 		{ "url",		URL },
 		{ "value",		VALUE },
 		{ "websockets",		WEBSOCKETS },
@@ -2859,6 +2960,8 @@ load_config(const char *filename, struct relayd *x_conf)
 			}
 			if (table->sendbuf != NULL)
 				free(table->sendbuf);
+			if (table->sendbinbuf != NULL)
+				ibuf_free(table->sendbinbuf);
 			free(table);
 			continue;
 		}
@@ -3268,11 +3371,8 @@ relay_inherit(struct relay *ra, struct relay *rb)
 	rb->rl_conf.flags =
 	    (ra->rl_conf.flags & ~F_TLS) | (rc.flags & F_TLS);
 	if (!(rb->rl_conf.flags & F_TLS)) {
-		rb->rl_tls_cert_fd = -1;
 		rb->rl_tls_cacert_fd = -1;
 		rb->rl_tls_ca_fd = -1;
-		rb->rl_tls_key = NULL;
-		rb->rl_conf.tls_key_len = 0;
 	}
 	TAILQ_INIT(&rb->rl_tables);
 
@@ -3290,10 +3390,12 @@ relay_inherit(struct relay *ra, struct relay *rb)
 
 	if (relay_findbyname(conf, rb->rl_conf.name) != NULL ||
 	    relay_findbyaddr(conf, &rb->rl_conf) != NULL) {
-		yyerror("relay %s defined twice", rb->rl_conf.name);
+		yyerror("relay %s or listener defined twice",
+		    rb->rl_conf.name);
 		goto err;
 	}
-	if (relay_load_certfiles(rb) == -1) {
+
+	if (relay_load_certfiles(conf, rb, NULL) == -1) {
 		yyerror("cannot load certificates for relay %s",
 		    rb->rl_conf.name);
 		goto err;
@@ -3357,7 +3459,7 @@ is_if_in_group(const char *ifname, const char *groupname)
 	int			 s;
 	int			 ret = 0;
 
-	if ((s = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+	if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == -1)
 		err(1, "socket");
 
 	memset(&ifgr, 0, sizeof(ifgr));

@@ -1,4 +1,4 @@
-/*	$OpenBSD: msdosfs_denode.c,v 1.63 2018/05/27 06:02:14 visa Exp $	*/
+/*	$OpenBSD: msdosfs_denode.c,v 1.66 2020/02/27 09:10:31 mpi Exp $	*/
 /*	$NetBSD: msdosfs_denode.c,v 1.23 1997/10/17 11:23:58 ws Exp $	*/
 
 /*-
@@ -183,7 +183,7 @@ deget(struct msdosfsmount *pmp, uint32_t dirclust, uint32_t diroffset,
     struct denode **depp)
 {
 	int error;
-	extern struct vops msdosfs_vops;
+	extern const struct vops msdosfs_vops;
 	struct direntry *direntptr;
 	struct denode *ldep;
 	struct vnode *nvp;
@@ -476,7 +476,7 @@ detrunc(struct denode *dep, uint32_t length, int flags, struct ucred *cred,
 	if (!isadir)
 		dep->de_flag |= DE_UPDATE|DE_MODIFIED;
 	vflags = (length > 0 ? V_SAVE : 0) | V_SAVEMETA;
-	vinvalbuf(DETOV(dep), vflags, cred, p, 0, 0);
+	vinvalbuf(DETOV(dep), vflags, cred, p, 0, INFSLP);
 	allerror = deupdat(dep, 1);
 #ifdef MSDOSFS_DEBUG
 	printf("detrunc(): allerror %d, eofentry %d\n",
@@ -620,7 +620,6 @@ msdosfs_inactive(void *v)
 	struct vop_inactive_args *ap = v;
 	struct vnode *vp = ap->a_vp;
 	struct denode *dep = VTODE(vp);
-	struct proc *p = ap->a_p;
 	int error;
 #ifdef DIAGNOSTIC
 	extern int prtactive;
@@ -669,6 +668,6 @@ out:
 	    vp->v_usecount, dep->de_Name[0]);
 #endif
 	if (dep->de_Name[0] == SLOT_DELETED)
-		vrecycle(vp, p);
+		vrecycle(vp, ap->a_p);
 	return (error);
 }

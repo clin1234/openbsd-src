@@ -1,4 +1,4 @@
-/*	$OpenBSD: amdpm.c,v 1.33 2018/04/28 15:44:59 jasper Exp $	*/
+/*	$OpenBSD: amdpm.c,v 1.36 2020/07/06 13:33:09 pirofti Exp $	*/
 
 /*
  * Copyright (c) 2006 Alexander Yurchenko <grange@openbsd.org>
@@ -59,7 +59,6 @@
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcidevs.h>
 
-#include <dev/rndvar.h>
 #include <dev/i2c/i2cvar.h>
 
 #ifdef AMDPM_DEBUG
@@ -83,7 +82,9 @@ static struct timecounter amdpm_timecounter = {
 	0xffffff,		/* counter_mask */
 	AMDPM_FREQUENCY,	/* frequency */
 	"AMDPM",		/* name */
-	1000			/* quality */
+	1000,			/* quality */
+	NULL,			/* private bits */
+	0,			/* expose to user */
 };
 
 #define	AMDPM_CONFREG	0x40
@@ -485,7 +486,8 @@ amdpm_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr,
 		amdpm_intr(sc);
 	} else {
 		/* Wait for interrupt */
-		if (tsleep(sc, PRIBIO, "amdpm", AMDPM_SMBUS_TIMEOUT * hz))
+		if (tsleep_nsec(sc, PRIBIO, "amdpm",
+		    SEC_TO_NSEC(AMDPM_SMBUS_TIMEOUT)))
 			goto timeout;
 	}
 

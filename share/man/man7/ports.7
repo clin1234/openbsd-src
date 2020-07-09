@@ -23,10 +23,10 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
-.\" $OpenBSD: ports.7,v 1.125 2019/03/10 21:31:49 jmc Exp $
+.\" $OpenBSD: ports.7,v 1.128 2020/04/28 13:11:32 espie Exp $
 .\" $FreeBSD: ports.7,v 1.7 1998/06/23 04:38:50 hoek Exp $
 .\"
-.Dd $Mdocdate: March 10 2019 $
+.Dd $Mdocdate: April 28 2020 $
 .Dt PORTS 7
 .Os
 .Sh NAME
@@ -90,7 +90,7 @@ that builds an sqlite database containing most information relevant to
 every port in the ports tree.
 This database can be searched using any tool able to manipulate such
 databases, for instance sqlitebrowser, or a script language with an
-sqlite interface, e.g., perl, python, ocaml, lua, php5.
+sqlite interface, e.g., perl, python, ocaml, lua, php.
 .Pp
 All static index generating information has now been superseded by the
 .Pa sqlports ,
@@ -618,11 +618,23 @@ Normally
 If set,
 try to use as options to
 .Xr pkg_add 1
-to install the missing packages from
+to install missing packages from
 .Ev PKG_PATH .
-For instance:
+.Xr bsd.port.mk 5
+does not set
+.Ev FETCH_PACKAGES ,
+so even an empty value amounts to setting the variable.
+.Pp
+For instance, to run
+.Xr pkg_add 1
+with default options :
 .Bd -literal -offset indent
 make FETCH_PACKAGES=
+.Ed
+.Pp
+or, to use the snapshots directory during the final beta period:
+.Bd -literal -offset indent
+make FETCH_PACKAGES=-Dsnap
 .Ed
 .It Ev PATCH_DEBUG
 If defined, display verbose output when applying each patch.
@@ -641,7 +653,7 @@ Set
 .Ev UPDATE_COOKIES_DIR ,
 .Ev DISTDIR ,
 and
-.Ev PLIST_DB
+.Ev PLIST_REPOSITORY
 in
 .Pa /etc/mk.conf
 accordingly.

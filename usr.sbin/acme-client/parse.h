@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.h,v 1.9 2017/11/27 16:53:04 sthen Exp $ */
+/*	$OpenBSD: parse.h,v 1.14 2020/05/10 12:06:18 benno Exp $ */
 /*
  * Copyright (c) 2016 Sebastian Benoit <benno@openbsd.org>
  *
@@ -27,24 +27,32 @@
  * limit all paths to PATH_MAX
  */
 
+enum keytype {
+	KT_RSA = 0,
+	KT_ECDSA
+};
+
 struct authority_c {
 	TAILQ_ENTRY(authority_c)	 entry;
-	char		       	*name;
-	char		       	*api;
-	char		       	*account;
+	char				*name;
+	char				*api;
+	char				*account;
+	enum keytype			 keytype;
 };
 
 struct domain_c {
 	TAILQ_ENTRY(domain_c)	 entry;
-	TAILQ_HEAD(, altname_c)	altname_list;
-	int			altname_count;
-	char		       	*domain;
-	char		       	*key;
-	char		       	*cert;
+	TAILQ_HEAD(, altname_c)	 altname_list;
+	int			 altname_count;
+	enum keytype		 keytype;
+	char			*handle;
+	char			*domain;
+	char			*key;
+	char			*cert;
 	char			*chain;
 	char			*fullchain;
-	char		       	*auth;
-	char		       	*challengedir;
+	char			*auth;
+	char			*challengedir;
 };
 
 struct altname_c {
@@ -58,9 +66,7 @@ struct keyfile {
 };
 
 #define ACME_OPT_VERBOSE	0x00000001
-#define ACME_OPT_NEWACCT	0x00000002
-#define ACME_OPT_NEWDKEY	0x00000004
-#define ACME_OPT_CHECK		0x00000008
+#define ACME_OPT_CHECK		0x00000004
 
 struct acme_conf {
 	int			 opts;
@@ -75,7 +81,7 @@ int			 cmdline_symset(char *);
 /* use these to find a authority or domain by name */
 struct authority_c	*authority_find(struct acme_conf *, char *);
 struct authority_c	*authority_find0(struct acme_conf *);
-struct domain_c		*domain_find(struct acme_conf *, char *);
+struct domain_c		*domain_find_handle(struct acme_conf *, char *);
 
 int			 domain_valid(const char *);
 

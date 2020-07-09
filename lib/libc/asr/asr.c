@@ -1,4 +1,4 @@
-/*	$OpenBSD: asr.c,v 1.61 2018/10/22 17:31:24 krw Exp $	*/
+/*	$OpenBSD: asr.c,v 1.64 2020/07/06 13:33:05 pirofti Exp $	*/
 /*
  * Copyright (c) 2010-2012 Eric Faurot <eric@openbsd.org>
  *
@@ -109,10 +109,14 @@ _asr_resolver(void)
 void
 _asr_resolver_done(void *arg)
 {
-	struct asr *asr = arg;
+	struct asr_ctx *ac = arg;
+	struct asr *asr;
 	struct asr **priv;
 
-	if (asr == NULL) {
+	if (ac) {
+		_asr_ctx_unref(ac);
+		return;
+	} else {
 		priv = _THREAD_PRIVATE(_asr, _asr, &_asr);
 		if (*priv == NULL)
 			return;
@@ -123,6 +127,30 @@ _asr_resolver_done(void *arg)
 	_asr_ctx_unref(asr->a_ctx);
 	free(asr);
 }
+
+void *
+asr_resolver_from_string(const char *str)
+{
+	struct asr_ctx *ac;
+
+	if ((ac = asr_ctx_create()) == NULL)
+		return NULL;
+
+	if (asr_ctx_from_string(ac, str) == -1) {
+		asr_ctx_free(ac);
+		return NULL;
+	}
+
+	return ac;
+}
+DEF_WEAK(asr_resolver_from_string);
+
+void
+asr_resolver_free(void *arg)
+{
+	_asr_ctx_unref(arg);
+}
+DEF_WEAK(asr_resolver_free);
 
 /*
  * Cancel an async query.
@@ -142,6 +170,8 @@ int
 asr_run(struct asr_query *as, struct asr_result *ar)
 {
 	int	r, saved_errno = errno;
+
+	memset(ar, 0, sizeof(*ar));
 
 	DPRINT("asr: asr_run(%p, %p) %s ctx=[%p]\n", as, ar,
 	    _asr_querystr(as->as_type), as->as_ctx);
@@ -168,11 +198,11 @@ poll_intrsafe(struct pollfd *fds, nfds_t nfds, int timeout)
 	struct timespec pollstart, pollend, elapsed;
 	int r;
 
-	if (clock_gettime(CLOCK_MONOTONIC, &pollstart))
+	if (WRAP(clock_gettime)(CLOCK_MONOTONIC, &pollstart))
 		return -1;
 
 	while ((r = poll(fds, 1, timeout)) == -1 && errno == EINTR) {
-		if (clock_gettime(CLOCK_MONOTONIC, &pollend))
+		if (WRAP(clock_gettime)(CLOCK_MONOTONIC, &pollend))
 			return -1;
 		timespecsub(&pollend, &pollstart, &elapsed);
 		timeout -= elapsed.tv_sec * 1000 + elapsed.tv_nsec / 1000000;
@@ -309,10 +339,15 @@ _asr_async_free(struct asr_query *as)
 struct asr_ctx *
 _asr_use_resolver(void *arg)
 {
-	struct asr *asr = arg;
+	struct asr_ctx *ac = arg;
+	struct asr *asr;
 	struct asr **priv;
 
-	if (asr == NULL) {
+	if (ac) {
+		asr_ctx_ref(ac);
+		return ac;
+	}
+	else {
 		DPRINT("using thread-local resolver\n");
 		priv = _THREAD_PRIVATE(_asr, _asr, &_asr);
 		if (*priv == NULL) {
@@ -385,7 +420,7 @@ asr_check_reload(struct asr *asr)
 		asr->a_rtime = 0;
 	}
 
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) == -1)
+	if (WRAP(clock_gettime)(CLOCK_MONOTONIC, &ts) == -1)
 		return;
 
 	if ((ts.tv_sec - asr->a_rtime) < RELOAD_DELAY && asr->a_rtime != 0)

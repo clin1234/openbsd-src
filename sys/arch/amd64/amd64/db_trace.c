@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_trace.c,v 1.43 2019/02/02 14:32:58 visa Exp $	*/
+/*	$OpenBSD: db_trace.c,v 1.53 2020/05/14 06:58:54 mpi Exp $	*/
 /*	$NetBSD: db_trace.c,v 1.1 2003/04/26 18:39:27 fvdl Exp $	*/
 
 /*
@@ -30,6 +30,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
+#include <sys/stacktrace.h>
 #include <sys/user.h>
 
 #include <machine/db_machdep.h>
@@ -84,15 +85,15 @@ const unsigned long *db_reg_args[6] = {
 };
 
 void
-db_stack_trace_print(db_expr_t addr, boolean_t have_addr, db_expr_t count,
+db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
     char *modif, int (*pr)(const char *, ...))
 {
 	struct callframe *frame, *lastframe;
 	unsigned long	*argp, *arg0;
-	db_addr_t	callpc;
+	vaddr_t		callpc;
 	unsigned int	cr4save = CR4_SMEP|CR4_SMAP;
-	boolean_t	kernel_only = TRUE;
-	boolean_t	trace_proc = FALSE;
+	int		kernel_only = 1;
+	int		trace_proc = 0;
 	struct proc	*p;
 
 	{
@@ -100,10 +101,10 @@ db_stack_trace_print(db_expr_t addr, boolean_t have_addr, db_expr_t count,
 		char c;
 
 		while ((c = *cp++) != 0) {
-			if (c == 'p')
-				trace_proc = TRUE;
+			if (c == 't')
+				trace_proc = 1;
 			if (c == 'u')
-				kernel_only = FALSE;
+				kernel_only = 0;
 		}
 	}
 
@@ -121,16 +122,16 @@ db_stack_trace_print(db_expr_t addr, boolean_t have_addr, db_expr_t count,
 
 	if (!have_addr) {
 		frame = (struct callframe *)ddb_regs.tf_rbp;
-		callpc = (db_addr_t)ddb_regs.tf_rip;
+		callpc = (vaddr_t)ddb_regs.tf_rip;
 	} else if (trace_proc) {
 		frame = (struct callframe *)p->p_addr->u_pcb.pcb_rbp;
-		callpc = (db_addr_t)
-		    db_get_value((db_addr_t)&frame->f_retaddr, 8, FALSE);
+		callpc = (vaddr_t)
+		    db_get_value((vaddr_t)&frame->f_retaddr, 8, 0);
 		frame = (struct callframe *)frame->f_frame;
 	} else {
 		frame = (struct callframe *)addr;
-		callpc = (db_addr_t)
-		    db_get_value((db_addr_t)&frame->f_retaddr, 8, FALSE);
+		callpc = (vaddr_t)
+		    db_get_value((vaddr_t)&frame->f_retaddr, 8, 0);
 		frame = (struct callframe *)frame->f_frame;
 	}
 
@@ -150,13 +151,13 @@ db_stack_trace_print(db_expr_t addr, boolean_t have_addr, db_expr_t count,
 			name = NULL;
 		}
 
-		if (lastframe == 0 && sym == NULL) {
+		if (lastframe == 0 && sym == NULL && callpc != 0) {
 			/* Symbol not found, peek at code */
-			unsigned long instr = db_get_value(callpc, 8, FALSE);
+			unsigned long instr = db_get_value(callpc, 8, 0);
 
 			offset = 1;
 			if (instr == 0xe5894855 ||
-					/* enter: pushl %rbp, movq %rsp, %rbp */
+					/* enter: pushq %rbp, movq %rsp, %rbp */
 			    (instr & 0x00ffffff) == 0x00e58948
 					/* enter+1: movq %rsp, %rbp */) {
 				offset = 0;
@@ -187,8 +188,8 @@ db_stack_trace_print(db_expr_t addr, boolean_t have_addr, db_expr_t count,
 			argp = (unsigned long *)frame;
 			for (i = narg; i > 0; i--) {
 				argp--;
-				(*pr)("%lx", db_get_value((db_addr_t)argp,
-				    sizeof(*argp), FALSE));
+				(*pr)("%lx", db_get_value((vaddr_t)argp,
+				    sizeof(*argp), 0));
 				if (--narg != 0)
 					(*pr)(",");
 			}
@@ -197,8 +198,8 @@ db_stack_trace_print(db_expr_t addr, boolean_t have_addr, db_expr_t count,
 		}
 
 		for (argp = arg0; narg > 0; ) {
-			(*pr)("%lx", db_get_value((db_addr_t)argp,
-			    sizeof(*argp), FALSE));
+			(*pr)("%lx", db_get_value((vaddr_t)argp,
+			    sizeof(*argp), 0));
 			argp++;
 			if (--narg != 0)
 				(*pr)(",");
@@ -210,17 +211,17 @@ db_stack_trace_print(db_expr_t addr, boolean_t have_addr, db_expr_t count,
 		if (lastframe == 0 && offset == 0 && !have_addr) {
 			/* Frame really belongs to next callpc */
 			lastframe = (struct callframe *)(ddb_regs.tf_rsp-8);
-			callpc = (db_addr_t)
-				 db_get_value((db_addr_t)&lastframe->f_retaddr,
-				    8, FALSE);
+			callpc = (vaddr_t)
+				 db_get_value((vaddr_t)&lastframe->f_retaddr,
+				    8, 0);
 			continue;
 		}
 
 		lastframe = frame;
-		callpc = (db_addr_t)db_get_value(
-		    (db_addr_t)&frame->f_retaddr, 8, FALSE);
+		callpc = (vaddr_t)db_get_value(
+		    (vaddr_t)&frame->f_retaddr, 8, 0);
 		frame = (struct callframe *)db_get_value(
-		    (db_addr_t)&frame->f_frame, 8, FALSE);
+		    (vaddr_t)&frame->f_frame, 8, 0);
 
 		if (frame == 0) {
 			/* end of chain */
@@ -255,21 +256,32 @@ db_stack_trace_print(db_expr_t addr, boolean_t have_addr, db_expr_t count,
 }
 
 void
-db_save_stack_trace(struct db_stack_trace *st)
+stacktrace_save_at(struct stacktrace *st, unsigned int skip)
 {
-	struct callframe *frame, *lastframe;
+	struct callframe *frame, *lastframe, *limit;
+	struct pcb *pcb = curpcb;
+
+	st->st_count = 0;
+
+	if (pcb == NULL)
+		return;
 
 	frame = __builtin_frame_address(0);
-	st->st_count = 0;
-	while (st->st_count < DB_STACK_TRACE_MAX) {
-		st->st_pc[st->st_count++] = frame->f_retaddr;
+	KASSERT(INKERNEL(frame));
+	limit = (struct callframe *)((struct trapframe *)pcb->pcb_kstack - 1);
+
+	while (st->st_count < STACKTRACE_MAX) {
+		if (skip == 0)
+			st->st_pc[st->st_count++] = frame->f_retaddr;
+		else
+			skip--;
 
 		lastframe = frame;
 		frame = frame->f_frame;
 
-		if (!INKERNEL(frame))
-			break;
 		if (frame <= lastframe)
+			break;
+		if (frame >= limit)
 			break;
 		if (!INKERNEL(frame->f_retaddr))
 			break;
@@ -281,7 +293,7 @@ db_get_pc(struct trapframe *tf)
 {
 	struct callframe *cf = (struct callframe *)(tf->tf_rsp - sizeof(long));
 
-	return db_get_value((db_addr_t)&cf->f_retaddr, sizeof(long), 0);
+	return db_get_value((vaddr_t)&cf->f_retaddr, sizeof(long), 0);
 }
 
 vaddr_t

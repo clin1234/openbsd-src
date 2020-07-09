@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_log.c,v 1.56 2018/07/30 12:22:14 mpi Exp $	*/
+/*	$OpenBSD: subr_log.c,v 1.66 2020/04/07 13:27:51 visa Exp $	*/
 /*	$NetBSD: subr_log.c,v 1.11 1996/03/30 22:24:44 christos Exp $	*/
 
 /*
@@ -52,6 +52,7 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/fcntl.h>
+#include <sys/timeout.h>
 
 #ifdef KTRACE
 #include <sys/ktrace.h>
@@ -63,6 +64,7 @@
 #include <dev/cons.h>
 
 #define LOG_RDPRI	(PZERO + 1)
+#define LOG_TICK	50		/* log tick interval in msec */
 
 #define LOG_ASYNC	0x04
 #define LOG_RDWAIT	0x08
@@ -70,9 +72,9 @@
 struct logsoftc {
 	int	sc_state;		/* see above for possibilities */
 	struct	selinfo sc_selp;	/* process waiting on select call */
-	int	sc_pgid;		/* process/group for async I/O */
-	uid_t	sc_siguid;		/* uid for process that set sc_pgid */
-	uid_t	sc_sigeuid;		/* euid for process that set sc_pgid */
+	struct	sigio_ref sc_sigio;	/* async I/O registration */
+	int	sc_need_wakeup;		/* if set, wake up waiters */
+	struct timeout sc_tick;		/* wakeup poll timeout */
 } logsoftc;
 
 int	log_open;			/* also used in log() */
@@ -84,10 +86,15 @@ struct	file *syslogf;
 void filt_logrdetach(struct knote *kn);
 int filt_logread(struct knote *kn, long hint);
 
-struct filterops logread_filtops =
-	{ 1, NULL, filt_logrdetach, filt_logread};
+const struct filterops logread_filtops = {
+	.f_flags	= FILTEROP_ISFD,
+	.f_attach	= NULL,
+	.f_detach	= filt_logrdetach,
+	.f_event	= filt_logread,
+};
 
 int dosendsyslog(struct proc *, const char *, size_t, int, enum uio_seg);
+void logtick(void *);
 
 void
 initmsgbuf(caddr_t buf, size_t bufsize)
@@ -127,15 +134,10 @@ initmsgbuf(caddr_t buf, size_t bufsize)
 void
 initconsbuf(void)
 {
-	long new_bufs;
-
 	/* Set up a buffer to collect /dev/console output */
-	consbufp = malloc(CONSBUFSIZE, M_TEMP, M_NOWAIT|M_ZERO);
-	if (consbufp) {
-		new_bufs = CONSBUFSIZE - offsetof(struct msgbuf, msg_bufc);
-		consbufp->msg_magic = MSG_MAGIC;
-		consbufp->msg_bufs = new_bufs;
-	}
+	consbufp = malloc(CONSBUFSIZE, M_TTYS, M_WAITOK | M_ZERO);
+	consbufp->msg_magic = MSG_MAGIC;
+	consbufp->msg_bufs = CONSBUFSIZE - offsetof(struct msgbuf, msg_bufc);
 }
 
 void
@@ -167,6 +169,9 @@ logopen(dev_t dev, int flags, int mode, struct proc *p)
 	if (log_open)
 		return (EBUSY);
 	log_open = 1;
+	sigio_init(&logsoftc.sc_sigio);
+	timeout_set(&logsoftc.sc_tick, logtick, NULL);
+	timeout_add_msec(&logsoftc.sc_tick, LOG_TICK);
 	return (0);
 }
 
@@ -180,7 +185,9 @@ logclose(dev_t dev, int flag, int mode, struct proc *p)
 	if (fp)
 		FRELE(fp, p);
 	log_open = 0;
+	timeout_del(&logsoftc.sc_tick);
 	logsoftc.sc_state = 0;
+	sigio_free(&logsoftc.sc_sigio);
 	return (0);
 }
 
@@ -198,8 +205,7 @@ logread(dev_t dev, struct uio *uio, int flag)
 			goto out;
 		}
 		logsoftc.sc_state |= LOG_RDWAIT;
-		error = tsleep(mbp, LOG_RDPRI | PCATCH,
-			       "klog", 0);
+		error = tsleep_nsec(mbp, LOG_RDPRI | PCATCH, "klog", INFSLP);
 		if (error)
 			goto out;
 	}
@@ -272,7 +278,7 @@ logkqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = (void *)msgbufp;
 
 	s = splhigh();
-	SLIST_INSERT_HEAD(klist, kn, kn_selnext);
+	klist_insert(klist, kn);
 	splx(s);
 
 	return (0);
@@ -284,7 +290,7 @@ filt_logrdetach(struct knote *kn)
 	int s;
 
 	s = splhigh();
-	SLIST_REMOVE(&logsoftc.sc_selp.si_note, kn, knote, kn_selnext);
+	klist_remove(&logsoftc.sc_selp.si_note, kn);
 	splx(s);
 }
 
@@ -304,16 +310,47 @@ filt_logread(struct knote *kn, long hint)
 void
 logwakeup(void)
 {
+	/*
+	 * The actual wakeup has to be deferred because logwakeup() can be
+	 * called in very varied contexts.
+	 * Keep the print routines usable in as many situations as possible
+	 * by not using locking here.
+	 */
+
+	/*
+	 * Ensure that preceding stores become visible to other CPUs
+	 * before the flag.
+	 */
+	membar_producer();
+
+	logsoftc.sc_need_wakeup = 1;
+}
+
+void
+logtick(void *arg)
+{
 	if (!log_open)
 		return;
+
+	if (!logsoftc.sc_need_wakeup)
+		goto out;
+	logsoftc.sc_need_wakeup = 0;
+
+	/*
+	 * sc_need_wakeup has to be cleared before handling the wakeup.
+	 * This ensures that no wakeup is lost.
+	 */
+	membar_enter();
+
 	selwakeup(&logsoftc.sc_selp);
 	if (logsoftc.sc_state & LOG_ASYNC)
-		csignal(logsoftc.sc_pgid, SIGIO,
-		    logsoftc.sc_siguid, logsoftc.sc_sigeuid);
+		pgsigio(&logsoftc.sc_sigio, SIGIO, 0);
 	if (logsoftc.sc_state & LOG_RDWAIT) {
 		wakeup(msgbufp);
 		logsoftc.sc_state &= ~LOG_RDWAIT;
 	}
+out:
+	timeout_add_msec(&logsoftc.sc_tick, LOG_TICK);
 }
 
 int
@@ -345,14 +382,13 @@ logioctl(dev_t dev, u_long com, caddr_t data, int flag, struct proc *p)
 			logsoftc.sc_state &= ~LOG_ASYNC;
 		break;
 
+	case FIOSETOWN:
 	case TIOCSPGRP:
-		logsoftc.sc_pgid = *(int *)data;
-		logsoftc.sc_siguid = p->p_ucred->cr_ruid;
-		logsoftc.sc_sigeuid = p->p_ucred->cr_uid;
-		break;
+		return (sigio_setown(&logsoftc.sc_sigio, com, data));
 
+	case FIOGETOWN:
 	case TIOCGPGRP:
-		*(int *)data = logsoftc.sc_pgid;
+		sigio_getown(&logsoftc.sc_sigio, com, data);
 		break;
 
 	case LIOCSFD:
@@ -413,8 +449,7 @@ dosendsyslog(struct proc *p, const char *buf, size_t nbyte, int flags,
     enum uio_seg sflg)
 {
 #ifdef KTRACE
-	struct iovec *ktriov = NULL;
-	int iovlen;
+	struct iovec ktriov;
 #endif
 	struct file *fp;
 	char pri[6], *kbuf;
@@ -470,13 +505,10 @@ dosendsyslog(struct proc *p, const char *buf, size_t nbyte, int flags,
 	auio.uio_offset = 0;
 	auio.uio_resid = aiov.iov_len;
 #ifdef KTRACE
-	if (KTRPOINT(p, KTR_GENIO)) {
-		ktriov = mallocarray(auio.uio_iovcnt, sizeof(struct iovec),
-		    M_TEMP, M_WAITOK);
-		iovlen = auio.uio_iovcnt * sizeof (struct iovec);
-
-		memcpy(ktriov, auio.uio_iov, iovlen);
-	}
+	if (sflg == UIO_USERSPACE && KTRPOINT(p, KTR_GENIO))
+		ktriov = aiov;
+	else
+		ktriov.iov_len = 0;
 #endif
 
 	len = auio.uio_resid;
@@ -523,11 +555,8 @@ dosendsyslog(struct proc *p, const char *buf, size_t nbyte, int flags,
 	}
 
 #ifdef KTRACE
-	if (ktriov != NULL) {
-		if (error == 0)
-			ktrgenio(p, -1, UIO_WRITE, ktriov, len);
-		free(ktriov, M_TEMP, iovlen);
-	}
+	if (error == 0 && ktriov.iov_len != 0)
+		ktrgenio(p, -1, UIO_WRITE, &ktriov, len);
 #endif
 	if (fp)
 		FRELE(fp, p);

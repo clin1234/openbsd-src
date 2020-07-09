@@ -1,4 +1,4 @@
-/*	$OpenBSD: octeonvar.h,v 1.45 2018/04/09 13:46:15 visa Exp $	*/
+/*	$OpenBSD: octeonvar.h,v 1.48 2020/06/27 01:01:36 jsg Exp $	*/
 /*	$NetBSD: maltavar.h,v 1.3 2002/03/18 10:10:16 simonb Exp $	*/
 
 /*-
@@ -16,13 +16,6 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *	This product includes software developed by the NetBSD
- *	Foundation, Inc. and its contributors.
- * 4. Neither the name of The NetBSD Foundation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE NETBSD FOUNDATION, INC. AND CONTRIBUTORS
  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
@@ -74,6 +67,10 @@ struct octeon_config {
 	bus_dma_tag_t mc_iobus_dmat;
 	bus_dma_tag_t mc_bootbus_dmat;
 };
+
+#define	GPIO_CONFIG_MD_OUTPUT_SEL_MASK	(GPIO_CONFIG_MD0 | GPIO_CONFIG_MD1)
+#define	GPIO_CONFIG_MD_USB0_VBUS_CTRL	GPIO_CONFIG_MD0
+#define	GPIO_CONFIG_MD_USB1_VBUS_CTRL	GPIO_CONFIG_MD1
 
 /*
  * FPA map
@@ -271,6 +268,13 @@ extern struct boot_info *octeon_boot_info;
 #define BOOTINFO_CFG_FLAG_PCI_TARGET	(1ull << 1)
 #define BOOTINFO_CFG_FLAG_DEBUG		(1ull << 2)
 #define BOOTINFO_CFG_FLAG_NO_MAGIC	(1ull << 3)
+
+#define BOOTMEM_BLOCK_ALIGN		16
+#define BOOTMEM_BLOCK_MASK		(BOOTMEM_BLOCK_ALIGN - 1)
+#define BOOTMEM_BLOCK_MIN_SIZE		16
+
+int	bootmem_alloc_region(paddr_t, size_t);
+void	bootmem_free(paddr_t, size_t);
 
 int	octeon_ioclock_speed(void);
 

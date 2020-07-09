@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_var.h,v 1.96 2019/05/12 18:12:38 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_var.h,v 1.101 2019/11/09 13:21:04 stsp Exp $	*/
 /*	$NetBSD: ieee80211_var.h,v 1.7 2004/05/06 03:07:10 dyoung Exp $	*/
 
 /*-
@@ -62,7 +62,20 @@
 #define IEEE80211_RSSI_THRES_RATIO_2GHZ		60	/* in percent */
 #define IEEE80211_RSSI_THRES_RATIO_5GHZ		50	/* in percent */
 
-#define IEEE80211_BGSCAN_FAIL_MAX		360	/* units of 500 msec */
+#define IEEE80211_BGSCAN_FAIL_MAX		512	/* units of 500 msec */
+
+/*
+ * Missed beacon threshold: An access point has disappeared if this amount
+ * of consecutive beacons have been missed.
+ * This value needs to be high enough to avoid frequent re-connects to APs
+ * which suffer from occasional packet loss, and low enough to avoid a long
+ * delay before we start scanning when an AP has actually disappeared.
+ *
+ * The beacon interval is variable, but generally in the order of 100ms.
+ * So 30 beacons implies a grace period of about 3 seconds before we start
+ * searching for a new AP.
+ */
+#define IEEE80211_BEACON_MISS_THRES		30	/* units of beacons */
 
 enum ieee80211_phytype {
 	IEEE80211_T_DS,			/* direct sequence spread spectrum */
@@ -417,6 +430,7 @@ struct ieee80211_ess {
 #define IEEE80211_C_MFP		0x00002000	/* CAPABILITY: MFP avail */
 #define IEEE80211_C_RAWCTL	0x00004000	/* CAPABILITY: raw ctl */
 #define IEEE80211_C_SCANALLBAND	0x00008000	/* CAPABILITY: scan all bands */
+#define IEEE80211_C_TX_AMPDU	0x00010000	/* CAPABILITY: send A-MPDU */
 
 /* flags for ieee80211_fix_rate() */
 #define	IEEE80211_F_DOSORT	0x00000001	/* sort rate list */
@@ -458,7 +472,9 @@ int	ieee80211_add_ess(struct ieee80211com *, struct ieee80211_join *);
 void	ieee80211_del_ess(struct ieee80211com *, char *, int, int);
 void	ieee80211_set_ess(struct ieee80211com *, struct ieee80211_ess *,
 	    struct ieee80211_node *);
+void	ieee80211_deselect_ess(struct ieee80211com *);
 struct ieee80211_ess *ieee80211_get_ess(struct ieee80211com *, const char *, int);
+void	ieee80211_begin_bgscan(struct ifnet *);
 
 extern	int ieee80211_cache_size;
 

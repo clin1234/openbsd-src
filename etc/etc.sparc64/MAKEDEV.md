@@ -1,6 +1,6 @@
 define(MACHINE,sparc64)dnl
 vers(__file__,
-	{-$OpenBSD: MAKEDEV.md,v 1.87 2016/09/11 19:59:54 deraadt Exp $-},
+	{-$OpenBSD: MAKEDEV.md,v 1.94 2020/07/06 06:11:27 dlg Exp $-},
 etc.MACHINE)dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
@@ -103,6 +103,7 @@ _DEV(ttyU, 95)
 _DEV(uall)
 _DEV(ugen, 92)
 _DEV(uhid, 91)
+_DEV(fido, 137)
 _DEV(ulpt, 93)
 _DEV(usb, 90)
 _TITLE(spec)
@@ -112,12 +113,14 @@ _DEV(bpf, 105)
 _DEV(diskmap, 130)
 _DEV(drm, 87)
 _DEV(fdesc, 24)
+_DEV(dt, 30)
 _DEV(fuse, 134)
 _DEV(hotplug, 124)
 _DEV(oppr)
 _DEV(pci, 52)
 _DEV(pf, 73)
 _DEV(pppx, 131)
+_DEV(pppac, 138)
 _DEV(rmidi, 68)
 _DEV(rnd, 119)
 _DEV(tun, 111)
@@ -131,6 +134,7 @@ _DEV(vldc_spds, 132)
 _DEV(vldc_ldom, 132)
 _DEV(vdsp, 133)
 _DEV(switch, 136)
+_DEV(kstat, 51)
 dnl
 divert(__mddivert)dnl
 dnl
@@ -142,6 +146,7 @@ ramdisk)
 _std(2, 3, 76, 16)
 	M openprom	c 70 0 600
 	M mdesc		c 70 1 640 kmem
+	M pri		c 70 2 640 kmem
 	;;
 dnl
 dnl *** sparc64 specific targets
@@ -153,7 +158,7 @@ twrget(wscons, wscons, ttyG, cfg, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, a, b)dnl
 twrget(wscons, wscons, ttyH, cfg, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, a, b)dnl
 twrget(wscons, wscons, ttyI, cfg, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, a, b)dnl
 twrget(wscons, wscons, ttyJ, cfg, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, a, b)dnl
-twrget(all, au, audio, 0, 1, 2)dnl
+twrget(all, au, audio, 0, 1, 2, 3)dnl
 target(all, ch, 0)dnl
 target(all, vscsi, 0)dnl
 target(all, diskmap)dnl
@@ -173,8 +178,8 @@ target(all, drm, 0, 1, 2, 3)dnl
 target(all, switch, 0, 1, 2, 3)dnl
 twrget(all, s64_tzs, tty, a, b, c, d)dnl
 twrget(all, s64_czs, cua, a, b, c, d)dnl
-twrget(all, vcc, ttyV, 0, 1, 2, 3, 4, 5, 6, 7)dnl
+twrget(all, vcc, ttyV, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, a, b, c, d, e, f)dnl
 twrget(all, vldc_hvctl, hvctl)dnl
 twrget(all, vldc_spds, spds)dnl
-twrget(all, vldc_ldom, ldom, 0, 1, 2, 3, 4, 5, 6, 7)dnl
+twrget(all, vldc_ldom, ldom, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)dnl
 target(all, vdsp, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)dnl

@@ -24,7 +24,7 @@ my @files =
     grep !m#/perl.*\.pod#,
     grep m#(?:\.pm|\.pod|_pm\.PL)#,
     map {s/\s.*//s; $_}
-    grep { m#^(lib|ext|dist|cpan)/# && !m#/(?:t|demo)/# }
+    grep { m#^(lib|ext|dist|cpan)/# && !m#/(?:t|demo|corpus)/# }
     <MANIFEST>;
 close MANIFEST
     or die "$0: failed to close MANIFEST: $!";
@@ -60,8 +60,14 @@ for my $filename (@files) {
 	}
     }
     unless ($foundit) {
-	warn "$filename missing =head1 NAME (OK if respective .pod exists)\n"
-	    unless $Quiet;
+        next if pod_for_module_has_head1_NAME($filename);
+        die "p5p-controlled module $filename missing =head1 NAME\n"
+            if $filename !~ m{^(dist/|cpan/)}n # under our direct control
+            && $filename !~ m{/_[^/]+\z}       # not private
+            && $filename !~ m{/unicore/}       # not unicore
+            && $filename ne 'lib/meta_notation.pm'      # no pod
+            && $filename ne 'lib/overload/numbers.pm';  # no pod
+        warn "$filename missing =head1 NAME\n" unless $Quiet;
 	next;
     }
     my $title = <MOD>;
@@ -69,7 +75,7 @@ for my $filename (@files) {
     close MOD
         or die "Error closing $filename: $!";
 
-    ($name, $thing) = split / --? /, $title, 2;
+    ($name, $thing) = split /\s+--?\s+/, $title, 2;
 
     unless ($name and $thing) {
 	warn "$filename missing name\n"  unless $name;
@@ -90,6 +96,19 @@ for my $filename (@files) {
     }
 }
 
+sub pod_for_module_has_head1_NAME {
+    my ($filename) = @_;
+    (my $pod_file = $filename) =~ s/\.pm\z/.pod/ or return 0;
+    return 0 if !-e $pod_file;
+    open my $fh, '<', $pod_file
+        or die "Can't open $pod_file for reading: $!\n";
+    local $/ = '';
+    while (my $para = <$fh>) {
+        return 1 if $para =~ /\A=head1 NAME$/m;
+    }
+    return 0;
+}
+
 # Much easier to special case it like this than special case the depending on
 # and parsing lib/Config.pod, or special case opening configpm and finding its
 # =head1 (which is not found with the $/="" above)
@@ -100,7 +119,7 @@ push @mod, "=item Config\n\nAccess Perl configuration information\n\n";
 # parse as (reasonably) sane Pod as-is to anything that attempts to
 # brute-force treat it as such. The content is already useful - this just
 # makes it tidier, by stopping anything doing this mistaking the rest of the
-# Perl code for Pod. eg http://search.cpan.org/dist/perl/pod/perlmodlib.PL
+# Perl code for Pod. eg https://metacpan.org/pod/perlmodlib
 
 print $out <<'=cut';
 =head1 NAME
@@ -212,7 +231,7 @@ completely) due to their sizes, volatility, or simply lack of time
 for adequate testing and configuration across the multitude of
 platforms on which Perl was beta-tested.  You are encouraged to
 look for them on CPAN (described below), or using web search engines
-like Alta Vista or Google.
+like Google or DuckDuckGo.
 
 =head1 CPAN
 

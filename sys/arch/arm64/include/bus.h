@@ -1,4 +1,4 @@
-/* $OpenBSD: bus.h,v 1.5 2018/08/20 19:38:07 kettenis Exp $ */
+/* $OpenBSD: bus.h,v 1.7 2020/04/13 21:34:54 kettenis Exp $ */
 /*
  * Copyright (c) 2003-2004 Opsycon AB Sweden.  All rights reserved.
  *
@@ -96,6 +96,20 @@ struct bus_space {
 #define	bus_space_write_4(t, h, o, v) (*(t)->_space_write_4)((t), (h), (o), (v))
 #define	bus_space_write_8(t, h, o, v) (*(t)->_space_write_8)((t), (h), (o), (v))
 
+#define	bus_space_read_raw_2(t, h, o) \
+	(*(t)->_space_read_2)((t), (h), (o))
+#define	bus_space_read_raw_4(t, h, o) \
+	(*(t)->_space_read_4)((t), (h), (o))
+#define	bus_space_read_raw_8(t, h, o) \
+	(*(t)->_space_read_8)((t), (h), (o))
+
+#define	bus_space_write_raw_2(t, h, o, v) \
+	(*(t)->_space_write_2)((t), (h), (o), (v))
+#define	bus_space_write_raw_4(t, h, o, v) \
+	(*(t)->_space_write_4)((t), (h), (o), (v))
+#define	bus_space_write_raw_8(t, h, o, v) \
+	(*(t)->_space_write_8)((t), (h), (o), (v))
+
 #define	bus_space_read_raw_multi_2(t, h, a, b, l) \
 	(*(t)->_space_read_raw_2)((t), (h), (a), (b), (l))
 #define	bus_space_read_raw_multi_4(t, h, a, b, l) \
@@ -145,8 +159,10 @@ static __inline void							      \
 CAT(bus_space_read_region_,n)(bus_space_tag_t bst, bus_space_handle_t bsh,    \
      bus_addr_t ba, CAT3(u_int,m,_t) *x, size_t cnt)			      \
 {									      \
-	while (cnt--)							      \
-		*x++ = CAT(bus_space_read_,n)(bst, bsh, ba++);		      \
+	while (cnt--) {							      \
+		*x++ = CAT(bus_space_read_,n)(bst, bsh, ba);		      \
+		ba += (n);						      \
+	}								      \
 }
 
 bus_space_read_region(1,8)
@@ -179,9 +195,8 @@ static __inline void							      \
 CAT(bus_space_write_multi_,n)(bus_space_tag_t bst, bus_space_handle_t bsh,    \
      bus_size_t o, const CAT3(u_int,m,_t) *x, size_t cnt)		      \
 {									      \
-	while (cnt--) {							      \
+	while (cnt--)							      \
 		CAT(bus_space_write_,n)(bst, bsh, o, *x++);		      \
-	}								      \
 }
 
 bus_space_write_multi(1,8)
@@ -197,7 +212,7 @@ CAT(bus_space_write_region_,n)(bus_space_tag_t bst, bus_space_handle_t bsh,   \
 {									      \
 	while (cnt--) {							      \
 		CAT(bus_space_write_,n)(bst, bsh, ba, *x++);		      \
-		ba += sizeof(x);					      \
+		ba += (n);						      \
 	}								      \
 }
 
@@ -233,7 +248,7 @@ CAT(bus_space_set_region_,n)(bus_space_tag_t bst, bus_space_handle_t bsh,     \
 {									      \
 	while (cnt--) {							      \
 		CAT(bus_space_write_,n)(bst, bsh, ba, x);		      \
-		ba += sizeof(x);					      \
+		ba += (n);						      \
 	}								      \
 }
 

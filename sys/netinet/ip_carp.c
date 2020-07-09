@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_carp.c,v 1.337 2019/04/23 10:53:45 dlg Exp $	*/
+/*	$OpenBSD: ip_carp.c,v 1.345 2020/05/21 05:24:59 dlg Exp $	*/
 
 /*
  * Copyright (c) 2002 Michael Shalayeff. All rights reserved.
@@ -131,9 +131,9 @@ struct carp_softc {
 	struct arpcom sc_ac;
 #define	sc_if		sc_ac.ac_if
 #define	sc_carpdev	sc_ac.ac_if.if_carpdev
-	void *ah_cookie;
-	void *lh_cookie;
-	void *dh_cookie;
+	struct task sc_atask;
+	struct task sc_ltask;
+	struct task sc_dtask;
 	struct ip_moptions sc_imo;
 #ifdef INET6
 	struct ip6_moptions sc_im6o;
@@ -233,6 +233,8 @@ int	carp_check_dup_vhids(struct carp_softc *, struct srpl *,
 void	carp_ifgroup_ioctl(struct ifnet *, u_long, caddr_t);
 void	carp_ifgattr_ioctl(struct ifnet *, u_long, caddr_t);
 void	carp_start(struct ifnet *);
+int	carp_enqueue(struct ifnet *, struct mbuf *);
+void	carp_transmit(struct carp_softc *, struct ifnet *, struct mbuf *);
 void	carp_setrun_all(struct carp_softc *, sa_family_t);
 void	carp_setrun(struct carp_vhost_entry *, sa_family_t);
 void	carp_set_state_all(struct carp_softc *, int);
@@ -404,7 +406,7 @@ carp_hmac_verify(struct carp_vhost_entry *vhe, u_int32_t counter[2],
 	unsigned char md2[20];
 	u_int8_t i;
 
-	for (i = 0; i < HMAC_MAX; i++) { 
+	for (i = 0; i < HMAC_MAX; i++) {
 		carp_hmac_generate(vhe, counter, md2, i);
 		if (!timingsafe_bcmp(md, md2, sizeof(md2)))
 			return (0);
@@ -636,8 +638,6 @@ carp_proto_input_c(struct ifnet *ifp, struct mbuf *m, struct carp_header *ch,
 	}
 
 	getmicrotime(&sc->sc_if.if_lastchange);
-	sc->sc_if.if_ipackets++;
-	sc->sc_if.if_ibytes += m->m_pkthdr.len;
 
 	/* verify the CARP version. */
 	if (ch->carp_version != CARP_VERSION) {
@@ -699,7 +699,7 @@ carp_proto_input_c(struct ifnet *ifp, struct mbuf *m, struct carp_header *ch,
 		/*
 		 * If we're pre-empting masters who advertise slower than us,
 		 * and do not have a better demote count, treat them as down.
-		 * 
+		 *
 		 */
 		if (carp_opts[CARPCTL_PREEMPT] &&
 		    timercmp(&sc_tv, &ch_tv, <) &&
@@ -711,7 +711,7 @@ carp_proto_input_c(struct ifnet *ifp, struct mbuf *m, struct carp_header *ch,
 		/*
 		 * Take over masters advertising with a higher demote count,
 		 * regardless of CARPCTL_PREEMPT.
-		 */ 
+		 */
 		if (ch->carp_demote > carp_group_demote_count(sc)) {
 			carp_master_down(vhe);
 			break;
@@ -800,7 +800,7 @@ carp_clone_create(struct if_clone *ifc, int unit)
 
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK|M_ZERO);
 	refcnt_init(&sc->sc_refcnt);
-	
+
 	SRPL_INIT(&sc->carp_vhosts);
 	sc->sc_vhe_count = 0;
 	if (carp_new_vhost(sc, 0, 0)) {
@@ -808,15 +808,18 @@ carp_clone_create(struct if_clone *ifc, int unit)
 		return (ENOMEM);
 	}
 
+	task_set(&sc->sc_atask, carp_addr_updated, sc);
+	task_set(&sc->sc_ltask, carp_carpdev_state, sc);
+	task_set(&sc->sc_dtask, carpdetach, sc);
+
 	sc->sc_suppress = 0;
 	sc->sc_advbase = CARP_DFLTINTV;
 	sc->sc_naddrs = sc->sc_naddrs6 = 0;
 #ifdef INET6
 	sc->sc_im6o.im6o_hlim = CARP_DFLTTL;
 #endif /* INET6 */
-	sc->sc_imo.imo_membership = (struct in_multi **)malloc(
-	    (sizeof(struct in_multi *) * IP_MIN_MEMBERSHIPS), M_IPMOPTS,
-	    M_WAITOK|M_ZERO);
+	sc->sc_imo.imo_membership = mallocarray(IP_MIN_MEMBERSHIPS,
+	    sizeof(struct in_multi *), M_IPMOPTS, M_WAITOK|M_ZERO);
 	sc->sc_imo.imo_max_memberships = IP_MIN_MEMBERSHIPS;
 
 	LIST_INIT(&sc->carp_mc_listhead);
@@ -827,8 +830,8 @@ carp_clone_create(struct if_clone *ifc, int unit)
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
 	ifp->if_ioctl = carp_ioctl;
 	ifp->if_start = carp_start;
+	ifp->if_enqueue = carp_enqueue;
 	ifp->if_xflags = IFXF_CLONED;
-	IFQ_SET_MAXLEN(&ifp->if_snd, 1);
 	if_counters_alloc(ifp);
 	if_attach(ifp);
 	ether_ifattach(ifp);
@@ -839,8 +842,7 @@ carp_clone_create(struct if_clone *ifc, int unit)
 	ifp->if_link_state = LINK_STATE_INVALID;
 
 	/* Hook carp_addr_updated to cope with address and route changes. */
-	sc->ah_cookie = hook_establish(sc->sc_if.if_addrhooks, 0,
-	    carp_addr_updated, sc);
+	if_addrhook_add(&sc->sc_if, &sc->sc_atask);
 
 	return (0);
 }
@@ -891,17 +893,18 @@ carp_clone_destroy(struct ifnet *ifp)
 {
 	struct carp_softc *sc = ifp->if_softc;
 
+	if_addrhook_del(&sc->sc_if, &sc->sc_atask);
+
 	NET_LOCK();
 	carpdetach(sc);
-	if (sc->ah_cookie != NULL)
-		hook_disestablish(sc->sc_if.if_addrhooks, sc->ah_cookie);
 	NET_UNLOCK();
 
 	ether_ifdetach(ifp);
 	if_detach(ifp);
 	carp_destroy_vhosts(ifp->if_softc);
 	refcnt_finalize(&sc->sc_refcnt, "carpdtor");
-	free(sc->sc_imo.imo_membership, M_IPMOPTS, 0);
+	free(sc->sc_imo.imo_membership, M_IPMOPTS,
+	    sc->sc_imo.imo_max_memberships * sizeof(struct in_multi *));
 	free(sc, M_DEVBUF, sizeof(*sc));
 	return (0);
 }
@@ -950,12 +953,11 @@ carpdetach(void *arg)
 	if_ih_remove(ifp0, carp_input, NULL);
 
 	SRPL_REMOVE_LOCKED(&carp_sc_rc, cif, sc, carp_softc, sc_list);
-	if (SRPL_EMPTY_LOCKED(cif))
-		ifpromisc(ifp0, 0);
 	sc->sc_carpdev = NULL;
 
-	hook_disestablish(ifp0->if_linkstatehooks, sc->lh_cookie);
-	hook_disestablish(ifp0->if_detachhooks, sc->dh_cookie);
+	if_linkstatehook_del(ifp0, &sc->sc_ltask);
+	if_detachhook_del(ifp0, &sc->sc_dtask);
+	ifpromisc(ifp0, 0);
 }
 
 void
@@ -1133,8 +1135,6 @@ carp_send_ad(struct carp_vhost_entry *vhe)
 		m->m_data -= sizeof(*ip);
 
 		getmicrotime(&sc->sc_if.if_lastchange);
-		sc->sc_if.if_opackets++;
-		sc->sc_if.if_obytes += len;
 		carpstat_inc(carps_opackets);
 
 		error = ip_output(m, NULL, NULL, IP_RAWOUTPUT, &sc->sc_imo,
@@ -1221,8 +1221,6 @@ carp_send_ad(struct carp_vhost_entry *vhe)
 		m->m_data -= sizeof(*ip6);
 
 		getmicrotime(&sc->sc_if.if_lastchange);
-		sc->sc_if.if_opackets++;
-		sc->sc_if.if_obytes += len;
 		carpstat_inc(carps_opackets6);
 
 		error = ip6_output(m, NULL, NULL, 0, &sc->sc_im6o, NULL);
@@ -1685,33 +1683,21 @@ carp_set_ifp(struct carp_softc *sc, struct ifnet *ifp0)
 	if (ifp0->if_type != IFT_ETHER)
 		return (EINVAL);
 
-	sc->dh_cookie = hook_establish(ifp0->if_detachhooks, 0,
-            carpdetach, sc);
-	if (sc->dh_cookie == NULL)
-		return (ENOMEM);
-
-	sc->lh_cookie = hook_establish(ifp0->if_linkstatehooks, 1,
-	    carp_carpdev_state, ifp0);
-	if (sc->lh_cookie == NULL) {
-		error = ENOMEM;
-		goto rm_dh;
-	}
-
 	cif = &ifp0->if_carp;
-	if (SRPL_EMPTY_LOCKED(cif)) {
-		if ((error = ifpromisc(ifp0, 1)))
-			goto rm_lh;
+	if (carp_check_dup_vhids(sc, cif, NULL))
+		return (EINVAL);
 
-	} else if (carp_check_dup_vhids(sc, cif, NULL)) {
-		error = EINVAL;
-		goto rm_lh;
-	}
+	if ((error = ifpromisc(ifp0, 1)))
+		return (error);
 
 	/* detach from old interface */
 	if (sc->sc_carpdev != NULL)
 		carpdetach(sc);
 
 	/* attach carp interface to physical interface */
+	if_detachhook_add(ifp0, &sc->sc_dtask);
+	if_linkstatehook_add(ifp0, &sc->sc_ltask);
+
 	sc->sc_carpdev = ifp0;
 	sc->sc_if.if_capabilities = ifp0->if_capabilities &
 	    IFCAP_CSUM_MASK;
@@ -1749,16 +1735,9 @@ carp_set_ifp(struct carp_softc *sc, struct ifnet *ifp0)
 	/* Change input handler of the physical interface. */
 	if_ih_insert(ifp0, carp_input, NULL);
 
-	carp_carpdev_state(ifp0);
+	carp_carpdev_state(sc);
 
 	return (0);
-
-rm_lh:
-	hook_disestablish(ifp0->if_linkstatehooks, sc->lh_cookie);
-rm_dh:
-	hook_disestablish(ifp0->if_detachhooks, sc->dh_cookie);
-
-	return (error);
 }
 
 void
@@ -2280,46 +2259,77 @@ void
 carp_start(struct ifnet *ifp)
 {
 	struct carp_softc *sc = ifp->if_softc;
+	struct ifnet *ifp0 = sc->sc_carpdev;
 	struct mbuf *m;
 
-	for (;;) {
-		IFQ_DEQUEUE(&ifp->if_snd, m);
-		if (m == NULL)
-			break;
+	if (ifp0 == NULL) {
+		ifq_purge(&ifp->if_snd);
+		return;
+	}
+
+	while ((m = ifq_dequeue(&ifp->if_snd)) != NULL)
+		carp_transmit(sc, ifp0, m);
+}
+
+void
+carp_transmit(struct carp_softc *sc, struct ifnet *ifp0, struct mbuf *m)
+{
+	struct ifnet *ifp = &sc->sc_if;
 
 #if NBPFILTER > 0
-		if (ifp->if_bpf)
-			bpf_mtap_ether(ifp->if_bpf, m, BPF_DIRECTION_OUT);
+	{
+		caddr_t if_bpf = ifp->if_bpf;
+		if (if_bpf) {
+			if (bpf_mtap_ether(if_bpf, m, BPF_DIRECTION_OUT))
+				m_freem(m);
+		}
+	}
 #endif /* NBPFILTER > 0 */
 
-		if ((ifp->if_carpdev->if_flags & (IFF_UP|IFF_RUNNING)) !=
-		    (IFF_UP|IFF_RUNNING)) {
-			ifp->if_oerrors++;
-			m_freem(m);
-			continue;
-		}
-
-		/*
-		 * Do not leak the multicast address when sending
-		 * advertisements in 'ip' and 'ip-stealth' balacing
-		 * modes.
-		 */
-		if (sc->sc_balancing == CARP_BAL_IP ||
-		    sc->sc_balancing == CARP_BAL_IPSTEALTH) {
-			struct ether_header *eh;
-			uint8_t *esrc;
-
-			eh = mtod(m, struct ether_header *);
-			esrc = ((struct arpcom*)ifp->if_carpdev)->ac_enaddr;
-			memcpy(eh->ether_shost, esrc, sizeof(eh->ether_shost));
-		}
-
-		if (if_enqueue(ifp->if_carpdev, m)) {
-			ifp->if_oerrors++;
-			continue;
-		}
-		ifp->if_opackets++;
+	if (!ISSET(ifp0->if_flags, IFF_RUNNING)) {
+		counters_inc(ifp->if_counters, ifc_oerrors);
+		m_freem(m);
+		return;
 	}
+
+	/*
+	 * Do not leak the multicast address when sending
+	 * advertisements in 'ip' and 'ip-stealth' balacing
+	 * modes.
+	 */
+	if (sc->sc_balancing == CARP_BAL_IP ||
+	    sc->sc_balancing == CARP_BAL_IPSTEALTH) {
+		struct ether_header *eh = mtod(m, struct ether_header *);
+		memcpy(eh->ether_shost, sc->sc_ac.ac_enaddr,
+		    sizeof(eh->ether_shost));
+	}
+
+	if (if_enqueue(ifp0, m))
+		counters_inc(ifp->if_counters, ifc_oerrors);
+}
+
+int
+carp_enqueue(struct ifnet *ifp, struct mbuf *m)
+{
+	struct carp_softc *sc = ifp->if_softc;
+	struct ifnet *ifp0 = sc->sc_carpdev;
+
+	/* no ifq_is_priq, cos hfsc on carp doesn't make sense */
+
+	/*
+	 * If the parent of this carp(4) got destroyed while
+	 * `m' was being processed, silently drop it.
+	 */
+	if (ifp0 == NULL) {
+		m_freem(m);
+		return (0);
+	}
+
+	counters_pkt(ifp->if_counters,
+	    ifc_opackets, ifc_obytes, m->m_pkthdr.len);
+	carp_transmit(sc, ifp0, m);
+
+	return (0);
 }
 
 int
@@ -2330,15 +2340,6 @@ carp_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *sa,
 	struct carp_vhost_entry *vhe;
 	struct srp_ref sr;
 	int ismaster;
-
-	/*
-	 * If the parent of this carp(4) got destroyed while
-	 * `m' was being processed, silently drop it.
-	 */
-	if (sc->sc_carpdev == NULL) {
-		m_freem(m);
-		return (0);
-	}
 
 	if (sc->cur_vhe == NULL) {
 		vhe = SRPL_FIRST(&sr, &sc->carp_vhosts);
@@ -2471,35 +2472,24 @@ carp_group_demote_count(struct carp_softc *sc)
 void
 carp_carpdev_state(void *v)
 {
-	struct srpl *cif;
-	struct carp_softc *sc;
-	struct ifnet *ifp0 = v;
+	struct carp_softc *sc = v;
+	struct ifnet *ifp0 = sc->sc_carpdev;
+	int suppressed = sc->sc_suppress;
 
-	if (ifp0->if_type != IFT_ETHER)
-		return;
-
-	cif = &ifp0->if_carp;
-
-	KERNEL_ASSERT_LOCKED(); /* touching if_carp */
-
-	SRPL_FOREACH_LOCKED(sc, cif, sc_list) {
-		int suppressed = sc->sc_suppress;
-
-		if (sc->sc_carpdev->if_link_state == LINK_STATE_DOWN ||
-		    !(sc->sc_carpdev->if_flags & IFF_UP)) {
-			sc->sc_if.if_flags &= ~IFF_RUNNING;
-			carp_del_all_timeouts(sc);
-			carp_set_state_all(sc, INIT);
-			sc->sc_suppress = 1;
-			carp_setrun_all(sc, 0);
-			if (!suppressed)
-				carp_group_demote_adj(&sc->sc_if, 1, "carpdev");
-		} else if (suppressed) {
-			carp_set_state_all(sc, INIT);
-			sc->sc_suppress = 0;
-			carp_setrun_all(sc, 0);
-			carp_group_demote_adj(&sc->sc_if, -1, "carpdev");
-		}
+	if (ifp0->if_link_state == LINK_STATE_DOWN ||
+	    !(ifp0->if_flags & IFF_UP)) {
+		sc->sc_if.if_flags &= ~IFF_RUNNING;
+		carp_del_all_timeouts(sc);
+		carp_set_state_all(sc, INIT);
+		sc->sc_suppress = 1;
+		carp_setrun_all(sc, 0);
+		if (!suppressed)
+			carp_group_demote_adj(&sc->sc_if, 1, "carpdev");
+	} else if (suppressed) {
+		carp_set_state_all(sc, INIT);
+		sc->sc_suppress = 0;
+		carp_setrun_all(sc, 0);
+		carp_group_demote_adj(&sc->sc_if, -1, "carpdev");
 	}
 }
 

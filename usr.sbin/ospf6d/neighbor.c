@@ -1,4 +1,4 @@
-/*	$OpenBSD: neighbor.c,v 1.14 2018/02/09 03:53:37 claudio Exp $ */
+/*	$OpenBSD: neighbor.c,v 1.17 2020/06/22 18:18:20 denis Exp $ */
 
 /*
  * Copyright (c) 2005 Claudio Jeker <claudio@openbsd.org>
@@ -197,14 +197,11 @@ nbr_fsm(struct nbr *nbr, enum nbr_event event)
 		nbr->stats.sta_chng++;
 
 		if (old_state & NBR_STA_FULL || nbr->state & NBR_STA_FULL) {
-			extern struct ospfd_conf        *oeconf; /* XXX */
 			/*
 			 * neighbor changed from/to FULL
 			 * originate new rtr and net LSA
 			 */
-			area_track(area_find(oeconf, nbr->iface->area_id),
-			    nbr->state);
-			orig_rtr_lsa(nbr->iface);
+			orig_rtr_lsa(nbr->iface->area);
 			if (nbr->iface->state & IF_STA_DR)
 				orig_net_lsa(nbr->iface);
 
@@ -228,7 +225,7 @@ nbr_fsm(struct nbr *nbr, enum nbr_event event)
 		    nbr_state_name(nbr->state));
 
 		if (nbr->iface->type == IF_TYPE_VIRTUALLINK) {
-			orig_rtr_lsa(nbr->iface);
+			orig_rtr_lsa(nbr->iface->area);
 		}
 	}
 
@@ -319,7 +316,7 @@ nbr_new(u_int32_t nbr_id, struct iface *iface, u_int32_t iface_id, int self,
 	if (addr)
 		rn.addr = *addr;
 	rn.id.s_addr = nbr->id.s_addr;
-	rn.area_id.s_addr = nbr->iface->area_id.s_addr;
+	rn.area_id.s_addr = nbr->iface->area->id.s_addr;
 	rn.ifindex = nbr->iface->ifindex;
 	rn.iface_id = nbr->iface_id;
 	rn.state = nbr->state;
@@ -660,7 +657,7 @@ nbr_to_ctl(struct nbr *nbr)
 	memcpy(&nctl.addr, &nbr->addr, sizeof(nctl.addr));
 	memcpy(&nctl.dr, &nbr->dr, sizeof(nctl.dr));
 	memcpy(&nctl.bdr, &nbr->bdr, sizeof(nctl.bdr));
-	memcpy(&nctl.area, &nbr->iface->area_id, sizeof(nctl.area));
+	memcpy(&nctl.area, &nbr->iface->area->id, sizeof(nctl.area));
 
 	/* this list is 99% of the time empty so that's OK for now */
 	nctl.db_sum_lst_cnt = 0;

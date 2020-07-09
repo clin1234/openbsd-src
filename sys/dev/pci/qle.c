@@ -1,4 +1,4 @@
-/*	$OpenBSD: qle.c,v 1.45 2018/07/30 07:34:37 jmatthew Exp $ */
+/*	$OpenBSD: qle.c,v 1.55 2020/06/27 14:29:45 krw Exp $ */
 
 /*
  * Copyright (c) 2013, 2014 Jonathan Matthew <jmatthew@openbsd.org>
@@ -255,11 +255,7 @@ int		qle_scsi_probe(struct scsi_link *);
 
 
 struct scsi_adapter qle_switch = {
-	qle_scsi_cmd,
-	scsi_minphys,
-	qle_scsi_probe,
-	NULL,	/* scsi_free */
-	NULL	/* ioctl */
+	qle_scsi_cmd, NULL, qle_scsi_probe, NULL, NULL
 };
 
 u_int32_t	qle_read(struct qle_softc *, int);
@@ -661,7 +657,7 @@ qle_attach(struct device *parent, struct device *self, void *aux)
 	/* we should be good to go now, attach scsibus */
 	sc->sc_link.adapter = &qle_switch;
 	sc->sc_link.adapter_softc = sc;
-	sc->sc_link.adapter_target = QLE_MAX_TARGETS;
+	sc->sc_link.adapter_target = SDEV_NO_ADAPTER_TARGET;
 	sc->sc_link.adapter_buswidth = QLE_MAX_TARGETS;
 	sc->sc_link.openings = sc->sc_maxcmds;
 	sc->sc_link.pool = &sc->sc_iopool;
@@ -681,7 +677,6 @@ qle_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_link.node_wwn &= ~(0xfULL << 56);
 	}
 
-	memset(&saa, 0, sizeof(saa));
 	saa.saa_sc_link = &sc->sc_link;
 
 	/* config_found() returns the scsibus attached to us */
@@ -1048,7 +1043,7 @@ qle_handle_resp(struct qle_softc *sc, u_int32_t id)
 
 	ccb = NULL;
 	entry = QLE_DMA_KVA(sc->sc_responses) + (id * QLE_QUEUE_ENTRY_SIZE);
-	
+
 	bus_dmamap_sync(sc->sc_dmat,
 	    QLE_DMA_MAP(sc->sc_responses), id * QLE_QUEUE_ENTRY_SIZE,
 	    QLE_QUEUE_ENTRY_SIZE, BUS_DMASYNC_POSTREAD);
@@ -1101,6 +1096,7 @@ qle_handle_resp(struct qle_softc *sc, u_int32_t id)
 		switch (completion) {
 		case QLE_IOCB_STATUS_DATA_UNDERRUN:
 			xs->resid = lemtoh32(&status->resid);
+			/* FALLTHROUGH */
 		case QLE_IOCB_STATUS_DATA_OVERRUN:
 		case QLE_IOCB_STATUS_COMPLETE:
 			if (lemtoh16(&status->scsi_status) &
@@ -1139,7 +1135,7 @@ qle_handle_resp(struct qle_softc *sc, u_int32_t id)
 			sc->sc_marker_required = 1;
 			xs->error = XS_DRIVER_STUFFUP;
 			break;
-		
+
 		case QLE_IOCB_STATUS_TIMEOUT:
 			DPRINTF(QLE_D_IO, "%s: command timed out\n",
 			    DEVNAME(sc));
@@ -1377,7 +1373,7 @@ qle_scsi_cmd(struct scsi_xfer *xs)
 	iocb = QLE_DMA_KVA(sc->sc_requests) + offset;
 	bus_dmamap_sync(sc->sc_dmat, QLE_DMA_MAP(sc->sc_requests), offset,
 	    QLE_QUEUE_ENTRY_SIZE, BUS_DMASYNC_POSTWRITE);
-	    
+
 	ccb->ccb_xs = xs;
 
 	qle_put_cmd(sc, iocb, xs, ccb, portid);
@@ -1496,8 +1492,8 @@ qle_mbox(struct qle_softc *sc, int maskin)
 		mtx_enter(&sc->sc_mbox_mtx);
 		sc->sc_mbox_pending = 1;
 		while (sc->sc_mbox_pending == 1) {
-			msleep(sc->sc_mbox, &sc->sc_mbox_mtx, PRIBIO,
-			    "qlembox", 0);
+			msleep_nsec(sc->sc_mbox, &sc->sc_mbox_mtx, PRIBIO,
+			    "qlembox", INFSLP);
 		}
 		result = sc->sc_mbox[0];
 		sc->sc_mbox_pending = 0;
@@ -1845,7 +1841,7 @@ qle_ct_pass_through(struct qle_softc *sc, u_int32_t port_handle,
 	u_int16_t req;
 	u_int64_t offset;
 	int rv;
-	
+
 	mtx_enter(&sc->sc_queue_mtx);
 
 	req = sc->sc_next_req_id++;
@@ -1856,7 +1852,7 @@ qle_ct_pass_through(struct qle_softc *sc, u_int32_t port_handle,
 	iocb = QLE_DMA_KVA(sc->sc_requests) + offset;
 	bus_dmamap_sync(sc->sc_dmat, QLE_DMA_MAP(sc->sc_requests), offset,
 	    QLE_QUEUE_ENTRY_SIZE, BUS_DMASYNC_POSTWRITE);
-	    
+
 	memset(iocb, 0, QLE_QUEUE_ENTRY_SIZE);
 	iocb->entry_type = QLE_IOCB_CT_PASSTHROUGH;
 	iocb->entry_count = 1;
@@ -1886,7 +1882,8 @@ qle_ct_pass_through(struct qle_softc *sc, u_int32_t port_handle,
 			if (qle_read_isr(sc, &isr, &info) != 0)
 				qle_handle_intr(sc, isr, info);
 		} else {
-			tsleep(sc->sc_scratch, PRIBIO, "qle_fabric", 100);
+			tsleep_nsec(sc->sc_scratch, PRIBIO, "qle_fabric",
+			    SEC_TO_NSEC(1));
 		}
 	}
 	if (rv == 0)
@@ -1985,7 +1982,7 @@ qle_fabric_plogx(struct qle_softc *sc, struct qle_fc_port *port, int flags,
 	iocb = QLE_DMA_KVA(sc->sc_requests) + offset;
 	bus_dmamap_sync(sc->sc_dmat, QLE_DMA_MAP(sc->sc_requests), offset,
 	    QLE_QUEUE_ENTRY_SIZE, BUS_DMASYNC_POSTWRITE);
-	    
+
 	memset(iocb, 0, QLE_QUEUE_ENTRY_SIZE);
 	iocb->entry_type = QLE_IOCB_PLOGX;
 	iocb->entry_count = 1;
@@ -2014,7 +2011,8 @@ qle_fabric_plogx(struct qle_softc *sc, struct qle_fc_port *port, int flags,
 			if (qle_read_isr(sc, &isr, &info) != 0)
 				qle_handle_intr(sc, isr, info);
 		} else {
-			tsleep(sc->sc_scratch, PRIBIO, "qle_fabric", 100);
+			tsleep_nsec(sc->sc_scratch, PRIBIO, "qle_fabric",
+			    SEC_TO_NSEC(1));
 		}
 	}
 	sc->sc_fabric_pending = 0;
@@ -2126,11 +2124,7 @@ qle_do_update(void *xsc)
 			mtx_enter(&sc->sc_port_mtx);
 			qle_clear_port_lists(sc);
 			TAILQ_INIT(&detach);
-			while (!TAILQ_EMPTY(&sc->sc_ports)) {
-				port = TAILQ_FIRST(&sc->sc_ports);
-				TAILQ_REMOVE(&sc->sc_ports, port, ports);
-				TAILQ_INSERT_TAIL(&detach, port, ports);
-			}
+			TAILQ_CONCAT(&detach, &sc->sc_ports, ports);
 			mtx_leave(&sc->sc_port_mtx);
 
 			while (!TAILQ_EMPTY(&detach)) {
@@ -2138,7 +2132,8 @@ qle_do_update(void *xsc)
 				TAILQ_REMOVE(&detach, port, ports);
 				if (port->flags & QLE_PORT_FLAG_IS_TARGET) {
 					scsi_detach_target(sc->sc_scsibus,
-					    port->loopid, -1);
+					    port->loopid, DETACH_FORCE |
+					    DETACH_QUIET);
 					sc->sc_targets[port->loopid] = NULL;
 				}
 				if (port->location & QLE_LOCATION_FABRIC)
@@ -2367,7 +2362,8 @@ qle_do_update(void *xsc)
 				    DEVNAME(sc), port->portid);
 				if (sc->sc_scsibus != NULL)
 					scsi_detach_target(sc->sc_scsibus,
-					    port->loopid, -1);
+					    port->loopid, DETACH_FORCE |
+					    DETACH_QUIET);
 
 				if (port->location & QLE_LOCATION_FABRIC)
 					qle_fabric_plogo(sc, port);
@@ -2591,7 +2587,7 @@ qle_put_cmd(struct qle_softc *sc, void *buf, struct scsi_xfer *xs,
 
 	req->req_handle = ccb->ccb_id;
 	htolem16(&req->req_nport_handle, target);
-	
+
 	/*
 	 * timeout is in seconds.  make sure it's at least 1 if a timeout
 	 * was specified in xs
@@ -2658,7 +2654,7 @@ qle_put_cmd(struct qle_softc *sc, void *buf, struct scsi_xfer *xs,
 	}
 	if (xs->datalen > 0)
 		cmnd->fcp_add_cdb_len |= (xs->flags & SCSI_DATA_IN) ? 2 : 1;
-	
+
 	bus_dmamap_sync(sc->sc_dmat,
 	    QLE_DMA_MAP(sc->sc_fcp_cmnds), fcp_cmnd_offset,
 	    sizeof(*cmnd), BUS_DMASYNC_PREWRITE);
@@ -2784,7 +2780,7 @@ qle_read_nvram(struct qle_softc *sc)
 		break;
 	}
 	base += sc->sc_port * 0x100;
-	
+
 	csum = 0;
 	for (i = 0; i < nitems(data); i++) {
 		data[i] = 0xffffffff;
@@ -2898,13 +2894,13 @@ qle_alloc_ccbs(struct qle_softc *sc)
 	sc->sc_pri_requests = qle_dmamem_alloc(sc, 8 * QLE_QUEUE_ENTRY_SIZE);
 	if (sc->sc_pri_requests == NULL) {
 		printf("%s: unable to allocate pri ccb dmamem\n", DEVNAME(sc));
-		goto free_pri;
+		goto free_res;
 	}
 	sc->sc_segments = qle_dmamem_alloc(sc, sc->sc_maxcmds * QLE_MAX_SEGS *
 	    sizeof(struct qle_iocb_seg));
 	if (sc->sc_segments == NULL) {
 		printf("%s: unable to allocate iocb segments\n", DEVNAME(sc));
-		goto free_res;
+		goto free_pri;
 	}
 
 	sc->sc_fcp_cmnds = qle_dmamem_alloc(sc, sc->sc_maxcmds *

@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiacpi.c,v 1.5 2018/08/11 16:02:33 kettenis Exp $	*/
+/*	$OpenBSD: efiacpi.c,v 1.8 2020/05/11 16:12:46 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
@@ -413,6 +413,10 @@ efi_acpi_madt_gicc(struct acpi_madt_gicc *gicc)
 	uint64_t reg;
 	char name[32];
 
+	/* Skip disabled CPUs. */
+	if ((gicc->flags & ACPI_PROC_ENABLE) == 0)
+		return;
+
 	/*
 	 * MPIDR field was introduced in ACPI 5.1.  Fall back on the
 	 * ACPI Processor UID on ACPI 5.0.
@@ -430,8 +434,6 @@ efi_acpi_madt_gicc(struct acpi_madt_gicc *gicc)
 	fdt_node_add_property(child, "reg", &reg, sizeof(reg));
 	if (gicc->parking_protocol_version == 0 || psci)
 		fdt_node_add_string_property(child, "enable-method", "psci");
-	if ((gicc->flags & ACPI_PROC_ENABLE) == 0)
-		fdt_node_add_string_property(child, "status", "disabled");
 
 	/* Stash GIC information. */
 	gicc_base = gicc->base_address;
@@ -586,6 +588,8 @@ efi_acpi_madt(struct acpi_table_header *hdr)
 	fdt_node_set_string_property(node, "status", "okay");
 }
 
+static int serial = 0;
+
 void
 efi_acpi_spcr(struct acpi_table_header *hdr)
 {
@@ -652,11 +656,13 @@ efi_acpi_spcr(struct acpi_table_header *hdr)
 		return;
 	}
 	fdt_node_set_property(node, "reg", reg, sizeof(reg));
+	serial = 1;
 }
 
 void *
 efi_acpi(void)
 {
+	extern uint64_t dma_constraint[2];
 	extern u_char dt_blob_start[];
 	void *fdt = dt_blob_start;
 	struct acpi_table_header *hdr;
@@ -711,6 +717,15 @@ efi_acpi(void)
 	/* Update "acpi" node. */
 	node = fdt_find_node("/acpi");
 	fdt_node_set_property(node, "reg", reg, sizeof(reg));
+
+	/* Use framebuffer if SPCR is absent or unusable. */
+	if (!serial)
+		cnset(ttydev("fb0"));
+
+	/* Raspberry Pi 4 is "special". */
+	if (memcmp(xsdt->hdr_oemid, "RPIFDN", 6) == 0 &&
+	    memcmp(xsdt->hdr_oemtableid, "RPI4", 4) == 0)
+		dma_constraint[1] = htobe64(0x3bffffff);
 
 	fdt_finalize();
 

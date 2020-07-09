@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ethersubr.c,v 1.259 2019/02/20 00:03:15 dlg Exp $	*/
+/*	$OpenBSD: if_ethersubr.c,v 1.261 2019/11/24 07:50:55 claudio Exp $	*/
 /*	$NetBSD: if_ethersubr.c,v 1.19 1996/05/07 02:40:30 thorpej Exp $	*/
 
 /*
@@ -170,6 +170,9 @@ ether_ioctl(struct ifnet *ifp, struct arpcom *arp, u_long cmd, caddr_t data)
 void
 ether_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 {
+	if (rt == NULL)
+		return;
+
 	switch (rt_key(rt)->sa_family) {
 	case AF_INET:
 		arp_rtrequest(ifp, req, rt);
@@ -377,8 +380,7 @@ ether_input(struct ifnet *ifp, struct mbuf *m, void *cookie)
 				goto dropanyway;
 		}
 
-		if (memcmp(etherbroadcastaddr, eh->ether_dhost,
-		    ETHER_ADDR_LEN) == 0)
+		if (ETHER_IS_BROADCAST(eh->ether_dhost))
 			m->m_flags |= M_BCAST;
 		else
 			m->m_flags |= M_MCAST;

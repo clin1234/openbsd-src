@@ -1,4 +1,4 @@
-/*	$OpenBSD: mfs_vfsops.c,v 1.55 2017/12/11 05:27:40 deraadt Exp $	*/
+/*	$OpenBSD: mfs_vfsops.c,v 1.59 2020/02/18 12:13:40 mpi Exp $	*/
 /*	$NetBSD: mfs_vfsops.c,v 1.10 1996/02/09 22:31:28 christos Exp $	*/
 
 /*
@@ -41,7 +41,6 @@
 #include <sys/signalvar.h>
 #include <sys/vnode.h>
 #include <sys/malloc.h>
-#include <sys/kthread.h>
 
 #include <ufs/ufs/quota.h>
 #include <ufs/ufs/inode.h>
@@ -60,19 +59,19 @@ static	int mfs_minor;	/* used for building internal dev_t */
  * mfs vfs operations.
  */
 const struct vfsops mfs_vfsops = {
-	mfs_mount,
-	mfs_start,
-	ffs_unmount,
-	ufs_root,
-	ufs_quotactl,
-	ffs_statfs,
-	ffs_sync,
-	ffs_vget,
-	ffs_fhtovp,
-	ffs_vptofh,
-	mfs_init,
-	ffs_sysctl,
-	mfs_checkexp
+	.vfs_mount	= mfs_mount,
+	.vfs_start	= mfs_start,
+	.vfs_unmount	= ffs_unmount,
+	.vfs_root	= ufs_root,
+	.vfs_quotactl	= ufs_quotactl,
+	.vfs_statfs	= ffs_statfs,
+	.vfs_sync	= ffs_sync,
+	.vfs_vget	= ffs_vget,
+	.vfs_fhtovp	= ffs_fhtovp,
+	.vfs_vptofh	= ffs_vptofh,
+	.vfs_init	= mfs_init,
+	.vfs_sysctl	= ffs_sysctl,
+	.vfs_checkexp	= mfs_checkexp,
 };
 
 /*
@@ -167,7 +166,7 @@ mfs_start(struct mount *mp, int flags, struct proc *p)
 	struct vnode *vp = VFSTOUFS(mp)->um_devvp;
 	struct mfsnode *mfsp = VTOMFS(vp);
 	struct buf *bp;
-	int sleepreturn = 0;
+	int sleepreturn = 0, sig;
 
 	while (1) {
 		while (1) {
@@ -189,14 +188,14 @@ mfs_start(struct mount *mp, int flags, struct proc *p)
 		 * EINTR/ERESTART.
 		 */
 		if (sleepreturn != 0) {
+			sig = CURSIG(p);
 			if (vfs_busy(mp, VB_WRITE|VB_NOWAIT) ||
-			    dounmount(mp,
-			    (CURSIG(p) == SIGKILL) ? MNT_FORCE : 0, p))
-				CLRSIG(p, CURSIG(p));
+			    dounmount(mp, (sig == SIGKILL) ? MNT_FORCE : 0, p))
+				CLRSIG(p, sig);
 			sleepreturn = 0;
 			continue;
 		}
-		sleepreturn = tsleep(vp, PWAIT | PCATCH, "mfsidl", 0);
+		sleepreturn = tsleep_nsec(vp, PWAIT | PCATCH, "mfsidl", INFSLP);
 	}
 	return (0);
 }

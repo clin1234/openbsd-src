@@ -1,4 +1,4 @@
-/*	$OpenBSD: xen.c,v 1.93 2018/01/21 18:54:46 mikeb Exp $	*/
+/*	$OpenBSD: xen.c,v 1.97 2020/06/29 06:50:52 jsg Exp $	*/
 
 /*
  * Copyright (c) 2015, 2016, 2017 Mike Belopuhov
@@ -48,8 +48,6 @@
 #include <uvm/uvm_extern.h>
 
 #include <machine/i82489var.h>
-
-#include <dev/rndvar.h>
 
 #include <dev/pv/pvvar.h>
 #include <dev/pv/pvreg.h>
@@ -650,8 +648,10 @@ xen_intr_unmask_release(struct xen_softc *sc, struct xen_intsrc *xi)
 	struct evtchn_unmask eu;
 
 	xi->xi_masked = 0;
-	if (!test_bit(xi->xi_port, &sc->sc_ipg->evtchn_mask[0]))
+	if (!test_bit(xi->xi_port, &sc->sc_ipg->evtchn_mask[0])) {
+		xen_intsrc_release(sc, xi);
 		return (0);
+	}
 	eu.port = xi->xi_port;
 	xen_intsrc_release(sc, xi);
 	return (xen_evtchn_hypercall(sc, EVTCHNOP_unmask, &eu, sizeof(eu)));
@@ -702,7 +702,8 @@ xen_intr(void)
 			}
 			xi->xi_evcnt.ec_count++;
 			xen_intr_mask_acquired(sc, xi);
-			task_add(xi->xi_taskq, &xi->xi_task);
+			if (!task_add(xi->xi_taskq, &xi->xi_task))
+				xen_intsrc_release(sc, xi);
 		}
 	}
 }
@@ -714,6 +715,7 @@ xen_intr_schedule(xen_intr_handle_t xih)
 	struct xen_intsrc *xi;
 
 	if ((xi = xen_intsrc_acquire(sc, (evtchn_port_t)xih)) != NULL) {
+		xen_intr_mask_acquired(sc, xi);
 		if (!task_add(xi->xi_taskq, &xi->xi_task))
 			xen_intsrc_release(sc, xi);
 	}
@@ -721,7 +723,7 @@ xen_intr_schedule(xen_intr_handle_t xih)
 
 /*
  * This code achieves two goals: 1) makes sure that *after* masking
- * the interrupt source we're not getting more task_adds: intr_barrier
+ * the interrupt source we're not getting more task_adds: sched_barrier
  * will take care of that, and 2) makes sure that the interrupt task
  * has finished executing the current task and won't be called again:
  * it sets up a barrier task to await completion of the current task
@@ -734,11 +736,7 @@ xen_intr_barrier(xen_intr_handle_t xih)
 	struct xen_softc *sc = xen_sc;
 	struct xen_intsrc *xi;
 
-	/*
-	 * XXX This will need to be revised once intr_barrier starts
-	 * using its argument.
-	 */
-	intr_barrier(NULL);
+	sched_barrier(NULL);
 
 	if ((xi = xen_intsrc_acquire(sc, (evtchn_port_t)xih)) != NULL) {
 		taskq_barrier(xi->xi_taskq);

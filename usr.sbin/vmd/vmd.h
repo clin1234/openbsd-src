@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmd.h,v 1.94 2019/05/11 23:07:46 jasper Exp $	*/
+/*	$OpenBSD: vmd.h,v 1.99 2020/06/28 16:52:45 pd Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -39,6 +39,7 @@
 #define SET(_v, _m)		((_v) |= (_m))
 #define CLR(_v, _m)		((_v) &= ~(_m))
 #define ISSET(_v, _m)		((_v) & (_m))
+#define NELEM(a) (sizeof(a) / sizeof((a)[0]))
 
 #define VMD_USER		"_vmd"
 #define VMD_CONF		"/etc/vm.conf"
@@ -56,6 +57,8 @@
 #define VMD_SWITCH_TYPE		"bridge"
 #define VM_DEFAULT_MEMORY	512
 
+#define VMD_DEFAULT_STAGGERED_START_DELAY 30
+
 /* Rate-limit fast reboots */
 #define VM_START_RATE_SEC	6	/* min. seconds since last reboot */
 #define VM_START_RATE_LIMIT	3	/* max. number of fast reboots */
@@ -68,10 +71,11 @@
 /* vmd -> vmctl error codes */
 #define VMD_BIOS_MISSING	1001
 #define VMD_DISK_MISSING	1002
-#define VMD_DISK_INVALID	1003
+					/* 1003 is obsolete VMD_DISK_INVALID */
 #define VMD_VM_STOP_INVALID	1004
 #define VMD_CDROM_MISSING	1005
 #define VMD_CDROM_INVALID	1006
+#define VMD_PARENT_INVALID	1007
 
 /* Image file signatures */
 #define VM_MAGIC_QCOW		"QFI\xfb"
@@ -215,7 +219,7 @@ struct vm_dump_header {
 #define VM_DUMP_SIGNATURE	 VMM_HV_SIGNATURE
 	uint8_t			 vmh_pad[3];
 	uint8_t			 vmh_version;
-#define VM_DUMP_VERSION		 6
+#define VM_DUMP_VERSION		 7
 	struct			 vm_dump_header_cpuid
 	    vmh_cpuids[VM_DUMP_HEADER_CPUID_COUNT];
 } __packed;
@@ -279,6 +283,7 @@ struct vmd_vm {
 #define VM_STATE_SHUTDOWN	0x04
 #define VM_STATE_RECEIVED	0x08
 #define VM_STATE_PAUSED		0x10
+#define VM_STATE_WAITING	0x20
 
 	/* For rate-limiting */
 	struct timeval		 vm_start_tv;
@@ -318,7 +323,10 @@ struct vmd_config {
 	unsigned int		 cfg_flags;
 #define VMD_CFG_INET6		0x01
 #define VMD_CFG_AUTOINET6	0x02
+#define VMD_CFG_STAGGERED_START	0x04
 
+	struct timeval		 delay;
+	int			 parallelism;
 	struct address		 cfg_localprefix;
 	struct address		 cfg_localprefix6;
 };
@@ -344,6 +352,21 @@ struct vmd {
 	int			 vmd_fd;
 	int			 vmd_fd6;
 	int			 vmd_ptmfd;
+};
+
+struct vm_dev_pipe {
+	int			 read;
+	int			 write;
+	struct event		 read_ev;
+};
+
+enum pipe_msg_type {
+	I8253_RESET_CHAN_0 = 0,
+	I8253_RESET_CHAN_1 = 1,
+	I8253_RESET_CHAN_2 = 2,
+	NS8250_ZERO_READ,
+	NS8250_RATELIMIT,
+	MC146818_RESCHEDULE_PER
 };
 
 static inline struct sockaddr_in *
@@ -434,6 +457,9 @@ int	 vmm_pipe(struct vmd_vm *, int, void (*)(int, short, void *));
 /* vm.c */
 int	 start_vm(struct vmd_vm *, int);
 __dead void vm_shutdown(unsigned int);
+void	 vm_pipe_init(struct vm_dev_pipe *, void (*)(int, short, void *));
+void	 vm_pipe_send(struct vm_dev_pipe *, enum pipe_msg_type);
+enum pipe_msg_type vm_pipe_recv(struct vm_dev_pipe *);
 
 /* control.c */
 int	 config_init(struct vmd *);

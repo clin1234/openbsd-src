@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf.c,v 1.10 2019/05/09 15:01:09 claudio Exp $ */
+/*	$OpenBSD: pf.c,v 1.12 2020/05/15 00:56:03 cheloha Exp $ */
 /*
  * Copyright (c) 2001, 2007 Can Erkin Acar <canacar@openbsd.org>
  *
@@ -94,7 +94,7 @@ read_pf(void)
 	size_t size = sizeof(status);
 	int mib[3] = { CTL_KERN, KERN_PFSTATUS };
 
-	if (sysctl(mib, 2, &status, &size, NULL, 0) < 0) {
+	if (sysctl(mib, 2, &status, &size, NULL, 0) == -1) {
 		error("sysctl(PFCTL_STATUS): %s", strerror(errno));
 		return (-1);
 	}
@@ -228,7 +228,7 @@ print_pf(void)
 	if (end > num_disp)
 		end = num_disp;
 
-	if (!clock_gettime(CLOCK_UPTIME, &uptime))
+	if (!clock_gettime(CLOCK_BOOTTIME, &uptime))
 		tm = uptime.tv_sec - s->since;
 
 	ADD_LINE_S("pf", "Status", s->running ? "Enabled" : "Disabled");

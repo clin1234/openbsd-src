@@ -1,4 +1,4 @@
-/*	$OpenBSD: identcpu.c,v 1.111 2019/05/17 19:07:15 guenther Exp $	*/
+/*	$OpenBSD: identcpu.c,v 1.116 2020/07/08 13:01:25 fcambus Exp $	*/
 /*	$NetBSD: identcpu.c,v 1.1 2003/04/26 18:39:28 fvdl Exp $	*/
 
 /*
@@ -172,6 +172,7 @@ const struct {
 	{ CPUIDECX_MWAITX,	"MWAITX" },
 }, cpu_seff0_ebxfeatures[] = {
 	{ SEFF0EBX_FSGSBASE,	"FSGSBASE" },
+	{ SEFF0EBX_TSC_ADJUST,	"TSC_ADJUST" },
 	{ SEFF0EBX_SGX,		"SGX" },
 	{ SEFF0EBX_BMI1,	"BMI1" },
 	{ SEFF0EBX_HLE,		"HLE" },
@@ -479,7 +480,7 @@ identifycpu(struct cpu_info *ci)
 		    ci->ci_efeature_ecx, ci->ci_feature_eflags);
 		/* Other bits may clash */
 		ci->ci_feature_flags |= (ci->ci_feature_eflags & CPUID_NXE);
-		if (ci->ci_flags & CPUF_PRIMARY)
+		if (CPU_IS_PRIMARY(ci))
 			ecpu_ecxfeature = ci->ci_efeature_ecx;
 		/* Let cpu_feature be the common bits */
 		cpu_feature &= ci->ci_feature_flags;
@@ -514,7 +515,7 @@ identifycpu(struct cpu_info *ci)
 		    sizeof(mycpu_model));
 
 	/* If primary cpu, fill in the global cpu_model used by sysctl */
-	if (ci->ci_flags & CPUF_PRIMARY)
+	if (CPU_IS_PRIMARY(ci))
 		strlcpy(cpu_model, mycpu_model, sizeof(cpu_model));
 
 	ci->ci_family = (ci->ci_signature >> 8) & 0x0f;
@@ -560,7 +561,7 @@ identifycpu(struct cpu_info *ci)
 		printf(", %llu.%02llu MHz", (freq + 4999) / 1000000,
 		    ((freq + 4999) / 10000) % 100);
 
-	if (ci->ci_flags & CPUF_PRIMARY) {
+	if (CPU_IS_PRIMARY(ci)) {
 		cpuspeed = (freq + 4999) / 1000000;
 		cpu_cpuspeed = cpu_amd64speed;
 	}
@@ -688,7 +689,7 @@ identifycpu(struct cpu_info *ci)
 			    ci->ci_dev->dv_xname);
 	}
 
-	if (ci->ci_flags & CPUF_PRIMARY) {
+	if (CPU_IS_PRIMARY(ci)) {
 #ifndef SMALL_KERNEL
 		if (!strcmp(cpu_vendor, "AuthenticAMD") &&
 		    ci->ci_pnfeatset >= 0x80000007) {
@@ -715,8 +716,8 @@ identifycpu(struct cpu_info *ci)
 		if (ci->ci_feature_sefflags_ebx & SEFF0EBX_SMAP)
 			replacesmap();
 	}
-#ifndef SMALL_KERNEL
-	if (!strncmp(mycpu_model, "Intel", 5)) {
+
+	if (ci->ci_feature_flags & CPUID_CFLUSH) {
 		u_int32_t cflushsz;
 
 		CPUID(0x01, dummy, cflushsz, dummy, dummy);
@@ -724,6 +725,7 @@ identifycpu(struct cpu_info *ci)
 		ci->ci_cflushsz = ((cflushsz >> 8) & 0xff) * 8;
 	}
 
+#ifndef SMALL_KERNEL
 	if (CPU_IS_PRIMARY(ci) && (ci->ci_feature_tpmflags & TPM_SENSOR)) {
 		strlcpy(ci->ci_sensordev.xname, ci->ci_dev->dv_xname,
 		    sizeof(ci->ci_sensordev.xname));
@@ -735,7 +737,7 @@ identifycpu(struct cpu_info *ci)
 #endif
 
 #ifdef CRYPTO
-	if (ci->ci_flags & CPUF_PRIMARY) {
+	if (CPU_IS_PRIMARY(ci)) {
 		if (cpu_ecxfeature & CPUIDECX_PCLMUL)
 			amd64_has_pclmul = 1;
 
@@ -823,37 +825,31 @@ cpu_topology(struct cpu_info *ci)
 	apicid = (ebx >> 24) & 0xff;
 
 	if (strcmp(cpu_vendor, "AuthenticAMD") == 0) {
+		uint32_t nthreads = 1; /* per core */
+		uint32_t thread_id; /* within a package */
+
 		/* We need at least apicid at CPUID 0x80000008 */
 		if (ci->ci_pnfeatset < 0x80000008)
 			goto no_topology;
 
-		if (ci->ci_pnfeatset >= 0x8000001e) {
-			struct cpu_info *ci_other;
-			CPU_INFO_ITERATOR cii;
+		CPUID(0x80000008, eax, ebx, ecx, edx);
+		core_bits = (ecx >> 12) & 0xf;
 
+		if (ci->ci_pnfeatset >= 0x8000001e) {
 			CPUID(0x8000001e, eax, ebx, ecx, edx);
-			ci->ci_core_id = ebx & 0xff;
-			ci->ci_pkg_id = ecx & 0xff;
-			ci->ci_smt_id = 0;
-			CPU_INFO_FOREACH(cii, ci_other) {
-				if (ci != ci_other &&
-				    ci_other->ci_core_id == ci->ci_core_id &&
-				    ci_other->ci_pkg_id == ci->ci_pkg_id)
-					ci->ci_smt_id++;
-			}
-		} else {
-			CPUID(0x80000008, eax, ebx, ecx, edx);
-			core_bits = (ecx >> 12) & 0xf;
-			if (core_bits == 0)
-				goto no_topology;
-			/* So coreidsize 2 gives 3, 3 gives 7... */
-			core_mask = (1 << core_bits) - 1;
-			/* Core id is the least significant considering mask */
-			ci->ci_core_id = apicid & core_mask;
-			/* Pkg id is the upper remaining bits */
-			ci->ci_pkg_id = apicid & ~core_mask;
-			ci->ci_pkg_id >>= core_bits;
+			nthreads = ((ebx >> 8) & 0xf) + 1;
 		}
+
+		/* Shift the core_bits off to get at the pkg bits */
+		ci->ci_pkg_id = apicid >> core_bits;
+
+		/* Get rid of the package bits */
+		core_mask = (1 << core_bits) - 1;
+		thread_id = apicid & core_mask;
+
+		/* Cut logical thread_id into core id, and smt id in a core */
+		ci->ci_core_id = thread_id / nthreads;
+		ci->ci_smt_id = thread_id % nthreads;
 	} else if (strcmp(cpu_vendor, "GenuineIntel") == 0) {
 		/* We only support leaf 1/4 detection */
 		if (cpuid_level < 4)
@@ -1019,6 +1015,8 @@ cpu_check_vmm_cap(struct cpu_info *ci)
 
 	/*
 	 * Check "L1 flush on VM entry" (Intel L1TF vuln) semantics
+	 * Full details can be found here:
+	 * https://software.intel.com/security-software-guidance/insights/deep-dive-intel-analysis-l1-terminal-fault
 	 */
 	if (!strcmp(cpu_vendor, "GenuineIntel")) {
 		if (ci->ci_feature_sefflags_edx & SEFF0EDX_L1DF)
@@ -1028,12 +1026,15 @@ cpu_check_vmm_cap(struct cpu_info *ci)
 
 		/*
 		 * Certain CPUs may have the vulnerability remedied in
-		 * hardware, check for that and override the setting
-		 * calculated above.
+		 * hardware (RDCL_NO), or we may be nested in an VMM that
+		 * is doing flushes (SKIP_L1DFL_VMENTRY) using the MSR.
+		 * In either case no mitigation at all is necessary.
 		 */	
 		if (ci->ci_feature_sefflags_edx & SEFF0EDX_ARCH_CAP) {
 			msr = rdmsr(MSR_ARCH_CAPABILITIES);
-			if (msr & ARCH_CAPABILITIES_SKIP_L1DFL_VMENTRY)
+			if ((msr & ARCH_CAPABILITIES_RDCL_NO) ||
+			    ((msr & ARCH_CAPABILITIES_SKIP_L1DFL_VMENTRY) &&
+			    ci->ci_vmm_cap.vcc_vmx.vmx_has_l1_flush_msr))
 				ci->ci_vmm_cap.vcc_vmx.vmx_has_l1_flush_msr =
 				    VMX_SKIP_L1D_FLUSH;
 		}

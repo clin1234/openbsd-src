@@ -1,4 +1,4 @@
-.\"	$OpenBSD: pkg_create.1,v 1.115 2018/07/30 08:05:06 ajacoutot Exp $
+.\"	$OpenBSD: pkg_create.1,v 1.119 2020/06/22 13:21:29 landry Exp $
 .\"
 .\" Documentation and design originally from FreeBSD. All the code has
 .\" been rewritten since. We keep the documentation's notice:
@@ -21,7 +21,7 @@
 .\" [jkh] Took John's changes back and made some additional extensions for
 .\" better integration with FreeBSD's new ports collection.
 .\"
-.Dd $Mdocdate: July 30 2018 $
+.Dd $Mdocdate: June 22 2020 $
 .Dt PKG_CREATE 1
 .Os
 .Sh NAME
@@ -305,10 +305,12 @@ Directory names are denoted by a trailing slash.
 There are some annotations that can be inserted for better control.
 All these commands start with an
 .Sq @ .
-The following annotations can be inserted manually:
+The following annotations can be inserted manually (but commonly
+.Xr update-plist 1
+is used for creating most packing-list contents):
 .Pp
 .Bl -tag -width Ds -compact
-.It Cm @ask-update Ar pkgspec Ar message
+.It Cm @ask-update Ar pkgspec message
 Mechanism to prevent unwanted updates.
 If the new package is installed as part of an update matching
 .Ar pkgspec ,
@@ -351,6 +353,15 @@ will be recorded in the package, it can be altered after installation, and
 .Xr pkg_delete 1
 will still delete it.
 .Pp
+The special comment
+.Cm @comment no debug
+can be used to tag the next file as special: even though it might be a
+binary, it has no debug info
+.Po
+see
+.Xr build-debug-info 1
+.Pc .
+.Pp
 .It Cm @conflict Ar pkgspec
 Declare a conflict with packages matching
 .Ar pkgspec
@@ -387,7 +398,7 @@ If
 does not begin with an @, same as
 .Dl name/
 .Pp
-.It Cm @define-tag Ar tag Ar mode Ar params
+.It Cm @define-tag Ar tag mode params
 Define a tag of name
 .Ar tag .
 Tags define actions to be performed at specific time during
@@ -803,6 +814,16 @@ to handle shells.
 See
 .Xr shells 5 .
 .Pp
+.It Cm @so Ar filename
+Describe the file as an
+.Ox
+shared object.
+.Pp
+.It Cm @static-lib Ar filename
+Describe the file as a
+.Ox
+static library.
+.Pp
 .It Cm @unexec Ar command
 Execute
 .Ar command
@@ -849,6 +870,15 @@ Similar to
 except it only gets executed while removing an old package during updates,
 and not during true deletions.
 .El
+.Pp
+The
+.Cm @bin ,
+.Cm @lib ,
+.Cm @so
+and
+.Cm @static-lib
+annotations are used by the debug packages infrastructure to figure out
+which files may contain debug information.
 .Pp
 See
 .Xr package 5

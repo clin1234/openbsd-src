@@ -1,4 +1,4 @@
-/* $OpenBSD: dwiic_pci.c,v 1.5 2019/05/16 01:14:08 mlarkin Exp $ */
+/* $OpenBSD: dwiic_pci.c,v 1.10 2020/02/18 12:13:40 mpi Exp $ */
 /*
  * Synopsys DesignWare I2C controller
  * PCI attachment
@@ -21,7 +21,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/kthread.h>
 
 #include <dev/pci/pcidevs.h>
 #include <dev/pci/pcireg.h>
@@ -70,6 +69,14 @@ const struct pci_matchid dwiic_pci_ids[] = {
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_300SERIES_U_I2C_4 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_300SERIES_U_I2C_5 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_300SERIES_U_I2C_6 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_APOLLOLAKE_I2C_1 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_APOLLOLAKE_I2C_2 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_APOLLOLAKE_I2C_3 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_APOLLOLAKE_I2C_4 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_APOLLOLAKE_I2C_5 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_APOLLOLAKE_I2C_6 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_APOLLOLAKE_I2C_7 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_APOLLOLAKE_I2C_8 },
 };
 
 int
@@ -113,15 +120,8 @@ dwiic_pci_attach(struct device *parent, struct device *self, void *aux)
 	bus_space_write_4(sc->sc_iot, sc->sc_ioh, LPSS_RESETS,
 	    (LPSS_RESETS_I2C | LPSS_RESETS_IDMA));
 
-	/* fetch timing parameters */
-	sc->ss_hcnt = dwiic_read(sc, DW_IC_SS_SCL_HCNT);
-	sc->ss_lcnt = dwiic_read(sc, DW_IC_SS_SCL_LCNT);
-	sc->fs_hcnt = dwiic_read(sc, DW_IC_FS_SCL_HCNT);
-	sc->fs_lcnt = dwiic_read(sc, DW_IC_FS_SCL_LCNT);
-	sc->sda_hold_time = dwiic_read(sc, DW_IC_SDA_HOLD);
-
 #if NACPI > 0
-	/* fetch more accurate timing parameters from ACPI, if possible */
+	/* fetch timing parameters from ACPI, if possible */
 	node = acpi_pci_match(self, &sc->sc_paa);
 	if (node != NULL) {
 		sc->sc_devnode = node;
@@ -189,9 +189,6 @@ dwiic_pci_activate(struct device *self, int act)
 	case DVACT_WAKEUP:
 		bus_space_write_4(sc->sc_iot, sc->sc_ioh, LPSS_RESETS,
 		    (LPSS_RESETS_I2C | LPSS_RESETS_IDMA));
-
-		dwiic_init(sc);
-
 		break;
 	}
 
@@ -208,14 +205,8 @@ dwiic_pci_bus_scan(struct device *iic, struct i2cbus_attach_args *iba,
 
 	sc->sc_iic = iic;
 
-	if (sc->sc_devnode != NULL) {
-		/*
-		 * XXX: until we can figure out why interrupts don't arrive for
-		 * i2c slave devices on intel 100 series and newer, force
-		 * polling for ihidev.
-		 */
-		sc->sc_poll_ihidev = 1;
-
+#if NACPI > 0
+	if (sc->sc_devnode != NULL)
 		aml_find_node(sc->sc_devnode, "_HID", dwiic_acpi_found_hid, sc);
-	}
+#endif
 }

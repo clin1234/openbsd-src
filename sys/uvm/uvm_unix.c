@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_unix.c,v 1.65 2019/03/01 01:46:18 cheloha Exp $	*/
+/*	$OpenBSD: uvm_unix.c,v 1.68 2020/07/06 13:33:09 pirofti Exp $	*/
 /*	$NetBSD: uvm_unix.c,v 1.18 2000/09/13 15:00:25 thorpej Exp $	*/
 
 /*
@@ -72,7 +72,7 @@ sys_obreak(struct proc *p, void *v, register_t *retval)
 
 	base = (vaddr_t)vm->vm_daddr;
 	new = round_page((vaddr_t)SCARG(uap, nsize));
-	if (new < base || (new - base) > p->p_rlimit[RLIMIT_DATA].rlim_cur)
+	if (new < base || (new - base) > lim_cur(RLIMIT_DATA))
 		return (ENOMEM);
 
 	old = round_page(base + ptoa(vm->vm_dsize));
@@ -94,7 +94,7 @@ sys_obreak(struct proc *p, void *v, register_t *retval)
 		}
 		vm->vm_dsize += atop(new - old);
 	} else {
-		uvm_deallocate(&vm->vm_map, new, old - new);
+		uvm_unmap(&vm->vm_map, new, old);
 		vm->vm_dsize -= atop(old - new);
 	}
 
@@ -128,7 +128,7 @@ uvm_grow(struct proc *p, vaddr_t sp)
 #else
 	si = atop((vaddr_t)vm->vm_minsaddr - sp) - vm->vm_ssize;
 #endif
-	if (vm->vm_ssize + si <= atop(p->p_rlimit[RLIMIT_STACK].rlim_cur))
+	if (vm->vm_ssize + si <= atop(lim_cur(RLIMIT_STACK)))
 		vm->vm_ssize += si;
 }
 
@@ -214,7 +214,8 @@ uvm_should_coredump(struct proc *p, struct vm_map_entry *entry)
 {
 	if (!(entry->protection & PROT_WRITE) &&
 	    entry->aref.ar_amap == NULL &&
-	    entry->start != p->p_p->ps_sigcode)
+	    entry->start != p->p_p->ps_sigcode &&
+	    entry->start != p->p_p->ps_timekeep)
 		return 0;
 
 	/*

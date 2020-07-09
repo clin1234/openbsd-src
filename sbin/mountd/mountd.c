@@ -1,4 +1,4 @@
-/*	$OpenBSD: mountd.c,v 1.86 2018/04/28 09:56:21 guenther Exp $	*/
+/*	$OpenBSD: mountd.c,v 1.88 2020/01/24 18:51:45 espie Exp $	*/
 /*	$NetBSD: mountd.c,v 1.31 1996/02/18 11:57:53 fvdl Exp $	*/
 
 /*
@@ -210,7 +210,7 @@ void	mountd_svc_run(void);
 struct exportlist *exphead;
 struct mountlist *mlhead;
 struct grouplist *grphead;
-char exname[PATH_MAX];
+const char *exname;
 struct xucred def_anon = {
 	.cr_uid		= (uid_t) -2,
 	.cr_gid		= (gid_t) -2,
@@ -265,7 +265,10 @@ main(int argc, char *argv[])
 	exphead = NULL;
 	mlhead = NULL;
 
-	strlcpy(exname, argc == 1? *argv : _PATH_EXPORTS, sizeof(exname));
+	if (argc == 1)
+		exname = *argv;
+	else
+		exname = _PATH_EXPORTS;
 
 	openlog("mountd", LOG_PID, LOG_DAEMON);
 	if (debug)
@@ -780,9 +783,9 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 				fprintf(stderr, "realpath failed on %s\n",
 				    rpcpath);
 			strlcpy(dirpath, rpcpath, sizeof(dirpath));
-		} else if (stat(dirpath, &stb) < 0 ||
+		} else if (stat(dirpath, &stb) == -1 ||
 		    (!S_ISDIR(stb.st_mode) && !S_ISREG(stb.st_mode)) ||
-		    statfs(dirpath, &fsb) < 0) {
+		    statfs(dirpath, &fsb) == -1) {
 			if (debug)
 				fprintf(stderr, "stat failed on %s\n", dirpath);
 			bad = ENOENT;	/* We will send error reply later */
@@ -2408,13 +2411,13 @@ check_dirpath(char *dirp)
 	while (*cp && ret) {
 		if (*cp == '/') {
 			*cp = '\0';
-			if (lstat(dirp, &sb) < 0 || !S_ISDIR(sb.st_mode))
+			if (lstat(dirp, &sb) == -1 || !S_ISDIR(sb.st_mode))
 				ret = 0;
 			*cp = '/';
 		}
 		cp++;
 	}
-	if (lstat(dirp, &sb) < 0 ||
+	if (lstat(dirp, &sb) == -1 ||
 	    (!S_ISDIR(sb.st_mode) && !S_ISREG(sb.st_mode)))
 		ret = 0;
 	return (ret);

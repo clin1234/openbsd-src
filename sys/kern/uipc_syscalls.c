@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_syscalls.c,v 1.181 2019/03/04 07:09:54 deraadt Exp $	*/
+/*	$OpenBSD: uipc_syscalls.c,v 1.186 2020/06/10 13:24:57 visa Exp $	*/
 /*	$NetBSD: uipc_syscalls.c,v 1.19 1996/02/09 19:00:48 christos Exp $	*/
 
 /*
@@ -60,11 +60,6 @@
 #include <netinet/in.h>
 #include <net/route.h>
 
-/*
- * System call interface to the socket abstraction.
- */
-extern	struct fileops socketops;
-
 int	copyaddrout(struct proc *, struct mbuf *, struct sockaddr *, socklen_t,
 	    socklen_t *);
 
@@ -102,7 +97,6 @@ sys_socket(struct proc *p, void *v, register_t *retval)
 	if (error)
 		return (error);
 
-	KERNEL_LOCK();
 	fdplock(fdp);
 	error = falloc(p, &fp, &fd);
 	if (error) {
@@ -119,7 +113,6 @@ sys_socket(struct proc *p, void *v, register_t *retval)
 		FRELE(fp, p);
 		*retval = fd;
 	}
-	KERNEL_UNLOCK();
 	return (error);
 }
 
@@ -129,7 +122,7 @@ isdnssocket(struct socket *so)
 	return (so->so_state & SS_DNS);
 }
 
-/* For SS_DNS sockets, only allow port DNS (port 53) */ 
+/* For SS_DNS sockets, only allow port DNS (port 53) */
 static int
 dns_portcheck(struct proc *p, struct socket *so, void *nam, u_int *namelen)
 {
@@ -290,8 +283,8 @@ doaccept(struct proc *p, int sock, struct sockaddr *name, socklen_t *anamelen,
 			head->so_error = ECONNABORTED;
 			break;
 		}
-		error = sosleep(head, &head->so_timeo, PSOCK | PCATCH, "netcon",
-		    0);
+		error = sosleep_nsec(head, &head->so_timeo, PSOCK | PCATCH,
+		    "netcon", INFSLP);
 		if (error)
 			goto out;
 	}
@@ -393,8 +386,8 @@ sys_connect(struct proc *p, void *v, register_t *retval)
 		goto out;
 	}
 	while ((so->so_state & SS_ISCONNECTING) && so->so_error == 0) {
-		error = sosleep(so, &so->so_timeo, PSOCK | PCATCH,
-		    "netcon2", 0);
+		error = sosleep_nsec(so, &so->so_timeo, PSOCK | PCATCH,
+		    "netcon2", INFSLP);
 		if (error) {
 			if (error == EINTR || error == ERESTART)
 				interrupted = 1;
@@ -427,7 +420,7 @@ sys_socketpair(struct proc *p, void *v, register_t *retval)
 		syscallarg(int *) rsv;
 	} */ *uap = v;
 	struct filedesc *fdp = p->p_fd;
-	struct file *fp1, *fp2;
+	struct file *fp1 = NULL, *fp2 = NULL;
 	struct socket *so1, *so2;
 	int type, cloexec, nonblock, fflag, error, sv[2];
 
@@ -455,7 +448,6 @@ sys_socketpair(struct proc *p, void *v, register_t *retval)
 		if (error != 0)
 			goto free2;
 	}
-	KERNEL_LOCK();
 	fdplock(fdp);
 	if ((error = falloc(p, &fp1, &sv[0])) != 0)
 		goto free3;
@@ -480,19 +472,22 @@ sys_socketpair(struct proc *p, void *v, register_t *retval)
 		fdpunlock(fdp);
 		FRELE(fp1, p);
 		FRELE(fp2, p);
-		KERNEL_UNLOCK();
 		return (0);
 	}
 	fdremove(fdp, sv[1]);
-	closef(fp2, p);
-	so2 = NULL;
 free4:
 	fdremove(fdp, sv[0]);
-	closef(fp1, p);
-	so1 = NULL;
 free3:
 	fdpunlock(fdp);
-	KERNEL_UNLOCK();
+
+	if (fp2 != NULL) {
+		closef(fp2, p);
+		so2 = NULL;
+	}
+	if (fp1 != NULL) {
+		closef(fp1, p);
+		so1 = NULL;
+	}
 free2:
 	if (so2 != NULL)
 		(void)soclose(so2, 0);
@@ -630,7 +625,7 @@ sendit(struct proc *p, int s, struct msghdr *mp, int flags, register_t *retsize)
 		}
 #ifdef KTRACE
 		if (KTRPOINT(p, KTR_STRUCT))
-		 	ktrsockaddr(p, mtod(to, caddr_t), mp->msg_namelen);
+			ktrsockaddr(p, mtod(to, caddr_t), mp->msg_namelen);
 #endif
 	}
 	if (mp->msg_control) {

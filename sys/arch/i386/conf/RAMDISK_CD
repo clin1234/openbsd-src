@@ -1,10 +1,8 @@
-#	$OpenBSD: RAMDISK_CD,v 1.239 2018/08/03 01:50:15 kevlo Exp $
+#	$OpenBSD: RAMDISK_CD,v 1.243 2020/06/22 00:33:28 dlg Exp $
 
 machine		i386
 maxusers	4
 
-option		TIMEZONE=0
-option		DST=0
 option		SMALL_KERNEL
 option		NO_PROPOLICE
 option		BOOT_CONFIG
@@ -49,7 +47,7 @@ mpbios0		at bios0
 cpu0		at mainbus?
 bios0		at mainbus0
 ioapic*		at mainbus?
-apm0		at bios0 flags 0x0000	# flags 0x0101 to force protocol version 1.1
+#apm0		at bios0 flags 0x0000	# flags 0x0101 to force protocol version 1.1
 pcibios0	at bios0 flags 0x0000
 
 isa0		at mainbus0
@@ -164,6 +162,8 @@ pcscp*		at pci?			# AMD 53c974 PCscsi-PCI SCSI
 uha0		at isa? port 0x330	# UltraStor [13]4f SCSI controllers
 uha*		at eisa?		# UltraStor 24f SCSI controllers
 vmwpvs*		at pci?			# VMware ParaVirtual SCSI
+nvme*		at pci?			# NVMe controllers
+
 softraid0	at root
 
 scsibus*	at scsi?
@@ -245,6 +245,7 @@ txp*		at pci?				# 3com 3CR990
 nge*		at pci?				# NS DP83820/DP83821 GigE
 re*		at pci?				# Realtek 8169/8169S/8110S
 re*		at cardbus?			# Realtek 8169/8169S/8110S
+rge*		at pci?				# Realtek 8125
 stge*		at pci?				# Sundance TC9021 GigE
 bge*		at pci?				# Broadcom BCM57xx (aka Tigon3)
 bnx*		at pci?				# Broadcom BCM5706/5708 GigE

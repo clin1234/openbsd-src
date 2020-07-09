@@ -1,4 +1,4 @@
-/*	$Id: extern.h,v 1.30 2019/05/08 21:30:11 benno Exp $ */
+/*	$Id: extern.h,v 1.33 2020/05/17 19:54:41 deraadt Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -120,6 +120,7 @@ struct	opts {
 	char		*rsync_path;		/* --rsync-path */
 	char		*ssh_prog;		/* --rsh or -e */
 	char		*port;			/* --port */
+	char		*address;		/* --address */
 };
 
 /*
@@ -159,6 +160,9 @@ struct	blkstat {
 	off_t		 curpos; /* sending: position in file to send */
 	off_t		 curlen; /* sending: length of send */
 	int32_t		 curtok; /* sending: next matching token or zero */
+	struct blktab	*blktab; /* hashtable of blocks */
+	uint32_t	 s1; /* partial sum for computing fast hash */
+	uint32_t	 s2; /* partial sum for computing fast hash */
 };
 
 /*
@@ -217,44 +221,44 @@ extern int verbose;
 #define MINIMUM(a, b) (((a) < (b)) ? (a) : (b))
 
 #define LOG0(_fmt, ...) \
-	rsync_log(__FILE__, __LINE__, -1, (_fmt), ##__VA_ARGS__)
+	rsync_log( -1, (_fmt), ##__VA_ARGS__)
 #define LOG1(_fmt, ...) \
-	rsync_log(__FILE__, __LINE__, 0, (_fmt), ##__VA_ARGS__)
+	rsync_log( 0, (_fmt), ##__VA_ARGS__)
 #define LOG2(_fmt, ...) \
-	rsync_log(__FILE__, __LINE__, 1, (_fmt), ##__VA_ARGS__)
+	rsync_log( 1, (_fmt), ##__VA_ARGS__)
 #define LOG3(_fmt, ...) \
-	rsync_log(__FILE__, __LINE__, 2, (_fmt), ##__VA_ARGS__)
+	rsync_log( 2, (_fmt), ##__VA_ARGS__)
 #define LOG4(_fmt, ...) \
-	rsync_log(__FILE__, __LINE__, 3, (_fmt), ##__VA_ARGS__)
+	rsync_log( 3, (_fmt), ##__VA_ARGS__)
 #define ERRX1(_fmt, ...) \
-	rsync_errx1(__FILE__, __LINE__, (_fmt), ##__VA_ARGS__)
+	rsync_errx1( (_fmt), ##__VA_ARGS__)
 #define WARNX(_fmt, ...) \
-	rsync_warnx(__FILE__, __LINE__, (_fmt), ##__VA_ARGS__)
+	rsync_warnx( (_fmt), ##__VA_ARGS__)
 #define WARN(_fmt, ...) \
-	rsync_warn(0, __FILE__, __LINE__, (_fmt), ##__VA_ARGS__)
+	rsync_warn(0,  (_fmt), ##__VA_ARGS__)
 #define WARN1(_fmt, ...) \
-	rsync_warn(1, __FILE__, __LINE__, (_fmt), ##__VA_ARGS__)
+	rsync_warn(1,  (_fmt), ##__VA_ARGS__)
 #define WARN2(_fmt, ...) \
-	rsync_warn(2, __FILE__, __LINE__, (_fmt), ##__VA_ARGS__)
+	rsync_warn(2,  (_fmt), ##__VA_ARGS__)
 #define ERR(_fmt, ...) \
-	rsync_err(__FILE__, __LINE__, (_fmt), ##__VA_ARGS__)
+	rsync_err( (_fmt), ##__VA_ARGS__)
 #define ERRX(_fmt, ...) \
-	rsync_errx(__FILE__, __LINE__, (_fmt), ##__VA_ARGS__)
+	rsync_errx( (_fmt), ##__VA_ARGS__)
 
-void		  rsync_log(const char *, size_t, int, const char *, ...)
-			__attribute__((format(printf, 4, 5)));
-void		  rsync_warnx1(const char *, size_t, const char *, ...)
-			__attribute__((format(printf, 3, 4)));
-void		  rsync_warn(int, const char *, size_t, const char *, ...)
-			__attribute__((format(printf, 4, 5)));
-void		  rsync_warnx(const char *, size_t, const char *, ...)
-			__attribute__((format(printf, 3, 4)));
-void		  rsync_err(const char *, size_t, const char *, ...)
-			__attribute__((format(printf, 3, 4)));
-void		  rsync_errx(const char *, size_t, const char *, ...)
-			__attribute__((format(printf, 3, 4)));
-void		  rsync_errx1(const char *, size_t, const char *, ...)
-			__attribute__((format(printf, 3, 4)));
+void		  rsync_log(int, const char *, ...)
+			__attribute__((format(printf, 2, 3)));
+void		  rsync_warnx1(const char *, ...)
+			__attribute__((format(printf, 1, 2)));
+void		  rsync_warn(int, const char *, ...)
+			__attribute__((format(printf, 2, 3)));
+void		  rsync_warnx(const char *, ...)
+			__attribute__((format(printf, 1, 2)));
+void		  rsync_err(const char *, ...)
+			__attribute__((format(printf, 1, 2)));
+void		  rsync_errx(const char *, ...)
+			__attribute__((format(printf, 1, 2)));
+void		  rsync_errx1(const char *, ...)
+			__attribute__((format(printf, 1, 2)));
 
 int		  flist_del(struct sess *, int,
 			const struct flist *, size_t);
@@ -327,6 +331,10 @@ void		  download_free(struct download *);
 struct upload	 *upload_alloc(const char *, int, int, size_t,
 			const struct flist *, size_t, mode_t);
 void		  upload_free(struct upload *);
+
+struct blktab	*blkhash_alloc(void);
+int		 blkhash_set(struct blktab *, const struct blkset *);
+void		 blkhash_free(struct blktab *);
 
 struct blkset	 *blk_recv(struct sess *, int, const char *);
 void		  blk_recv_ack(char [20], const struct blkset *, int32_t);

@@ -1,3 +1,4 @@
+/*	$OpenBSD: ip6_mroute.c,v 1.125 2020/06/24 22:03:44 cheloha Exp $	*/
 /*	$NetBSD: ip6_mroute.c,v 1.59 2003/12/10 09:28:38 itojun Exp $	*/
 /*	$KAME: ip6_mroute.c,v 1.45 2001/03/25 08:38:51 itojun Exp $	*/
 
@@ -174,9 +175,9 @@ int del_m6fc(struct socket *, struct mf6cctl *);
 struct ifnet *mrt6_iflookupbymif(mifi_t, unsigned int);
 struct rtentry *mf6c_find(struct ifnet *, struct in6_addr *,
     struct in6_addr *, unsigned int);
-struct rtentry *mrt6_mcast6_add(struct ifnet *, struct sockaddr *,
+struct rtentry *mrt6_mcast_add(struct ifnet *, struct sockaddr *,
     struct sockaddr *);
-int mrt6_mcast6_del(struct rtentry *, unsigned int);
+void mrt6_mcast_del(struct rtentry *, unsigned int);
 void mf6c_expire_route(struct rtentry *, struct rttimer *);
 
 /*
@@ -244,18 +245,21 @@ mrt6_ioctl(struct socket *so, u_long cmd, caddr_t data)
 	struct inpcb *inp = sotoinpcb(so);
 	int error;
 
+	if (inp == NULL)
+		return (ENOTCONN);
+
 	switch (cmd) {
 	case SIOCGETSGCNT_IN6:
-		NET_RLOCK();
+		NET_RLOCK_IN_IOCTL();
 		error = get_sg6_cnt((struct sioc_sg_req6 *)data,
 		    inp->inp_rtableid);
-		NET_RUNLOCK();
+		NET_RUNLOCK_IN_IOCTL();
 		break;
 	case SIOCGETMIFCNT_IN6:
-		NET_RLOCK();
+		NET_RLOCK_IN_IOCTL();
 		error = get_mif6_cnt((struct sioc_mif_req6 *)data,
 		    inp->inp_rtableid);
-		NET_RUNLOCK();
+		NET_RUNLOCK_IN_IOCTL();
 		break;
 	default:
 		error = ENOTTY;
@@ -451,8 +455,10 @@ mrt6_sysctl_mfc(void *oldp, size_t *oldlenp)
 	msa.ms6a_len = *oldlenp;
 	msa.ms6a_needed = 0;
 
-	for (rtableid = 0; rtableid <= RT_TABLEID_MAX; rtableid++)
-		rtable_walk(rtableid, AF_INET6, mrt6_rtwalk_mf6csysctl, &msa);
+	for (rtableid = 0; rtableid <= RT_TABLEID_MAX; rtableid++) {
+		rtable_walk(rtableid, AF_INET6, NULL, mrt6_rtwalk_mf6csysctl,
+		    &msa);
+	}
 
 	if (msa.ms6a_minfos != NULL && msa.ms6a_needed > 0 &&
 	    (error = copyout(msa.ms6a_minfos, oldp, msa.ms6a_needed)) != 0) {
@@ -500,11 +506,7 @@ mrouter6_rtwalk_delete(struct rtentry *rt, void *arg, unsigned int rtableid)
 	    (RTF_HOST | RTF_MULTICAST))
 		return 0;
 
-	/* Remove all timers related to this route. */
-	rt_timer_remove_all(rt);
-	mrt6_mcast6_del(rt, rtableid);
-
-	return 0;
+	return EEXIST;
 }
 
 /*
@@ -516,11 +518,22 @@ ip6_mrouter_done(struct socket *so)
 	struct inpcb *inp = sotoinpcb(so);
 	struct ifnet *ifp;
 	unsigned int rtableid = inp->inp_rtableid;
+	int error;
 
 	NET_ASSERT_LOCKED();
 
 	/* Delete all remaining installed multicast routes. */
-	rtable_walk(rtableid, AF_INET6, mrouter6_rtwalk_delete, NULL);
+	do {
+		struct rtentry *rt = NULL;
+
+		error = rtable_walk(rtableid, AF_INET6, &rt,
+		    mrouter6_rtwalk_delete, NULL);
+		if (rt != NULL && error == EEXIST) {
+			mrt6_mcast_del(rt, rtableid);
+			error = EAGAIN;
+		}
+		rtfree(rt);
+	} while (error == EAGAIN);
 
 	/* Unregister all interfaces in the domain. */
 	TAILQ_FOREACH(ifp, &ifnet, if_list) {
@@ -552,7 +565,9 @@ ip6_mrouter_detach(struct ifnet *ifp)
 	memset(&ifr, 0, sizeof(ifr));
 	ifr.ifr_addr.sin6_family = AF_INET6;
 	ifr.ifr_addr.sin6_addr = in6addr_any;
+	KERNEL_LOCK();
 	(*ifp->if_ioctl)(ifp, SIOCDELMULTI, (caddr_t)&ifr);
+	KERNEL_UNLOCK();
 
 	free(m6, M_MRTABLE, sizeof(*m6));
 }
@@ -650,7 +665,7 @@ mf6c_add_route(struct ifnet *ifp, struct sockaddr *origin,
 	char bsrc[INET6_ADDRSTRLEN], bdst[INET6_ADDRSTRLEN];
 #endif /* MCAST_DEBUG */
 
-	rt = mrt6_mcast6_add(ifp, origin, group);
+	rt = mrt6_mcast_add(ifp, origin, group);
 	if (rt == NULL)
 		return ENOENT;
 
@@ -660,7 +675,8 @@ mf6c_add_route(struct ifnet *ifp, struct sockaddr *origin,
 		    inet_ntop(AF_INET6, origin, bsrc, sizeof(bsrc)),
 		    inet_ntop(AF_INET6, group, bdst, sizeof(bdst)),
 		    mf6cc->mf6cc_parent, ifp->if_xname);
-		mrt6_mcast6_del(rt, rtableid);
+		mrt6_mcast_del(rt, rtableid);
+		rtfree(rt);
 		return ENOMEM;
 	}
 
@@ -715,9 +731,8 @@ mf6c_update(struct mf6cctl *mf6cc, int wait, unsigned int rtableid)
 			    inet_ntop(AF_INET6,
 			    &mf6cc->mf6cc_mcastgrp.sin6_addr, bdst,
 			    sizeof(bdst)), mifi, ifp->if_xname);
-
-			rt_timer_remove_all(rt);
-			mrt6_mcast6_del(rt, rtableid);
+			mrt6_mcast_del(rt, rtableid);
+			rtfree(rt);
 			continue;
 		}
 
@@ -829,9 +844,8 @@ del_m6fc(struct socket *so, struct mf6cctl *mfccp)
 
 	while ((rt = mf6c_find(NULL, &mfccp->mf6cc_origin.sin6_addr,
 	    &mfccp->mf6cc_mcastgrp.sin6_addr, rtableid)) != NULL) {
-		/* Remove all timers related to this route. */
-		rt_timer_remove_all(rt);
-		mrt6_mcast6_del(rt, rtableid);
+		mrt6_mcast_del(rt, rtableid);
+		rtfree(rt);
 	}
 
 	return 0;
@@ -889,10 +903,10 @@ ip6_mforward(struct ip6_hdr *ip6, struct ifnet *ifp, struct mbuf *m)
 	 */
 	if (IN6_IS_ADDR_UNSPECIFIED(&ip6->ip6_src)) {
 		ip6stat_inc(ip6s_cantforward);
-		if (ip6_log_time + ip6_log_interval < time_uptime) {
+		if (ip6_log_time + ip6_log_interval < getuptime()) {
 			char src[INET6_ADDRSTRLEN], dst[INET6_ADDRSTRLEN];
 
-			ip6_log_time = time_uptime;
+			ip6_log_time = getuptime();
 
 			inet_ntop(AF_INET6, &ip6->ip6_src, src, sizeof(src));
 			inet_ntop(AF_INET6, &ip6->ip6_dst, dst, sizeof(dst));
@@ -1000,8 +1014,7 @@ mf6c_expire_route(struct rtentry *rt, struct rttimer *rtt)
 		return;
 	}
 
-	rt_timer_remove_all(rt);
-	mrt6_mcast6_del(rt, rtableid);
+	mrt6_mcast_del(rt, rtableid);
 }
 
 /*
@@ -1225,7 +1238,7 @@ mf6c_find(struct ifnet *ifp, struct in6_addr *origin, struct in6_addr *group,
 }
 
 struct rtentry *
-mrt6_mcast6_add(struct ifnet *ifp, struct sockaddr *origin,
+mrt6_mcast_add(struct ifnet *ifp, struct sockaddr *origin,
     struct sockaddr *group)
 {
 	struct ifaddr *ifa;
@@ -1251,28 +1264,24 @@ mrt6_mcast6_add(struct ifnet *ifp, struct sockaddr *origin,
 	return mf6c_find(ifp, NULL, &satosin6(group)->sin6_addr, rtableid);
 }
 
-int
-mrt6_mcast6_del(struct rtentry *rt, unsigned int rtableid)
+void
+mrt6_mcast_del(struct rtentry *rt, unsigned int rtableid)
 {
 	struct ifnet *ifp;
-	int rv;
+	int error;
+
+	/* Remove all timers related to this route. */
+	rt_timer_remove_all(rt);
 
 	free(rt->rt_llinfo, M_MRTABLE, sizeof(struct mf6c));
 	rt->rt_llinfo = NULL;
 
-	if ((ifp = if_get(rt->rt_ifidx)) == NULL) {
-		DPRINTF("if_get(%d) failed", rt->rt_ifidx);
-		rtfree(rt);
-		return ENOENT;
-	}
-
-	rv = rtdeletemsg(rt, ifp, rtableid);
+	ifp = if_get(rt->rt_ifidx);
+	if (ifp == NULL)
+		return;
+	error = rtdeletemsg(rt, ifp, rtableid);
 	if_put(ifp);
-	if (rv != 0) {
-		DPRINTF("rtdeletemsg failed %d", rv);
-		rtfree(rt);
-		return rv;
-	}
 
-	return 0;
+	if (error)
+		DPRINTF("delete route error %d\n", error);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ospfd.h,v 1.104 2019/05/16 05:49:22 denis Exp $ */
+/*	$OpenBSD: ospfd.h,v 1.106 2020/01/21 20:38:52 remi Exp $ */
 
 /*
  * Copyright (c) 2004 Esben Norby <norby@openbsd.org>
@@ -107,6 +107,7 @@ enum imsg_type {
 	IMSG_IFINFO,
 	IMSG_NEIGHBOR_UP,
 	IMSG_NEIGHBOR_DOWN,
+	IMSG_NEIGHBOR_ADDR,
 	IMSG_NEIGHBOR_CHANGE,
 	IMSG_NEIGHBOR_CAPA,
 	IMSG_NETWORK_ADD,

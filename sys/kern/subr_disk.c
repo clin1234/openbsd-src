@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_disk.c,v 1.234 2018/04/28 15:44:59 jasper Exp $	*/
+/*	$OpenBSD: subr_disk.c,v 1.237 2020/05/29 04:42:25 deraadt Exp $	*/
 /*	$NetBSD: subr_disk.c,v 1.17 1996/03/16 23:17:08 christos Exp $	*/
 
 /*
@@ -63,7 +63,6 @@
 
 #include <net/if.h>
 
-#include <dev/rndvar.h>
 #include <dev/cons.h>
 
 #include <lib/libz/zlib.h>
@@ -1426,7 +1425,7 @@ setroot(struct device *bootdv, int part, int exitflags)
 		TAILQ_FOREACH(dk, &disklist, dk_link) {
 			if (dk->dk_devno != NODEV &&
 			    (dk->dk_flags & DKF_OPENED) == 0) {
-				tsleep(dk, 0, "dkopen", hz);
+				tsleep_nsec(dk, 0, "dkopen", SEC_TO_NSEC(1));
 				slept++;
 				break;
 			}
@@ -1610,9 +1609,7 @@ gotswap:
 			panic("root device (%s) not found", buf);
 	}
 
-	if (rootdv && rootdv == bootdv && rootdv->dv_class == DV_IFNET)
-		ifp = ifunit(rootdv->dv_xname);
-	else if (bootdv && bootdv->dv_class == DV_IFNET)
+	if (bootdv != NULL && bootdv->dv_class == DV_IFNET)
 		ifp = ifunit(bootdv->dv_xname);
 
 	if (ifp)

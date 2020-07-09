@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore.S,v 1.118 2019/05/17 19:07:15 guenther Exp $	*/
+/*	$OpenBSD: locore.S,v 1.120 2020/05/17 13:48:30 deraadt Exp $	*/
 /*	$NetBSD: locore.S,v 1.13 2004/03/25 18:33:17 drochner Exp $	*/
 
 /*
@@ -270,6 +270,7 @@ NENTRY(lgdt)
 	RETGUARD_CHECK(lgdt, r11)
 	lretq
 
+#ifdef DDB
 ENTRY(setjmp)
 	RETGUARD_SETUP(setjmp, r11)
 	/*
@@ -307,6 +308,7 @@ ENTRY(longjmp)
 	incl	%eax
 	RETGUARD_CHECK(longjmp, r11)
 	ret
+#endif /* DDB */
 
 /*****************************************************************************/
 
@@ -562,7 +564,7 @@ XUsyscall_meltdown:
 	 * (thank you, Intel), at which point we'll continue at the
 	 * "movq CPUVAR(KERN_RSP),%rax" after Xsyscall below.
 	 * In case the CPU speculates past the mov to cr3, we put a
-	 * retpoline-style pause-jmp-to-pause loop.
+	 * retpoline-style pause-lfence-jmp-to-pause loop.
 	 */
 	swapgs
 	movq	%rax,CPUVAR(SCRATCH)

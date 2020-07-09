@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.100 2018/12/11 13:29:52 gilles Exp $
+#	$OpenBSD: Makefile,v 1.107 2020/01/31 22:01:20 gilles Exp $
 
 .PATH:		${.CURDIR}/..
 
@@ -24,12 +24,11 @@ SRCS+=	ioev.c
 SRCS+=	limit.c
 SRCS+=	lka.c
 SRCS+=	lka_filter.c
-SRCS+=	lka_proc.c
-SRCS+=	lka_report.c
 SRCS+=	lka_session.c
 SRCS+=	log.c
 SRCS+=	mailaddr.c
 SRCS+=	mda.c
+SRCS+=	mda_mbox.c
 SRCS+=	mda_unpriv.c
 SRCS+=	mda_variables.c
 SRCS+=	mproc.c
@@ -37,6 +36,7 @@ SRCS+=	mta.c
 SRCS+=	mta_session.c
 SRCS+=	parse.y
 SRCS+=	pony.c
+SRCS+=	proxy.c
 SRCS+=	queue.c
 SRCS+=	queue_backend.c
 SRCS+=	report_smtp.c
@@ -49,8 +49,10 @@ SRCS+=	scheduler_backend.c
 SRCS+=	smtp.c
 SRCS+=	smtp_session.c
 SRCS+=	smtpd.c
+SRCS+=	srs.c
 SRCS+=	ssl.c
 SRCS+=	ssl_smtpd.c
+SRCS+=	ssl_verify.c
 SRCS+=	stat_backend.c
 SRCS+=	table.c
 SRCS+=	to.c
@@ -91,7 +93,7 @@ CFLAGS+=	-Wshadow -Wpointer-arith -Wcast-qual
 CFLAGS+=	-Wsign-compare
 CFLAGS+=	-Werror-implicit-function-declaration
 #CFLAGS+=	-Werror # during development phase (breaks some archs)
-CFLAGS+=	-DIO_SSL
+CFLAGS+=	-DIO_TLS
 CFLAGS+=	-DQUEUE_PROFILING
 YFLAGS=
 

@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.33 2019/03/17 17:42:37 tb Exp $
+# $OpenBSD: Makefile,v 1.42 2020/06/09 16:53:52 deraadt Exp $
 
 LIB=	crypto
 LIBREBUILD=y
@@ -34,6 +34,7 @@ CFLAGS+= -I${LCRYPTO_SRC}/modes
 # XXX FIXME ecdsa and ec should be merged
 CFLAGS+= -I${LCRYPTO_SRC}/ecdsa
 CFLAGS+= -I${LCRYPTO_SRC}/ec
+CFLAGS+= -I${LCRYPTO_SRC}/ecdh
 
 VERSION_SCRIPT=	Symbols.map
 SYMBOL_LIST=	${.CURDIR}/Symbols.list
@@ -96,6 +97,11 @@ SRCS+= chacha.c
 # cmac/
 SRCS+= cmac.c cm_ameth.c cm_pmeth.c
 
+# cms/
+SRCS+= cms_asn1.c cms_att.c cms_cd.c cms_dd.c cms_enc.c cms_env.c cms_err.c
+SRCS+= cms_ess.c cms_io.c cms_kari.c cms_lcl.h cms_lib.c cms_pwri.c cms_sd.c
+SRCS+= cms_smime.c
+
 # comp/
 SRCS+= comp_lib.c comp_err.c c_rle.c c_zlib.c
 
@@ -134,7 +140,7 @@ SRCS+= ecp_nistp224.c ecp_nistp256.c ecp_nistp521.c ecp_nistputil.c
 SRCS+= ecp_oct.c ec2_oct.c ec_oct.c
 
 # ecdh/
-SRCS+= ech_lib.c ech_key.c ech_err.c
+SRCS+= ech_lib.c ech_key.c ech_err.c ecdh_kdf.c
 
 # ecdsa/
 SRCS+= ecs_lib.c ecs_asn1.c ecs_ossl.c ecs_sign.c ecs_vrf.c ecs_err.c
@@ -267,12 +273,10 @@ SRCS+= x509_set.c x509cset.c x509rset.c x509_err.c
 SRCS+= x509name.c x509_v3.c x509_ext.c x509_att.c
 SRCS+= x509type.c x509_lu.c x_all.c x509_txt.c
 SRCS+= x509_trs.c by_file.c by_dir.c by_mem.c x509_vpm.c
-
-# x509v3/
-SRCS+= v3_bcons.c v3_bitst.c v3_conf.c v3_extku.c v3_ia5.c v3_lib.c
-SRCS+= v3_prn.c v3_utl.c v3err.c v3_genn.c v3_alt.c v3_skey.c v3_akey.c v3_pku.c
-SRCS+= v3_int.c v3_enum.c v3_sxnet.c v3_cpols.c v3_crld.c v3_purp.c v3_info.c
-SRCS+= v3_ocsp.c v3_akeya.c v3_pmaps.c v3_pcons.c v3_ncons.c v3_pcia.c v3_pci.c
+SRCS+= x509_bcons.c x509_bitst.c x509_conf.c x509_extku.c x509_ia5.c x509_lib.c
+SRCS+= x509_prn.c x509_utl.c x509_genn.c x509_alt.c x509_skey.c x509_akey.c x509_pku.c
+SRCS+= x509_int.c x509_enum.c x509_sxnet.c x509_cpols.c x509_crld.c x509_purp.c x509_info.c
+SRCS+= x509_ocsp.c x509_akeya.c x509_pmaps.c x509_pcons.c x509_ncons.c x509_pcia.c x509_pci.c
 SRCS+= pcy_cache.c pcy_node.c pcy_data.c pcy_map.c pcy_tree.c pcy_lib.c
 
 .PATH:	${.CURDIR}/arch/${MACHINE_CPU} \
@@ -288,6 +292,7 @@ SRCS+= pcy_cache.c pcy_node.c pcy_data.c pcy_map.c pcy_tree.c pcy_lib.c
 	${LCRYPTO_SRC}/cast \
 	${LCRYPTO_SRC}/chacha \
 	${LCRYPTO_SRC}/cmac \
+	${LCRYPTO_SRC}/cms \
 	${LCRYPTO_SRC}/comp \
 	${LCRYPTO_SRC}/conf \
 	${LCRYPTO_SRC}/curve25519 \
@@ -330,8 +335,7 @@ SRCS+= pcy_cache.c pcy_node.c pcy_data.c pcy_map.c pcy_tree.c pcy_lib.c
 	${LCRYPTO_SRC}/txt_db \
 	${LCRYPTO_SRC}/ui \
 	${LCRYPTO_SRC}/whrlpool \
-	${LCRYPTO_SRC}/x509 \
-	${LCRYPTO_SRC}/x509v3
+	${LCRYPTO_SRC}/x509
 
 HDRS=\
 	${LCRYPTO_SRC}/aes/aes.h \
@@ -345,6 +349,7 @@ HDRS=\
 	${LCRYPTO_SRC}/cast/cast.h \
 	${LCRYPTO_SRC}/chacha/chacha.h \
 	${LCRYPTO_SRC}/cmac/cmac.h \
+	${LCRYPTO_SRC}/cms/cms.h \
 	${LCRYPTO_SRC}/comp/comp.h \
 	${LCRYPTO_SRC}/conf/conf.h \
 	${LCRYPTO_SRC}/conf/conf_api.h \
@@ -395,7 +400,7 @@ HDRS=\
 	${LCRYPTO_SRC}/whrlpool/whrlpool.h \
 	${LCRYPTO_SRC}/x509/x509.h \
 	${LCRYPTO_SRC}/x509/x509_vfy.h \
-	${LCRYPTO_SRC}/x509v3/x509v3.h
+	${LCRYPTO_SRC}/x509/x509v3.h
 
 HDRS_GEN=\
 	${.CURDIR}/arch/${MACHINE_CPU}/opensslconf.h \
@@ -406,14 +411,7 @@ prereq: obj_mac.h
 includes: prereq
 	@test -d ${DESTDIR}/usr/include/openssl || \
 	    mkdir ${DESTDIR}/usr/include/openssl
-	@for i in $(HDRS); do \
-	    j="cmp -s $$i ${DESTDIR}/usr/include/openssl/`basename $$i` || \
-	    ${INSTALL} ${INSTALL_COPY} -o ${BINOWN} -g ${BINGRP} -m 444 $$i\
-		${DESTDIR}/usr/include/openssl"; \
-	    echo $$j; \
-	    eval "$$j"; \
-	done; \
-	for i in $(HDRS_GEN); do \
+	@for i in $(HDRS) $(HDRS_GEN); do \
 	    j="cmp -s $$i ${DESTDIR}/usr/include/openssl/`basename $$i` || \
 	    ${INSTALL} ${INSTALL_COPY} -o ${BINOWN} -g ${BINGRP} -m 444 $$i\
 		${DESTDIR}/usr/include/openssl"; \
