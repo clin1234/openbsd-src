@@ -1,4 +1,4 @@
-/* $OpenBSD: pfkeyv2.h,v 1.82 2020/04/23 19:38:08 tobhe Exp $ */
+/* $OpenBSD: pfkeyv2.h,v 1.85 2020/11/05 19:28:27 phessler Exp $ */
 /*
  *	@(#)COPYRIGHT	1.1 (NRL) January 1998
  *
@@ -351,7 +351,8 @@ struct sadb_x_counter {
 #define SADB_IDENTTYPE_PREFIX       1
 #define SADB_IDENTTYPE_FQDN         2
 #define SADB_IDENTTYPE_USERFQDN     3
-#define SADB_IDENTTYPE_MAX          3
+#define SADB_IDENTTYPE_ASN1_DN      4
+#define SADB_IDENTTYPE_MAX          4
 
 #define SADB_KEY_FLAGS_MAX 0
 
@@ -395,8 +396,8 @@ int pfkeyv2_expire(struct tdb *, u_int16_t);
 int pfkeyv2_acquire(struct ipsec_policy *, union sockaddr_union *,
     union sockaddr_union *, u_int32_t *, struct sockaddr_encap *);
 
-int pfkeyv2_get(struct tdb *, void **, void **, int *);
-int pfkeyv2_policy(struct ipsec_acquire *, void **, void **);
+int pfkeyv2_get(struct tdb *, void **, void **, int *, int *);
+int pfkeyv2_policy(struct ipsec_acquire *, void **, void **, int *);
 int pfkeyv2_send(struct socket *, void *, int);
 int pfkeyv2_sendmessage(void **, int, struct socket *, u_int8_t, int, u_int);
 int pfkeyv2_dump_policy(struct ipsec_policy *, void **, void **, int *);

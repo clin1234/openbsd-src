@@ -1,4 +1,4 @@
-/* $OpenBSD: sbrk.S,v 1.2 2020/06/26 10:31:44 kettenis Exp $ */
+/* $OpenBSD: sbrk.S,v 1.4 2020/10/16 23:42:16 deraadt Exp $ */
 
 /*
  * Copyright (c) 1996 Dale Rahn
@@ -28,24 +28,29 @@
 #include "SYS.h"
 
 	.data
+	.globl _end
 	.globl __curbrk
 	.hidden __curbrk
 __curbrk:
+	.quad	_end
 	END(__curbrk)
 	.type	__curbrk,@object
 
 	.weak	sbrk
 
 	.text
-PSEUDO_PREFIX(,sbrk,break)
+SYSENTRY(sbrk)
+	RETGUARD_SETUP(sbrk, %r11)
+
 	/* call break(__curbrk + size) */
 	addis	%r6, %r2, __curbrk@toc@ha
 	addi	%r6, %r6, __curbrk@toc@l	/* # %r6 = &__curbrk */
 
-	lwz	%r5, 0(%r6)			/* # %r5 = *%r6 (old_curbrk) */
+	ld	%r5, 0(%r6)			/* # %r5 = *%r6 (old_curbrk) */
 	add	%r3, %r5, %r3			/* # %r3 = new_curbrk */
 	mr	%r7, %r3
 
+	li %r0, SYS_break
 	sc
 
 	/* check for error */
@@ -53,11 +58,13 @@ PSEUDO_PREFIX(,sbrk,break)
 	beq+	.L_sbrk_ok
 	stw	%r0, R13_OFFSET_ERRNO(%r13)
 	li	%r3, -1
-	blr
+	b	.L_done
 
 	/* update, __curbrk and return */
 .L_sbrk_ok:
-	stw	%r7, 0(%r6)	/* # remember, %r6=&__curbrk, %r7=new_curbrk */
+	std	%r7, 0(%r6)	/* # remember, %r6=&__curbrk, %r7=new_curbrk */
 	mr	%r3, %r5	/* # remember, %r5=old_curbrk */
+.L_done:
+	RETGUARD_CHECK(sbrk, %r11);
 	blr
-END(sbrk)
+ END(sbrk)

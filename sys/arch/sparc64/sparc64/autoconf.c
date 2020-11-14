@@ -1,4 +1,4 @@
-/*	$OpenBSD: autoconf.c,v 1.136 2020/07/05 19:20:06 krw Exp $	*/
+/*	$OpenBSD: autoconf.c,v 1.138 2020/08/26 03:29:06 visa Exp $	*/
 /*	$NetBSD: autoconf.c,v 1.51 2001/07/24 19:32:11 eeh Exp $ */
 
 /*
@@ -121,9 +121,6 @@ int	fbnode;		/* node ID of ROM's console output device */
 int	optionsnode;	/* node ID of ROM's options */
 
 static	int rootnode;
-
-/* for hw.product/vendor see sys/kern/kern_sysctl.c */
-extern char *hw_prod, *hw_vendor;
 
 static	char *str2hex(char *, long *);
 static	int mbprint(void *, const char *);
@@ -1485,8 +1482,8 @@ device_register(struct device *dev, void *aux)
 		/*
 		 * Bounds check: we know the target and lun widths.
 		 */
-		if (target >= sl->adapter_buswidth ||
-		    lun >= sl->luns) {
+		if (target >= sl->bus->sb_adapter_buswidth ||
+		    lun >= sl->bus->sb_luns) {
 			printf("SCSI disk bootpath component not accepted: "
 			       "target %u; lun %u\n", target, lun);
 			return;

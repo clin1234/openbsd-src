@@ -1,4 +1,4 @@
-/*	$OpenBSD: phb.c,v 1.11 2020/07/05 17:12:59 kettenis Exp $	*/
+/*	$OpenBSD: phb.c,v 1.18 2020/10/25 14:11:16 kettenis Exp $	*/
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -35,6 +35,15 @@ extern paddr_t physmax;		/* machdep.c */
 
 #define IODA_TVE_SELECT		(1ULL << 59)
 
+#define IODA_TCE_TABLE_SIZE_MAX	(1ULL << 42)
+
+#define IODA_TCE_READ		(1ULL << 0)
+#define IODA_TCE_WRITE		(1ULL << 1)
+
+#define PHB_DMA_OFFSET		(1ULL << 32)
+
+struct phb_dmamem;
+
 struct phb_range {
 	uint32_t		flags;
 	uint64_t		pci_base;
@@ -57,6 +66,7 @@ struct phb_softc {
 
 	uint64_t		sc_phb_id;
 	uint64_t		sc_pe_number;
+	struct phb_dmamem	*sc_tce_table;
 	uint32_t		sc_msi_ranges[2];
 	uint32_t		sc_xive;
 
@@ -71,6 +81,22 @@ struct phb_softc {
 	int			sc_bus;
 };
 
+struct phb_dmamem {
+	bus_dmamap_t		pdm_map;
+	bus_dma_segment_t	pdm_seg;
+	size_t			pdm_size;
+	caddr_t			pdm_kva;
+};
+
+#define PHB_DMA_MAP(_pdm)	((_pdm)->pdm_map)
+#define PHB_DMA_LEN(_pdm)	((_pdm)->pdm_size)
+#define PHB_DMA_DVA(_pdm)	((_pdm)->pdm_map->dm_segs[0].ds_addr)
+#define PHB_DMA_KVA(_pdm)	((void *)(_pdm)->pdm_kva)
+
+struct phb_dmamem *phb_dmamem_alloc(bus_dma_tag_t, bus_size_t,
+	    bus_size_t);
+void	phb_dmamem_free(bus_dma_tag_t, struct phb_dmamem *);
+
 int	phb_match(struct device *, void *, void *);
 void	phb_attach(struct device *, struct device *, void *);
 
@@ -81,6 +107,8 @@ struct cfattach	phb_ca = {
 struct cfdriver phb_cd = {
 	NULL, "phb", DV_DULL
 };
+
+void	phb_setup_tce_table(struct phb_softc *sc);
 
 void	phb_attach_hook(struct device *, struct device *,
 	    struct pcibus_attach_args *);
@@ -93,7 +121,7 @@ void	phb_conf_write(void *, pcitag_t, int, pcireg_t);
 
 int	phb_intr_map(struct pci_attach_args *, pci_intr_handle_t *);
 const char *phb_intr_string(void *, pci_intr_handle_t);
-void	*phb_intr_establish(void *, pci_intr_handle_t, int,
+void	*phb_intr_establish(void *, pci_intr_handle_t, int, struct cpu_info *,
 	    int (*)(void *), void *, char *);
 void	phb_intr_disestablish(void *, void *);
 
@@ -101,6 +129,7 @@ int	phb_bs_iomap(bus_space_tag_t, bus_addr_t, bus_size_t, int,
 	    bus_space_handle_t *);
 int	phb_bs_memmap(bus_space_tag_t, bus_addr_t, bus_size_t, int,
 	    bus_space_handle_t *);
+paddr_t phb_bs_mmap(bus_space_tag_t, bus_addr_t, off_t, int, int);
 int	phb_dmamap_load_buffer(bus_dma_tag_t, bus_dmamap_t, void *,
 	    bus_size_t, struct proc *, int, paddr_t *, int *, int);
 int	phb_dmamap_load_raw(bus_dma_tag_t, bus_dmamap_t,
@@ -111,7 +140,8 @@ phb_match(struct device *parent, void *match, void *aux)
 {
 	struct fdt_attach_args *faa = aux;
 
-	return OF_is_compatible(faa->fa_node, "ibm,ioda3-phb");
+	return (OF_is_compatible(faa->fa_node, "ibm,ioda2-phb") ||
+	    OF_is_compatible(faa->fa_node, "ibm,ioda3-phb"));
 }
 
 void
@@ -198,8 +228,7 @@ phb_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	ranges = malloc(rangeslen, M_TEMP, M_WAITOK);
-	OF_getpropintarray(sc->sc_node, "ranges", ranges,
-	    rangeslen);
+	OF_getpropintarray(sc->sc_node, "ranges", ranges, rangeslen);
 
 	/*
 	 * Reserve an extra slot here and make sure it is filled
@@ -251,7 +280,7 @@ phb_attach(struct device *parent, struct device *self, void *aux)
 	/*
 	 * Enable all the 64-bit mmio windows we found.
 	 */
-	m64ranges[0] = 1; m64ranges[1] = 0;
+	m64ranges[0] = 0; m64ranges[1] = 16;
 	OF_getpropintarray(sc->sc_node, "ibm,opal-available-m64-ranges",
 	    m64ranges, sizeof(m64ranges));
 	window = m64ranges[0];
@@ -316,6 +345,24 @@ phb_attach(struct device *parent, struct device *self, void *aux)
 
 	printf("\n");
 
+	/*
+	 * The DMA controllers of many PCI devices developed for the
+	 * x86 architectures may not support the full 64-bit PCI
+	 * address space.  Examples of such devices are Radeon GPUs
+	 * that support only 36, 40 or 44 address lines.  This means
+	 * they can't enable the TVE selection bit to request IODA
+	 * no-translate (bypass) operation.
+	 *
+	 * To allow such devices to work, we set up a TCE table that
+	 * provides a 1:1 mapping of all physical memory where the
+	 * physical page at address zero as mapped at 4 GB in PCI
+	 * address space.  If we fail to set up this TCE table we fall
+	 * back on using no-translate operation, which means that
+	 * devices that don't implenent 64 address lines may not
+	 * function properly.
+	 */
+	phb_setup_tce_table(sc);
+
 	memcpy(&sc->sc_bus_iot, sc->sc_iot, sizeof(sc->sc_bus_iot));
 	sc->sc_bus_iot.bus_private = sc;
 	sc->sc_bus_iot._space_map = phb_bs_iomap;
@@ -328,6 +375,7 @@ phb_attach(struct device *parent, struct device *self, void *aux)
 	memcpy(&sc->sc_bus_memt, sc->sc_iot, sizeof(sc->sc_bus_memt));
 	sc->sc_bus_memt.bus_private = sc;
 	sc->sc_bus_memt._space_map = phb_bs_memmap;
+	sc->sc_bus_memt._space_mmap = phb_bs_mmap;
 	sc->sc_bus_memt._space_read_2 = little_space_read_2;
 	sc->sc_bus_memt._space_read_4 = little_space_read_4;
 	sc->sc_bus_memt._space_read_8 = little_space_read_8;
@@ -374,6 +422,69 @@ phb_attach(struct device *parent, struct device *self, void *aux)
 }
 
 void
+phb_setup_tce_table(struct phb_softc *sc)
+{
+	uint64_t tce_table_size, tce_page_size;
+	uint64_t *tce;
+	uint32_t *tce_sizes;
+	int tce_page_shift;
+	int i, len, offset, nentries;
+	paddr_t pa;
+	int64_t error;
+
+	/* Determine the maximum supported TCE page size. */
+	len = OF_getproplen(sc->sc_node, "ibm,supported-tce-sizes");
+	if (len <= 0 || (len % sizeof(uint32_t)))
+		return;
+	tce_sizes = malloc(len, M_TEMP, M_WAITOK);
+	OF_getpropintarray(sc->sc_node, "ibm,supported-tce-sizes",
+	    tce_sizes, len);
+	tce_page_shift = 0;
+	for (i = 0; i < len / sizeof(uint32_t); i++)
+		tce_page_shift = MAX(tce_page_shift, tce_sizes[i]);
+	free(tce_sizes, M_TEMP, len);
+
+	/* Bail out if we don't support 2G pages. */
+	if (tce_page_shift < 30)
+		return;
+
+	/* Calculate the appropriate size of the TCE table. */
+	tce_page_size = (1ULL << tce_page_shift);
+	tce_table_size = PAGE_SIZE;
+	nentries = howmany(PHB_DMA_OFFSET + physmax, tce_page_size);
+	while (tce_table_size < nentries * sizeof(*tce))
+		tce_table_size *= 2;
+	if (tce_table_size > IODA_TCE_TABLE_SIZE_MAX)
+		return;
+
+	/* Allocate the TCE table. */
+	sc->sc_tce_table = phb_dmamem_alloc(sc->sc_dmat,
+	    tce_table_size, PAGE_SIZE);
+	if (sc->sc_tce_table == NULL) {
+		printf(": can't allocate DMA translation table\n");
+		return;
+	}
+
+	/* Fill TCE table. */
+	tce = PHB_DMA_KVA(sc->sc_tce_table);
+	offset = PHB_DMA_OFFSET >> tce_page_shift;
+	for (pa = 0, i = 0; pa < physmax; pa += tce_page_size, i++)
+		tce[i + offset] = pa | IODA_TCE_READ | IODA_TCE_WRITE;
+
+	/* Set up translations. */
+	error = opal_pci_map_pe_dma_window(sc->sc_phb_id,
+	    sc->sc_pe_number, sc->sc_pe_number << 1, 1,
+	    PHB_DMA_DVA(sc->sc_tce_table), PHB_DMA_LEN(sc->sc_tce_table),
+	    tce_page_size);
+	if (error != OPAL_SUCCESS) {
+		printf("%s: can't enable DMA window\n", sc->sc_dev.dv_xname);
+		phb_dmamem_free(sc->sc_dmat, sc->sc_tce_table);
+		sc->sc_tce_table = NULL;
+		return;
+	}
+}
+
+void
 phb_attach_hook(struct device *parent, struct device *self,
     struct pcibus_attach_args *pba)
 {
@@ -389,11 +500,40 @@ phb_bus_maxdevs(void *v, int bus)
 	return 32;
 }
 
+int
+phb_find_node(int node, int bus, int device, int function)
+{
+	uint32_t reg[5];
+	uint32_t phys_hi;
+	int child;
+
+	phys_hi = ((bus << 16) | (device << 11) | (function << 8));
+
+	for (child = OF_child(node); child; child = OF_peer(child)) {
+		if (OF_getpropintarray(child, "reg",
+		    reg, sizeof(reg)) != sizeof(reg))
+			continue;
+
+		if (reg[0] == phys_hi)
+			return child;
+
+		node = phb_find_node(child, bus, device, function);
+		if (node)
+			return node;
+	}
+
+	return 0;
+}
+
 pcitag_t
 phb_make_tag(void *v, int bus, int device, int function)
 {
-	/* Return OPAL bus_dev_func. */
-	return ((bus << 8) | (device << 3) | (function << 0));
+	struct phb_softc *sc = v;
+	int node;
+
+	node = phb_find_node(sc->sc_node, bus, device, function);
+	return (((pcitag_t)node << 32) |
+	    (bus << 8) | (device << 3) | (function << 0));
 }
 
 void
@@ -422,6 +562,7 @@ phb_conf_read(void *v, pcitag_t tag, int reg)
 	uint16_t pci_error_state;
 	uint8_t freeze_state;
 
+	tag = PCITAG_OFFSET(tag);
 	error = opal_pci_config_read_word(sc->sc_phb_id,
 	    tag, reg, opal_phys(&data));
 	if (error == OPAL_SUCCESS && data != 0xffffffff)
@@ -445,6 +586,7 @@ phb_conf_write(void *v, pcitag_t tag, int reg, pcireg_t data)
 {
 	struct phb_softc *sc = v;
 
+	tag = PCITAG_OFFSET(tag);
 	opal_pci_config_write_word(sc->sc_phb_id, tag, reg, data);
 }
 
@@ -483,7 +625,7 @@ phb_intr_string(void *v, pci_intr_handle_t ih)
 
 void *
 phb_intr_establish(void *v, pci_intr_handle_t ih, int level,
-    int (*func)(void *), void *arg, char *name)
+    struct cpu_info *ci, int (*func)(void *), void *arg, char *name)
 {
 	struct phb_softc *sc = v;
 	void *cookie = NULL;
@@ -507,11 +649,16 @@ phb_intr_establish(void *v, pci_intr_handle_t ih, int level,
 		if (error != OPAL_SUCCESS)
 			return NULL;
 
-		if (ih.ih_type == PCI_MSI32) {
-			error = opal_get_msi_32(sc->sc_phb_id, 0, xive,
-			    1, opal_phys(&addr32), opal_phys(&data));
+		/*
+		 * Use a 32-bit MSI address whenever possible.  Some
+		 * older Radeon graphics cards advertise 64-bit MSI
+		 * but only implement 40 bits.
+		 */
+		error = opal_get_msi_32(sc->sc_phb_id, 0, xive,
+		    1, opal_phys(&addr32), opal_phys(&data));
+		if (error == OPAL_SUCCESS)
 			addr = addr32;
-		} else {
+		if (error != OPAL_SUCCESS && ih.ih_type != PCI_MSI32) {
 			error = opal_get_msi_64(sc->sc_phb_id, 0, xive,
 			    1, opal_phys(&addr), opal_phys(&data));
 		}
@@ -519,7 +666,7 @@ phb_intr_establish(void *v, pci_intr_handle_t ih, int level,
 			return NULL;
 
 		cookie = intr_establish(sc->sc_msi_ranges[0] + xive,
-		    IST_EDGE, level, func, arg, name);
+		    IST_EDGE, level, ci, func, arg, name);
 		if (cookie == NULL)
 			return NULL;
 
@@ -528,8 +675,26 @@ phb_intr_establish(void *v, pci_intr_handle_t ih, int level,
 			    &sc->sc_bus_memt, ih.ih_intrpin, addr, data);
 		} else
 			pci_msi_enable(ih.ih_pc, ih.ih_tag, addr, data);
+	} else {
+		int bus, dev, fn;
+		uint32_t reg[4];
+		int node;
+
+		phb_decompose_tag(sc, ih.ih_tag, &bus, &dev, &fn);
+
+		reg[0] = bus << 16 | dev << 11 | fn << 8;
+		reg[1] = reg[2] = 0;
+		reg[3] = ih.ih_intrpin;
+
+		/* Host bridge child node holds the interrupt map. */
+		node = OF_child(sc->sc_node);
+		if (node == 0)
+			return NULL;
+
+		cookie = fdt_intr_establish_imap(node, reg, sizeof(reg),
+		    level, func, arg, name);
 	}
-	
+
 	return cookie;
 }
 
@@ -582,6 +747,28 @@ phb_bs_memmap(bus_space_tag_t t, bus_addr_t addr, bus_size_t size,
 	return ENXIO;
 }
 
+paddr_t
+phb_bs_mmap(bus_space_tag_t t, bus_addr_t addr, off_t off,
+    int prot, int flags)
+{
+	struct phb_softc *sc = t->bus_private;
+	int i;
+
+	for (i = 0; i < sc->sc_nranges; i++) {
+		uint64_t pci_start = sc->sc_ranges[i].pci_base;
+		uint64_t pci_end = pci_start + sc->sc_ranges[i].size;
+		uint64_t phys_start = sc->sc_ranges[i].phys_base;
+
+		if ((sc->sc_ranges[i].flags & 0x02000000) == 0x02000000 &&
+		    addr >= pci_start && addr + PAGE_SIZE <= pci_end) {
+			return bus_space_mmap(sc->sc_iot,
+			    addr - pci_start + phys_start, off, prot, flags);
+		}
+	}
+
+	return -1;
+}
+
 int
 phb_dmamap_load_buffer(bus_dma_tag_t t, bus_dmamap_t map, void *buf,
     bus_size_t buflen, struct proc *p, int flags, paddr_t *lastaddrp,
@@ -597,8 +784,13 @@ phb_dmamap_load_buffer(bus_dma_tag_t t, bus_dmamap_t map, void *buf,
 		return error;
 
 	/* For each segment. */
-	for (seg = firstseg; seg <= *segp; seg++)
-		map->dm_segs[seg].ds_addr |= IODA_TVE_SELECT;
+	for (seg = firstseg; seg <= *segp; seg++) {
+		map->dm_segs[seg].ds_addr = map->dm_segs[seg]._ds_paddr;
+		if (sc->sc_tce_table) 
+			map->dm_segs[seg].ds_addr += PHB_DMA_OFFSET;
+		else
+			map->dm_segs[seg].ds_addr |= IODA_TVE_SELECT;
+	}
 
 	return 0;
 }
@@ -616,8 +808,61 @@ phb_dmamap_load_raw(bus_dma_tag_t t, bus_dmamap_t map,
 		return error;
 
 	/* For each segment. */
-	for (seg = 0; seg < nsegs; seg++)
-		map->dm_segs[seg].ds_addr |= IODA_TVE_SELECT;
+	for (seg = 0; seg < nsegs; seg++) {
+		map->dm_segs[seg].ds_addr = map->dm_segs[seg]._ds_paddr;
+		if (sc->sc_tce_table) 
+			map->dm_segs[seg].ds_addr += PHB_DMA_OFFSET;
+		else
+			map->dm_segs[seg].ds_addr |= IODA_TVE_SELECT;
+	}
 
 	return 0;
+}
+
+struct phb_dmamem *
+phb_dmamem_alloc(bus_dma_tag_t dmat, bus_size_t size, bus_size_t align)
+{
+	struct phb_dmamem *pdm;
+	int nsegs;
+
+	pdm = malloc(sizeof(*pdm), M_DEVBUF, M_WAITOK | M_ZERO);
+	pdm->pdm_size = size;
+
+	if (bus_dmamap_create(dmat, size, 1, size, 0,
+	    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW, &pdm->pdm_map) != 0)
+		goto pdmfree;
+
+	if (bus_dmamem_alloc(dmat, size, align, 0, &pdm->pdm_seg, 1,
+	    &nsegs, BUS_DMA_WAITOK | BUS_DMA_ZERO) != 0)
+		goto destroy;
+
+	if (bus_dmamem_map(dmat, &pdm->pdm_seg, nsegs, size,
+	    &pdm->pdm_kva, BUS_DMA_WAITOK | BUS_DMA_NOCACHE) != 0)
+		goto free;
+
+	if (bus_dmamap_load_raw(dmat, pdm->pdm_map, &pdm->pdm_seg,
+	    nsegs, size, BUS_DMA_WAITOK) != 0)
+		goto unmap;
+
+	return pdm;
+
+unmap:
+	bus_dmamem_unmap(dmat, pdm->pdm_kva, size);
+free:
+	bus_dmamem_free(dmat, &pdm->pdm_seg, 1);
+destroy:
+	bus_dmamap_destroy(dmat, pdm->pdm_map);
+pdmfree:
+	free(pdm, M_DEVBUF, sizeof(*pdm));
+
+	return NULL;
+}
+
+void
+phb_dmamem_free(bus_dma_tag_t dmat, struct phb_dmamem *pdm)
+{
+	bus_dmamem_unmap(dmat, pdm->pdm_kva, pdm->pdm_size);
+	bus_dmamem_free(dmat, &pdm->pdm_seg, 1);
+	bus_dmamap_destroy(dmat, pdm->pdm_map);
+	free(pdm, M_DEVBUF, sizeof(*pdm));
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bnxt.c,v 1.25 2020/06/22 02:31:32 dlg Exp $	*/
+/*	$OpenBSD: if_bnxt.c,v 1.27 2020/10/14 06:40:21 jmatthew Exp $	*/
 /*-
  * Broadcom NetXtreme-C/E network driver.
  *
@@ -608,7 +608,7 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 #if NVLAN > 0
 	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
 #endif
-	IFQ_SET_MAXLEN(&ifp->if_snd, 1024);	/* ? */
+	ifq_set_maxlen(&ifp->if_snd, 1024);	/* ? */
 
 	ifmedia_init(&sc->sc_media, IFM_IMASK, bnxt_media_change,
 	    bnxt_media_status);
@@ -918,7 +918,7 @@ bnxt_down(struct bnxt_softc *sc)
 	
 	CLR(ifp->if_flags, IFF_RUNNING);
 
-	ifq_clr_oactive(&ifp->if_snd);
+	intr_barrier(sc->sc_ih);
 	ifq_barrier(&ifp->if_snd);
 
 	timeout_del(&sc->sc_rx_refill);
@@ -1952,6 +1952,7 @@ int
 bnxt_rx(struct bnxt_softc *sc, struct bnxt_cp_ring *cpr, struct mbuf_list *ml,
     int *slots, int *agslots, struct cmpl_base *cmpl)
 {
+	struct ifnet *ifp = &sc->sc_ac.ac_if;
 	struct mbuf *m, *am;
 	struct bnxt_slot *bs;
 	struct rx_pkt_cmpl *rx = (struct rx_pkt_cmpl *)cmpl;
@@ -1959,6 +1960,9 @@ bnxt_rx(struct bnxt_softc *sc, struct bnxt_cp_ring *cpr, struct mbuf_list *ml,
 	struct rx_abuf_cmpl *ag;
 	uint32_t flags;
 	uint16_t errors;
+
+	if (!ISSET(ifp->if_flags, IFF_RUNNING))
+		return (0);
 
 	/* second part of the rx completion */
 	rxhi = (struct rx_pkt_cmpl_hi *)bnxt_cpr_next_cmpl(sc, cpr);
@@ -2026,10 +2030,14 @@ bnxt_rx(struct bnxt_softc *sc, struct bnxt_cp_ring *cpr, struct mbuf_list *ml,
 void
 bnxt_txeof(struct bnxt_softc *sc, int *txfree, struct cmpl_base *cmpl)
 {
+	struct ifnet *ifp = &sc->sc_ac.ac_if;
 	struct tx_cmpl *txcmpl = (struct tx_cmpl *)cmpl;
 	struct bnxt_slot *bs;
 	bus_dmamap_t map;
 	u_int idx, segs, last;
+
+	if (!ISSET(ifp->if_flags, IFF_RUNNING))
+		return;
 
 	idx = sc->sc_tx_ring_cons;
 	last = sc->sc_tx_cons;

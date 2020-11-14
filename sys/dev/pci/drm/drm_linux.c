@@ -1,4 +1,4 @@
-/*	$OpenBSD: drm_linux.c,v 1.61 2020/07/02 11:01:21 jsg Exp $	*/
+/*	$OpenBSD: drm_linux.c,v 1.66 2020/11/09 23:53:30 jsg Exp $	*/
 /*
  * Copyright (c) 2013 Jonathan Gray <jsg@openbsd.org>
  * Copyright (c) 2015, 2016 Mark Kettenis <kettenis@openbsd.org>
@@ -17,6 +17,7 @@
  */
 
 #include <sys/types.h>
+#include <sys/systm.h>
 #include <sys/param.h>
 #include <sys/event.h>
 #include <sys/filedesc.h>
@@ -45,6 +46,7 @@
 #include <linux/shrinker.h>
 #include <linux/fb.h>
 #include <linux/xarray.h>
+#include <linux/interval_tree.h>
 
 #include <drm/drm_device.h>
 #include <drm/drm_print.h>
@@ -65,6 +67,11 @@ tasklet_run(void *arg)
 		tasklet_unlock(ts);
 	}
 }
+
+/* 32 bit powerpc lacks 64 bit atomics */
+#if defined(__powerpc__) && !defined(__powerpc64__)
+struct mutex atomic64_mtx = MUTEX_INITIALIZER(IPL_HIGH);
+#endif
 
 struct mutex sch_mtx = MUTEX_INITIALIZER(IPL_SCHED);
 volatile struct proc *sch_proc;
@@ -205,6 +212,7 @@ kthread_func(void *arg)
 
 	ret = thread->func(thread->data);
 	thread->flags |= KTHREAD_STOPPED;
+	wakeup(thread);
 	kthread_exit(ret);
 }
 
@@ -296,55 +304,13 @@ kthread_stop(struct proc *p)
 
 	while ((thread->flags & KTHREAD_STOPPED) == 0) {
 		thread->flags |= KTHREAD_SHOULDSTOP;
+		kthread_unpark(p);
 		wake_up_process(thread->proc);
 		tsleep_nsec(thread, PPAUSE, "stop", INFSLP);
 	}
 	LIST_REMOVE(thread, next);
 	free(thread, M_DRM, sizeof(*thread));
 }
-
-int64_t
-timeval_to_ns(const struct timeval *tv)
-{
-	return ((int64_t)tv->tv_sec * NSEC_PER_SEC) +
-		tv->tv_usec * NSEC_PER_USEC;
-}
-
-struct timeval
-ns_to_timeval(const int64_t nsec)
-{
-	struct timeval tv;
-	int32_t rem;
-
-	if (nsec == 0) {
-		tv.tv_sec = 0;
-		tv.tv_usec = 0;
-		return (tv);
-	}
-
-	tv.tv_sec = nsec / NSEC_PER_SEC;
-	rem = nsec % NSEC_PER_SEC;
-	if (rem < 0) {
-		tv.tv_sec--;
-		rem += NSEC_PER_SEC;
-	}
-	tv.tv_usec = rem / 1000;
-	return (tv);
-}
-
-int64_t
-timeval_to_ms(const struct timeval *tv)
-{
-	return ((int64_t)tv->tv_sec * 1000) + (tv->tv_usec / 1000);
-}
-
-int64_t
-timeval_to_us(const struct timeval *tv)
-{
-	return ((int64_t)tv->tv_sec * 1000000) + tv->tv_usec;
-}
-
-extern char *hw_vendor, *hw_prod, *hw_ver;
 
 #if NBIOS > 0
 extern char smbios_board_vendor[];
@@ -2131,4 +2097,51 @@ printk(const char *fmt, ...)
 	va_end(ap);
 
 	return ret;
+}
+
+#define START(node) ((node)->start)
+#define LAST(node) ((node)->last)
+
+struct interval_tree_node *
+interval_tree_iter_first(struct rb_root_cached *root, unsigned long start,
+    unsigned long last)
+{
+	struct interval_tree_node *node;
+	struct rb_node *rb;
+
+	for (rb = rb_first_cached(root); rb; rb = rb_next(rb)) {
+		node = rb_entry(rb, typeof(*node), rb);
+		if (LAST(node) >= start && START(node) <= last)
+			return node;
+	}
+	return NULL;
+}
+
+void
+interval_tree_remove(struct interval_tree_node *node,
+    struct rb_root_cached *root) 
+{
+	rb_erase_cached(&node->rb, root);
+}
+
+void
+interval_tree_insert(struct interval_tree_node *node,
+    struct rb_root_cached *root)
+{
+	struct rb_node **iter = &root->rb_root.rb_node;
+	struct rb_node *parent = NULL;
+	struct interval_tree_node *iter_node;
+
+	while (*iter) {
+		parent = *iter;
+		iter_node = rb_entry(*iter, struct interval_tree_node, rb);
+
+		if (node->start < iter_node->start)
+			iter = &(*iter)->rb_left;
+		else
+			iter = &(*iter)->rb_right;
+	}
+
+	rb_link_node(&node->rb, parent, iter);
+	rb_insert_color_cached(&node->rb, root, false);
 }

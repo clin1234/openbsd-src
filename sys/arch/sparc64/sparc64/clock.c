@@ -1,4 +1,4 @@
-/*	$OpenBSD: clock.c,v 1.63 2020/07/08 09:20:28 kettenis Exp $	*/
+/*	$OpenBSD: clock.c,v 1.67 2020/10/20 15:59:17 cheloha Exp $	*/
 /*	$NetBSD: clock.c,v 1.41 2001/07/24 19:29:25 eeh Exp $ */
 
 /*
@@ -109,14 +109,15 @@ struct cfdriver clock_cd = {
 u_int tick_get_timecount(struct timecounter *);
 
 struct timecounter tick_timecounter = {
-	tick_get_timecount, NULL, ~0u, 0, "tick", 0, NULL, TC_TICK
+	tick_get_timecount, NULL, ~0u, 0, "tick", 0,
+	NULL, TC_TICK
 };
 
 u_int sys_tick_get_timecount(struct timecounter *);
 
 struct timecounter sys_tick_timecounter = {
-	sys_tick_get_timecount, NULL, ~0u, 0, "sys_tick", 1000, NULL,
-	TC_SYS_TICK
+	sys_tick_get_timecount, NULL, ~0u, 0, "sys_tick", 1000,
+	NULL, TC_SYS_TICK
 };
 
 /*
@@ -566,6 +567,7 @@ cpu_initclocks(void)
 	if (intrdebug) {
 		hz = 1;
 		tick = 1000000 / hz;
+		tick_nsec = 1000000000 / hz;
 		printf("intrdebug set: 1Hz clock\n");
 	}
 #endif
@@ -574,6 +576,7 @@ cpu_initclocks(void)
 		printf("cannot get %d Hz clock; using 100 Hz\n", hz);
 		hz = 100;
 		tick = 1000000 / hz;
+		tick_nsec = 1000000000 / hz;
 	}
 
 	/* Make sure we have a sane cpu_clockrate -- we'll need it */
@@ -692,7 +695,8 @@ cpu_initclocks(void)
 	     timerreg_4u.t_mapintr[1]|INTMAP_V); 
 
 	statmin = statint - (statvar >> 1);
-	
+
+	tick_enable();
 }
 
 /*
@@ -891,6 +895,8 @@ tick_start(void)
 	struct cpu_info *ci = curcpu();
 	u_int64_t s;
 
+	tick_enable();
+
 	/*
 	 * Try to make the tick interrupts as synchronously as possible on
 	 * all CPUs to avoid inaccuracies for migrating processes.
@@ -908,6 +914,11 @@ sys_tick_start(void)
 	struct cpu_info *ci = curcpu();
 	u_int64_t s;
 
+	if (CPU_ISSUN4U || CPU_ISSUN4US) {
+		tick_enable();
+		sys_tick_enable();
+	}
+
 	/*
 	 * Try to make the tick interrupts as synchronously as possible on
 	 * all CPUs to avoid inaccuracies for migrating processes.
@@ -924,6 +935,8 @@ stick_start(void)
 {
 	struct cpu_info *ci = curcpu();
 	u_int64_t s;
+
+	tick_enable();
 
 	/*
 	 * Try to make the tick interrupts as synchronously as possible on

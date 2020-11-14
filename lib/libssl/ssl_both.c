@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_both.c,v 1.18 2020/05/19 16:35:20 jsing Exp $ */
+/* $OpenBSD: ssl_both.c,v 1.21 2020/10/14 16:57:33 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -331,7 +331,7 @@ ssl3_send_change_cipher_spec(SSL *s, int a, int b)
 		s->internal->init_num = (int)outlen;
 		s->internal->init_off = 0;
 
-		if (SSL_IS_DTLS(s)) {
+		if (SSL_is_dtls(s)) {
 			D1I(s)->handshake_write_seq =
 			    D1I(s)->next_handshake_write_seq;
 			dtls1_set_message_header_int(s, SSL3_MT_CCS, 0,
@@ -447,7 +447,7 @@ ssl3_get_message(SSL *s, int st1, int stn, int mt, long max, int *ok)
 	CBS cbs;
 	uint8_t u8;
 
-	if (SSL_IS_DTLS(s))
+	if (SSL_is_dtls(s))
 		return (dtls1_get_message(s, st1, stn, mt, max, ok));
 
 	if (S3I(s)->tmp.reuse_message) {
@@ -686,13 +686,23 @@ err:
 	return (0);
 }
 
+void
+ssl3_release_init_buffer(SSL *s)
+{
+	BUF_MEM_free(s->internal->init_buf);
+	s->internal->init_buf = NULL;
+	s->internal->init_msg = NULL;
+	s->internal->init_num = 0;
+	s->internal->init_off = 0;
+}
+
 int
 ssl3_setup_read_buffer(SSL *s)
 {
 	unsigned char *p;
 	size_t len, align, headerlen;
 
-	if (SSL_IS_DTLS(s))
+	if (SSL_is_dtls(s))
 		headerlen = DTLS1_RT_HEADER_LENGTH;
 	else
 		headerlen = SSL3_RT_HEADER_LENGTH;
@@ -708,7 +718,7 @@ ssl3_setup_read_buffer(SSL *s)
 		S3I(s)->rbuf.len = len;
 	}
 
-	s->internal->packet = &(S3I(s)->rbuf.buf[0]);
+	s->internal->packet = S3I(s)->rbuf.buf;
 	return 1;
 
 err:
@@ -722,7 +732,7 @@ ssl3_setup_write_buffer(SSL *s)
 	unsigned char *p;
 	size_t len, align, headerlen;
 
-	if (SSL_IS_DTLS(s))
+	if (SSL_is_dtls(s))
 		headerlen = DTLS1_RT_HEADER_LENGTH + 1;
 	else
 		headerlen = SSL3_RT_HEADER_LENGTH;
@@ -759,18 +769,22 @@ ssl3_setup_buffers(SSL *s)
 	return 1;
 }
 
-int
-ssl3_release_write_buffer(SSL *s)
+void
+ssl3_release_buffer(SSL3_BUFFER_INTERNAL *b)
 {
-	free(S3I(s)->wbuf.buf);
-	S3I(s)->wbuf.buf = NULL;
-	return 1;
+	freezero(b->buf, b->len);
+	b->buf = NULL;
+	b->len = 0;
 }
 
-int
+void
 ssl3_release_read_buffer(SSL *s)
 {
-	free(S3I(s)->rbuf.buf);
-	S3I(s)->rbuf.buf = NULL;
-	return 1;
+	ssl3_release_buffer(&S3I(s)->rbuf);
+}
+
+void
+ssl3_release_write_buffer(SSL *s)
+{
+	ssl3_release_buffer(&S3I(s)->wbuf);
 }

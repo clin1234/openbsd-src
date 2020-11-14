@@ -1,4 +1,4 @@
-/* $OpenBSD: server-client.c,v 1.359 2020/07/06 09:14:20 nicm Exp $ */
+/* $OpenBSD: server-client.c,v 1.365 2020/10/30 18:54:23 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -1590,10 +1590,6 @@ server_client_check_pane_focus(struct window_pane *wp)
 	if (wp->window->active != wp)
 		goto not_focused;
 
-	/* If we're in a mode, we're not focused. */
-	if (wp->screen != &wp->base)
-		goto not_focused;
-
 	/*
 	 * If our window is the current window in any focused clients with an
 	 * attached session, we're focused.
@@ -1662,8 +1658,6 @@ server_client_reset_state(struct client *c)
 		s = wp->screen;
 	if (s != NULL)
 		mode = s->mode;
-	if (c->prompt_string != NULL || c->message_string != NULL)
-		mode &= ~MODE_CURSOR;
 	log_debug("%s: client %s mode %x", __func__, c->name, mode);
 
 	/* Reset region and margin. */
@@ -1695,8 +1689,8 @@ server_client_reset_state(struct client *c)
 	 * mode.
 	 */
 	if (options_get_number(oo, "mouse")) {
-		mode &= ~ALL_MOUSE_MODES;
 		if (c->overlay_draw == NULL) {
+			mode &= ~ALL_MOUSE_MODES;
 			TAILQ_FOREACH(loop, &w->panes, entry) {
 				if (loop->screen->mode & MODE_MOUSE_ALL)
 					mode |= MODE_MOUSE_ALL;
@@ -1987,6 +1981,7 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 	switch (imsg->hdr.type) {
 	case MSG_IDENTIFY_FEATURES:
 	case MSG_IDENTIFY_FLAGS:
+	case MSG_IDENTIFY_LONGFLAGS:
 	case MSG_IDENTIFY_TERM:
 	case MSG_IDENTIFY_TTYNAME:
 	case MSG_IDENTIFY_CWD:
@@ -2030,7 +2025,7 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 			break;
 		c->flags &= ~CLIENT_SUSPENDED;
 
-		if (c->fd == -1) /* exited in the meantime */
+		if (c->fd == -1 || c->session == NULL) /* exited already */
 			break;
 		s = c->session;
 
@@ -2145,6 +2140,7 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	const char	*data, *home;
 	size_t		 datalen;
 	int		 flags, feat;
+	uint64_t	 longflags;
 	char		*name;
 
 	if (c->flags & CLIENT_IDENTIFIED)
@@ -2168,6 +2164,14 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		memcpy(&flags, data, sizeof flags);
 		c->flags |= flags;
 		log_debug("client %p IDENTIFY_FLAGS %#x", c, flags);
+		break;
+	case MSG_IDENTIFY_LONGFLAGS:
+		if (datalen != sizeof longflags)
+			fatalx("bad MSG_IDENTIFY_LONGFLAGS size");
+		memcpy(&longflags, data, sizeof longflags);
+		c->flags |= longflags;
+		log_debug("client %p IDENTIFY_LONGFLAGS %#llx", c,
+		    (unsigned long long)longflags);
 		break;
 	case MSG_IDENTIFY_TERM:
 		if (datalen == 0 || data[datalen - 1] != '\0')
@@ -2235,7 +2239,7 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	c->name = name;
 	log_debug("client %p name is %s", c, c->name);
 
-	 if (c->flags & CLIENT_CONTROL)
+	if (c->flags & CLIENT_CONTROL)
 		control_start(c);
 	else if (c->fd != -1) {
 		if (tty_init(&c->tty, c) != 0) {
@@ -2250,13 +2254,13 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	}
 
 	/*
-	 * If this is the first client that has finished identifying, load
-	 * configuration files.
+	 * If this is the first client, load configuration files. Any later
+	 * clients are allowed to continue with their command even if the
+	 * config has not been loaded - they might have been run from inside it
 	 */
 	if ((~c->flags & CLIENT_EXIT) &&
-	    !cfg_finished &&
-	    c == TAILQ_FIRST(&clients) &&
-	    TAILQ_NEXT(c, entry) == NULL)
+	     !cfg_finished &&
+	     c == TAILQ_FIRST(&clients))
 		start_cfg();
 }
 

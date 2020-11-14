@@ -1,4 +1,4 @@
-/*	$OpenBSD: dt_dev.c,v 1.8 2020/07/04 08:06:07 anton Exp $ */
+/*	$OpenBSD: dt_dev.c,v 1.10 2020/09/28 13:16:58 kettenis Exp $ */
 
 /*
  * Copyright (c) 2019 Martin Pieuchot <mpi@openbsd.org>
@@ -55,6 +55,9 @@
  */
 #if defined(__amd64__)
 #define DT_FA_PROFILE	5
+#define DT_FA_STATIC	2
+#elif defined(__powerpc64__)
+#define DT_FA_PROFILE	6
 #define DT_FA_STATIC	2
 #elif defined(__sparc64__)
 #define DT_FA_PROFILE	5
@@ -347,12 +350,11 @@ dt_ioctl_list_probes(struct dt_softc *sc, struct dtioc_probe *dtpr)
 	size_t size;
 	int error = 0;
 
-	if (dtpr->dtpr_size == 0) {
-		dtpr->dtpr_size = dt_nprobes * sizeof(*dtpi);
-		return 0;
-	}
-
 	size = dtpr->dtpr_size;
+	dtpr->dtpr_size = dt_nprobes * sizeof(*dtpi);
+	if (size == 0)
+		return 0;
+
 	dtpi = dtpr->dtpr_probes;
 	memset(&info, 0, sizeof(info));
 	SIMPLEQ_FOREACH(dtp, &dt_probe_list, dtp_next) {

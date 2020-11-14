@@ -1,4 +1,4 @@
-/*	$OpenBSD: ar5008.c,v 1.60 2020/07/06 11:28:51 stsp Exp $	*/
+/*	$OpenBSD: ar5008.c,v 1.63 2020/11/11 22:45:09 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2009 Damien Bergamini <damien.bergamini@free.fr>
@@ -1003,9 +1003,10 @@ ar5008_rx_process(struct athn_softc *sc, struct mbuf_list *ml)
 	    (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) &&
 	    (ic->ic_flags & IEEE80211_F_RSNON) &&
 	    (ni->ni_flags & IEEE80211_NODE_RXPROT) &&
-	    (ni->ni_rsncipher == IEEE80211_CIPHER_CCMP ||
+	    ((!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
+	    ni->ni_rsncipher == IEEE80211_CIPHER_CCMP) ||
 	    (IEEE80211_IS_MULTICAST(wh->i_addr1) &&
-	    ic->ic_rsngroupcipher == IEEE80211_CIPHER_CCMP))) {
+	    ni->ni_rsngroupcipher == IEEE80211_CIPHER_CCMP))) {
 		if (ar5008_ccmp_decap(sc, m, ni) != 0) {
 			ifp->if_ierrors++;
 			ieee80211_release_node(ic, ni);
@@ -1522,7 +1523,6 @@ ar5008_tx(struct athn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 			tap->wt_rate = athn_rates[ridx[0]].rate;
 		tap->wt_chan_freq = htole16(ic->ic_bss->ni_chan->ic_freq);
 		tap->wt_chan_flags = htole16(ic->ic_bss->ni_chan->ic_flags);
-		tap->wt_hwqueue = qid;
 		if (athn_rates[ridx[0]].phy == IEEE80211_T_DS &&
 		    ridx[0] != ATHN_RIDX_CCK1 &&
 		    (ic->ic_flags & IEEE80211_F_SHPREAMBLE))

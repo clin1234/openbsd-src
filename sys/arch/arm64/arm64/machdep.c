@@ -1,4 +1,4 @@
-/* $OpenBSD: machdep.c,v 1.53 2020/06/05 23:16:24 naddy Exp $ */
+/* $OpenBSD: machdep.c,v 1.55 2020/11/06 13:32:38 patrick Exp $ */
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  *
@@ -16,6 +16,7 @@
  */
 
 #include <sys/param.h>
+#include <sys/systm.h>
 #include <sys/sched.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
@@ -55,8 +56,6 @@
 #endif
 
 char *boot_args = NULL;
-char *boot_file = "";
-
 uint8_t *bootmac = NULL;
 
 extern uint64_t esym;
@@ -1156,8 +1155,6 @@ process_kernel_args(void)
 	if (*cp == 0)
 		return;
 
-	boot_file = bootargs;
-
 	/* Skip the kernel image filename */
 	while (*cp != ' ' && *cp != 0)
 		cp++;
@@ -1170,7 +1167,6 @@ process_kernel_args(void)
 
 	boot_args = cp;
 
-	printf("bootfile: %s\n", boot_file);
 	printf("bootargs: %s\n", boot_args);
 
 	/* Setup pointer to boot flags */

@@ -1,4 +1,4 @@
-/* $OpenBSD: key-bindings.c,v 1.130 2020/06/16 08:18:34 nicm Exp $ */
+/* $OpenBSD: key-bindings.c,v 1.132 2020/10/13 10:15:23 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -191,6 +191,16 @@ key_bindings_add(const char *name, key_code key, const char *note, int repeat,
 	table = key_bindings_get_table(name, 1);
 
 	bd = key_bindings_get(table, key & ~KEYC_MASK_FLAGS);
+	if (cmdlist == NULL) {
+		if (bd != NULL) {
+			free((void *)bd->note);
+			if (note != NULL)
+				bd->note = xstrdup(note);
+			else
+				bd->note = NULL;
+		}
+		return;
+	}
 	if (bd != NULL) {
 		RB_REMOVE(key_bindings, &table->key_bindings, bd);
 		key_bindings_free(bd);
@@ -370,7 +380,7 @@ key_bindings_init(void)
 		"bind -N 'Select the next window' n next-window",
 		"bind -N 'Select the next pane' o select-pane -t:.+",
 		"bind -N 'Customize options' C customize-mode -Z",
-		"bind -N 'Select the previous pane' p previous-window",
+		"bind -N 'Select the previous window' p previous-window",
 		"bind -N 'Display pane numbers' q display-panes",
 		"bind -N 'Redraw the current client' r refresh-client",
 		"bind -N 'Choose a session from a list' s choose-tree -Zs",

@@ -1,4 +1,4 @@
-/* $OpenBSD: bwfm.c,v 1.72 2020/06/19 20:56:23 kettenis Exp $ */
+/* $OpenBSD: bwfm.c,v 1.75 2020/10/22 14:31:27 claudio Exp $ */
 /*
  * Copyright (c) 2010-2016 Broadcom Corporation
  * Copyright (c) 2016,2017 Patrick Wildt <patrick@blueri.se>
@@ -352,7 +352,7 @@ bwfm_start(struct ifnet *ifp)
 		return;
 	if (ifq_is_oactive(&ifp->if_snd))
 		return;
-	if (IFQ_IS_EMPTY(&ifp->if_snd))
+	if (ifq_empty(&ifp->if_snd))
 		return;
 
 	/* TODO: return if no link? */
@@ -1959,7 +1959,7 @@ bwfm_hostap(struct bwfm_softc *sc)
 	memset(join.assoc.bssid, 0xff, sizeof(join.assoc.bssid));
 	bwfm_fwvar_cmd_set_data(sc, BWFM_C_SET_SSID, &join, sizeof(join));
 	bwfm_fwvar_var_set_int(sc, "closednet",
-	    (ic->ic_flags & IEEE80211_F_HIDENWID) != 0);
+	    (ic->ic_userflags & IEEE80211_F_HIDENWID) != 0);
 }
 #endif
 
@@ -2284,7 +2284,7 @@ bwfm_rx_event(struct bwfm_softc *sc, struct mbuf *m)
 {
 	int s;
 
-	s = splsoftnet();
+	s = splnet();
 	ml_enqueue(&sc->sc_evml, m);
 	splx(s);
 
@@ -2496,22 +2496,22 @@ bwfm_task(void *arg)
 	struct mbuf *m;
 	int s;
 
-	s = splsoftnet();
+	s = splnet();
 	while (ring->next != ring->cur) {
 		cmd = &ring->cmd[ring->next];
 		splx(s);
 		cmd->cb(sc, cmd->data);
-		s = splsoftnet();
+		s = splnet();
 		ring->queued--;
 		ring->next = (ring->next + 1) % BWFM_HOST_CMD_RING_COUNT;
 	}
 	splx(s);
 
-	s = splsoftnet();
+	s = splnet();
 	while ((m = ml_dequeue(&sc->sc_evml)) != NULL) {
 		splx(s);
 		bwfm_rx_event_cb(sc, m);
-		s = splsoftnet();
+		s = splnet();
 	}
 	splx(s);
 }
@@ -2524,7 +2524,7 @@ bwfm_do_async(struct bwfm_softc *sc,
 	struct bwfm_host_cmd *cmd;
 	int s;
 
-	s = splsoftnet();
+	s = splnet();
 	KASSERT(ring->queued < BWFM_HOST_CMD_RING_COUNT);
 	if (ring->queued >= BWFM_HOST_CMD_RING_COUNT) {
 		splx(s);

@@ -897,7 +897,7 @@ i915_gem_create_context(struct drm_i915_private *i915, unsigned int flags)
 
 static void init_contexts(struct i915_gem_contexts *gc)
 {
-	mtx_init(&gc->lock, IPL_TTY);
+	mtx_init(&gc->lock, IPL_NONE);
 	INIT_LIST_HEAD(&gc->list);
 
 	INIT_WORK(&gc->free_work, contexts_free_worker);
@@ -2020,12 +2020,8 @@ static int set_priority(struct i915_gem_context *ctx,
 	    priority < I915_CONTEXT_MIN_USER_PRIORITY)
 		return -EINVAL;
 
-#ifdef notyet
 	if (priority > I915_CONTEXT_DEFAULT_PRIORITY &&
 	    !capable(CAP_SYS_NICE))
-#else
-	if (priority > I915_CONTEXT_DEFAULT_PRIORITY)
-#endif
 		return -EPERM;
 
 	ctx->sched.priority = I915_USER_PRIORITY(priority);

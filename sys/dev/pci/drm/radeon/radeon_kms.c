@@ -231,6 +231,7 @@ radeondrm_wsioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 {
 	struct rasops_info *ri = v;
 	struct wsdisplay_fbinfo *wdf;
+	struct wsdisplay_param *dp = (struct wsdisplay_param *)data;
 
 	switch (cmd) {
 	case WSDISPLAYIO_GTYPE:
@@ -243,6 +244,14 @@ radeondrm_wsioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		wdf->depth = ri->ri_depth;
 		wdf->cmsize = 0;
 		return 0;
+	case WSDISPLAYIO_GETPARAM:
+		if (ws_get_param == NULL)
+			return 0;
+		return ws_get_param(dp);
+	case WSDISPLAYIO_SETPARAM:
+		if (ws_set_param == NULL)
+			return 0;
+		return ws_set_param(dp);
 	default:
 		return -1;
 	}
@@ -559,29 +568,28 @@ radeondrm_attach_kms(struct device *parent, struct device *self, void *aux)
 	}
 #endif
 
-	for (i = PCI_MAPREG_START; i < PCI_MAPREG_END ; i+= 4) {
+	for (i = PCI_MAPREG_START; i < PCI_MAPREG_END; i += 4) {
 		type = pci_mapreg_type(pa->pa_pc, pa->pa_tag, i);
-		if (PCI_MAPREG_TYPE(type) != PCI_MAPREG_TYPE_IO)
-			continue;
-		if (pci_mapreg_map(pa, i, type, 0, NULL,
-		    &rdev->rio_mem, NULL, &rdev->rio_mem_size, 0)) {
-			printf(": can't map rio space\n");
-			return;
+		if (type == PCI_MAPREG_TYPE_IO) {
+			pci_mapreg_map(pa, i, type, 0, NULL,
+			    &rdev->rio_mem, NULL, &rdev->rio_mem_size, 0);
+			break;
 		}
-
-		if (type & PCI_MAPREG_MEM_TYPE_64BIT)
+		if (type == PCI_MAPREG_MEM_TYPE_64BIT)
 			i += 4;
 	}
 
 	if (rdev->family >= CHIP_BONAIRE) {
 		type = pci_mapreg_type(pa->pa_pc, pa->pa_tag, 0x18);
 		if (PCI_MAPREG_TYPE(type) != PCI_MAPREG_TYPE_MEM ||
-		    pci_mapreg_map(pa, 0x18, type, 0, NULL,
+		    pci_mapreg_map(pa, 0x18, type, BUS_SPACE_MAP_LINEAR, NULL,
 		    &rdev->doorbell.bsh, &rdev->doorbell.base,
 		    &rdev->doorbell.size, 0)) {
 			printf(": can't map doorbell space\n");
 			return;
 		}
+		rdev->doorbell.ptr = bus_space_vaddr(rdev->memt,
+		    rdev->doorbell.bsh);
 	}
 
 	if (rdev->family >= CHIP_BONAIRE)
@@ -591,11 +599,12 @@ radeondrm_attach_kms(struct device *parent, struct device *self, void *aux)
 
 	type = pci_mapreg_type(pa->pa_pc, pa->pa_tag, rmmio_bar);
 	if (PCI_MAPREG_TYPE(type) != PCI_MAPREG_TYPE_MEM ||
-	    pci_mapreg_map(pa, rmmio_bar, type, 0, NULL,
+	    pci_mapreg_map(pa, rmmio_bar, type, BUS_SPACE_MAP_LINEAR, NULL,
 	    &rdev->rmmio_bsh, &rdev->rmmio_base, &rdev->rmmio_size, 0)) {
 		printf(": can't map rmmio space\n");
 		return;
 	}
+	rdev->rmmio = bus_space_vaddr(rdev->memt, rdev->rmmio_bsh);
 
 #if !defined(__sparc64__)
 	/*
@@ -1357,8 +1366,10 @@ int radeon_driver_open_kms(struct drm_device *dev, struct drm_file *file_priv)
 	file_priv->driver_priv = NULL;
 
 	r = pm_runtime_get_sync(dev->dev);
-	if (r < 0)
+	if (r < 0) {
+		pm_runtime_put_autosuspend(dev->dev);
 		return r;
+	}
 
 	/* new gpu have virtual address space support */
 	if (rdev->family >= CHIP_CAYMAN) {

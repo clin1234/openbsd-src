@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ixl.c,v 1.63 2020/07/07 12:40:30 dlg Exp $ */
+/*	$OpenBSD: if_ixl.c,v 1.69 2020/11/02 00:25:49 dlg Exp $ */
 
 /*
  * Copyright (c) 2013-2015, Intel Corporation
@@ -1242,6 +1242,8 @@ struct ixl_softc {
 	bus_space_handle_t	 sc_memh;
 	bus_size_t		 sc_mems;
 
+	uint16_t		 sc_api_major;
+	uint16_t		 sc_api_minor;
 	uint8_t			 sc_pf_id;
 	uint16_t		 sc_uplink_seid;	/* le */
 	uint16_t		 sc_downlink_seid;	/* le */
@@ -1256,7 +1258,6 @@ struct ixl_softc {
 	const struct ixl_aq_regs *
 				 sc_aq_regs;
 
-	struct mutex		 sc_atq_mtx;
 	struct ixl_dmamem	 sc_atq;
 	unsigned int		 sc_atq_prod;
 	unsigned int		 sc_atq_cons;
@@ -1269,6 +1270,7 @@ struct ixl_softc {
 	unsigned int		 sc_arq_prod;
 	unsigned int		 sc_arq_cons;
 
+	struct mutex		 sc_link_state_mtx;
 	struct task		 sc_link_state_task;
 	struct ixl_atq		 sc_link_state_atq;
 
@@ -1584,6 +1586,20 @@ static const struct ixl_chip ixl_722 = {
 	.ic_set_rss_lut =	ixl_722_set_rss_lut,
 };
 
+/*
+ * 710 chips using an older firmware/API use the same ctl ops as
+ * 722 chips. or 722 chips use the same ctl ops as 710 chips in early
+ * firmware/API versions?
+*/
+
+static const struct ixl_chip ixl_710_decrepit = {
+	.ic_rss_hena =		IXL_RSS_HENA_BASE_710,
+	.ic_rd_ctl =		ixl_722_rd_ctl,
+	.ic_wr_ctl =		ixl_722_wr_ctl,
+	.ic_set_rss_key =	ixl_710_set_rss_key,
+	.ic_set_rss_lut =	ixl_710_set_rss_lut,
+};
+
 /* driver code */
 
 struct ixl_device {
@@ -1691,8 +1707,6 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_pf_id = func & (ari ? 0xff : 0x7);
 
 	/* initialise the adminq */
-
-	mtx_init(&sc->sc_atq_mtx, IPL_NET);
 
 	if (ixl_dmamem_alloc(sc, &sc->sc_atq,
 	    sizeof(struct ixl_aq_desc) * IXL_AQ_NUM, IXL_AQ_ALIGN) != 0) {
@@ -1907,6 +1921,11 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 		}
 	}
 
+	/* fixup the chip ops for older fw releases */
+	if (sc->sc_chip == &ixl_710 &&
+	    sc->sc_api_major == 1 && sc->sc_api_minor < 5)
+		sc->sc_chip = &ixl_710_decrepit;
+
 	ifp->if_softc = sc;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
 	ifp->if_xflags = IFXF_MPSAFE;
@@ -1915,7 +1934,7 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_watchdog = ixl_watchdog;
 	ifp->if_hardmtu = IXL_HARDMTU;
 	strlcpy(ifp->if_xname, DEVNAME(sc), IFNAMSIZ);
-	IFQ_SET_MAXLEN(&ifp->if_snd, sc->sc_tx_ring_ndescs);
+	ifq_set_maxlen(&ifp->if_snd, sc->sc_tx_ring_ndescs);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
 #if 0
@@ -1936,6 +1955,7 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 	if_attach_queues(ifp, nqueues);
 	if_attach_iqueues(ifp, nqueues);
 
+	mtx_init(&sc->sc_link_state_mtx, IPL_NET);
 	task_set(&sc->sc_link_state_task, ixl_link_state_update, sc);
 	ixl_wr(sc, I40E_PFINT_ICR0_ENA,
 	    I40E_PFINT_ICR0_ENA_LINK_STAT_CHANGE_MASK |
@@ -3352,6 +3372,7 @@ ixl_link_state_update_iaq(struct ixl_softc *sc, void *arg)
 	struct ixl_aq_desc *iaq = arg;
 	uint16_t retval;
 	int link_state;
+	int change = 0;
 
 	retval = lemtoh16(&iaq->iaq_retval);
 	if (retval != IXL_AQ_RC_OK) {
@@ -3359,13 +3380,16 @@ ixl_link_state_update_iaq(struct ixl_softc *sc, void *arg)
 		return;
 	}
 
-	NET_LOCK();
 	link_state = ixl_set_link_status(sc, iaq);
+	mtx_enter(&sc->sc_link_state_mtx);
 	if (ifp->if_link_state != link_state) {
 		ifp->if_link_state = link_state;
-		if_link_state_change(ifp);
+		change = 1;
 	}
-	NET_UNLOCK();
+	mtx_leave(&sc->sc_link_state_mtx);
+
+	if (change)
+		if_link_state_change(ifp);
 }
 
 static void
@@ -3620,9 +3644,12 @@ ixl_get_version(struct ixl_softc *sc)
 	fwver = lemtoh32(&iaq.iaq_param[2]);
 	apiver = lemtoh32(&iaq.iaq_param[3]);
 
+	sc->sc_api_major = apiver & 0xffff;
+	sc->sc_api_minor = (apiver >> 16) & 0xffff;
+
 	printf(", FW %hu.%hu.%05u API %hu.%hu", (uint16_t)fwver,
-	    (uint16_t)(fwver >> 16), fwbuild, (uint16_t)apiver,
-	    (uint16_t)(apiver >> 16));
+	    (uint16_t)(fwver >> 16), fwbuild,
+	    sc->sc_api_major, sc->sc_api_minor);
 
 	return (0);
 }
@@ -3891,15 +3918,16 @@ ixl_get_phy_types(struct ixl_softc *sc, uint64_t *phy_types_ptr)
 	switch (rv) {
 	case -1:
 		printf("%s: GET PHY ABILITIES timeout\n", DEVNAME(sc));
-		goto done;
+		goto err;
 	case IXL_AQ_RC_OK:
 		break;
 	case IXL_AQ_RC_EIO:
-		printf("%s: unable to query phy types\n", DEVNAME(sc));
-		break;
+		/* API is too old to handle this command */
+		phy_types = 0;
+		goto done;
 	default:
 		printf("%s: GET PHY ABILITIIES error %u\n", DEVNAME(sc), rv);
-		goto done;
+		goto err;
 	}
 
 	phy = IXL_DMA_KVA(&idm);
@@ -3907,16 +3935,21 @@ ixl_get_phy_types(struct ixl_softc *sc, uint64_t *phy_types_ptr)
 	phy_types = lemtoh32(&phy->phy_type);
 	phy_types |= (uint64_t)phy->phy_type_ext << 32;
 
+done:
 	*phy_types_ptr = phy_types;
 
 	rv = 0;
 
-done:
+err:
 	ixl_dmamem_free(sc, &idm);
 	return (rv);
 }
 
-/* this returns -1 on failure, or the sff module type */
+/*
+ * this returns -2 on software/driver failure, -1 for problems
+ * talking to the hardware, or the sff module type.
+ */
+
 static int
 ixl_get_module_type(struct ixl_softc *sc)
 {
@@ -3925,7 +3958,7 @@ ixl_get_module_type(struct ixl_softc *sc)
 	int rv;
 
 	if (ixl_dmamem_alloc(sc, &idm, IXL_AQ_BUFLEN, 0) != 0)
-		return (-1);
+		return (-2);
 
 	rv = ixl_get_phy_abilities(sc, &idm);
 	if (rv != IXL_AQ_RC_OK) {
@@ -4059,8 +4092,10 @@ ixl_get_sffpage(struct ixl_softc *sc, struct if_sffpage *sff)
 	int error;
 
 	switch (ixl_get_module_type(sc)) {
+	case -2:
+		return (ENOMEM);
 	case -1:
-		return (EIO);
+		return (ENXIO);
 	case IXL_SFF8024_ID_SFP:
 		ops = &ixl_sfp_ops;
 		break;
@@ -4884,7 +4919,6 @@ ixl_pf_reset(struct ixl_softc *sc)
 static uint32_t
 ixl_710_rd_ctl(struct ixl_softc *sc, uint32_t r)
 {
-	/* XXX this should fall back to registers for api < 1.5 */
 	struct ixl_atq iatq;
 	struct ixl_aq_desc *iaq;
 	uint16_t retval;
@@ -4908,7 +4942,6 @@ ixl_710_rd_ctl(struct ixl_softc *sc, uint32_t r)
 static void
 ixl_710_wr_ctl(struct ixl_softc *sc, uint32_t r, uint32_t v)
 {
-	/* XXX this should fall back to registers for api < 1.5 */
 	struct ixl_atq iatq;
 	struct ixl_aq_desc *iaq;
 	uint16_t retval;
@@ -4934,7 +4967,7 @@ ixl_710_set_rss_key(struct ixl_softc *sc, const struct ixl_rss_key *rsskey)
 	unsigned int i;
 
 	for (i = 0; i < nitems(rsskey->key); i++)
-		ixl_710_wr_ctl(sc, I40E_PFQF_HKEY(i), rsskey->key[i]);
+		ixl_wr_ctl(sc, I40E_PFQF_HKEY(i), rsskey->key[i]);
 
 	return (0);
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: tty-keys.c,v 1.140 2020/07/06 07:27:39 nicm Exp $ */
+/* $OpenBSD: tty-keys.c,v 1.142 2020/09/23 14:57:33 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -95,20 +95,25 @@ static const struct tty_default_key_raw tty_default_raw_keys[] = {
 	{ "\033OC", KEYC_RIGHT|KEYC_CURSOR },
 	{ "\033OD", KEYC_LEFT|KEYC_CURSOR },
 
-	{ "\033\033OA", KEYC_UP|KEYC_CURSOR|KEYC_META|KEYC_IMPLIED_META },
-	{ "\033\033OB", KEYC_DOWN|KEYC_CURSOR|KEYC_META|KEYC_IMPLIED_META },
-	{ "\033\033OC", KEYC_RIGHT|KEYC_CURSOR|KEYC_META|KEYC_IMPLIED_META },
-	{ "\033\033OD", KEYC_LEFT|KEYC_CURSOR|KEYC_META|KEYC_IMPLIED_META },
-
 	{ "\033[A", KEYC_UP|KEYC_CURSOR },
 	{ "\033[B", KEYC_DOWN|KEYC_CURSOR },
 	{ "\033[C", KEYC_RIGHT|KEYC_CURSOR },
 	{ "\033[D", KEYC_LEFT|KEYC_CURSOR },
 
-	{ "\033\033[A", KEYC_UP|KEYC_CURSOR|KEYC_META|KEYC_IMPLIED_META },
-	{ "\033\033[B", KEYC_DOWN|KEYC_CURSOR|KEYC_META|KEYC_IMPLIED_META },
-	{ "\033\033[C", KEYC_RIGHT|KEYC_CURSOR|KEYC_META|KEYC_IMPLIED_META },
-	{ "\033\033[D", KEYC_LEFT|KEYC_CURSOR|KEYC_META|KEYC_IMPLIED_META },
+	/*
+	 * Meta arrow keys. These do not get the IMPLIED_META flag so they
+	 * don't match the xterm-style meta keys in the output tree - Escape+Up
+	 * should stay as Escape+Up and not become M-Up.
+	 */
+	{ "\033\033OA", KEYC_UP|KEYC_CURSOR|KEYC_META },
+	{ "\033\033OB", KEYC_DOWN|KEYC_CURSOR|KEYC_META },
+	{ "\033\033OC", KEYC_RIGHT|KEYC_CURSOR|KEYC_META },
+	{ "\033\033OD", KEYC_LEFT|KEYC_CURSOR|KEYC_META },
+
+	{ "\033\033[A", KEYC_UP|KEYC_CURSOR|KEYC_META },
+	{ "\033\033[B", KEYC_DOWN|KEYC_CURSOR|KEYC_META },
+	{ "\033\033[C", KEYC_RIGHT|KEYC_CURSOR|KEYC_META },
+	{ "\033\033[D", KEYC_LEFT|KEYC_CURSOR|KEYC_META },
 
 	/* Other (xterm) "cursor" keys. */
 	{ "\033OH", KEYC_HOME },
@@ -1192,7 +1197,10 @@ tty_keys_device_attributes(struct tty *tty, const char *buf, size_t len,
 	if (tty->flags & TTY_HAVEDA)
 		return (-1);
 
-	/* First three bytes are always \033[?. */
+	/*
+	 * First three bytes are always \033[>. Some older Terminal.app
+	 * versions respond as for DA (\033[?) so accept and ignore that.
+	 */
 	if (buf[0] != '\033')
 		return (-1);
 	if (len == 1)
@@ -1201,7 +1209,7 @@ tty_keys_device_attributes(struct tty *tty, const char *buf, size_t len,
 		return (-1);
 	if (len == 2)
 		return (1);
-	if (buf[2] != '>')
+	if (buf[2] != '>' && buf[2] != '?')
 		return (-1);
 	if (len == 3)
 		return (1);
@@ -1218,6 +1226,10 @@ tty_keys_device_attributes(struct tty *tty, const char *buf, size_t len,
 		return (-1);
 	tmp[i] = '\0';
 	*size = 4 + i;
+
+	/* Ignore DA response. */
+	if (buf[2] == '?')
+		return (0);
 
 	/* Convert all arguments to numbers. */
 	cp = tmp;

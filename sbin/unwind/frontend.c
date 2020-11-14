@@ -1,4 +1,4 @@
-/*	$OpenBSD: frontend.c,v 1.50 2020/01/28 15:44:13 bket Exp $	*/
+/*	$OpenBSD: frontend.c,v 1.56 2020/11/09 04:22:05 tb Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -420,12 +420,14 @@ frontend_dispatch_main(int fd, short event, void *bula)
 void
 frontend_dispatch_resolver(int fd, short event, void *bula)
 {
-	static struct pending_query	*pq;
+	struct pending_query		*pq;
 	struct imsgev			*iev = bula;
 	struct imsgbuf			*ibuf = &iev->ibuf;
 	struct imsg			 imsg;
 	struct query_imsg		*query_imsg;
+	struct answer_imsg		*answer_imsg;
 	int				 n, shut = 0, chg;
+	uint8_t				*p;
 
 	if (event & EV_READ) {
 		if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
@@ -448,8 +450,6 @@ frontend_dispatch_resolver(int fd, short event, void *bula)
 
 		switch (imsg.hdr.type) {
 		case IMSG_ANSWER_HEADER:
-			if (pq != NULL)
-				fatalx("expected IMSG_ANSWER but got HEADER");
 			if (IMSG_DATA_SIZE(imsg) != sizeof(*query_imsg))
 				fatalx("%s: IMSG_ANSWER_HEADER wrong length: "
 				    "%lu", __func__, IMSG_DATA_SIZE(imsg));
@@ -468,19 +468,35 @@ frontend_dispatch_resolver(int fd, short event, void *bula)
 			pq->bogus = query_imsg->bogus;
 			break;
 		case IMSG_ANSWER:
-			if (pq == NULL)
-				fatalx("IMSG_ANSWER without HEADER");
-
-			if (pq->answer)
-				fatal("pq->answer");
-			if ((pq->answer = malloc(IMSG_DATA_SIZE(imsg))) !=
+			if (IMSG_DATA_SIZE(imsg) != sizeof(*answer_imsg))
+				fatalx("%s: IMSG_ANSWER wrong length: "
+				    "%lu", __func__, IMSG_DATA_SIZE(imsg));
+			answer_imsg = (struct answer_imsg *)imsg.data;
+			if ((pq = find_pending_query(answer_imsg->id)) ==
 			    NULL) {
-				pq->answer_len = IMSG_DATA_SIZE(imsg);
-				memcpy(pq->answer, imsg.data, pq->answer_len);
-			} else
+				log_warnx("cannot find pending query %llu",
+				    answer_imsg->id);
+				break;
+			}
+
+			p = realloc(pq->answer, pq->answer_len +
+			    answer_imsg->len);
+
+			if (p != NULL) {
+				pq->answer = p;
+				memcpy(pq->answer + pq->answer_len,
+				    answer_imsg->answer, answer_imsg->len);
+				pq->answer_len += answer_imsg->len;
+			} else {
+				free(pq->answer);
+				pq->answer_len = 0;
+				pq->answer = NULL;
 				pq->rcode_override = LDNS_RCODE_SERVFAIL;
-			send_answer(pq);
-			pq = NULL;
+				send_answer(pq);
+				break;
+			}
+			if (!answer_imsg->truncated)
+				send_answer(pq);
 			break;
 		case IMSG_CTL_RESOLVER_INFO:
 		case IMSG_CTL_AUTOCONF_RESOLVER_INFO:
@@ -913,8 +929,21 @@ handle_route_message(struct rt_msghdr *rtm, struct sockaddr **rti_info)
 {
 	struct imsg_rdns_proposal	 rdns_proposal;
 	struct sockaddr_rtdns		*rtdns;
+	struct if_announcemsghdr	*ifan;
 
 	switch (rtm->rtm_type) {
+	case RTM_IFANNOUNCE:
+		ifan = (struct if_announcemsghdr *)rtm;
+		if (ifan->ifan_what == IFAN_ARRIVAL)
+			break;
+		rdns_proposal.if_index = ifan->ifan_index;
+		rdns_proposal.src = 0;
+		rdns_proposal.rtdns.sr_family = AF_INET;
+		rdns_proposal.rtdns.sr_len = offsetof(struct sockaddr_rtdns,
+		    sr_dns);
+		frontend_imsg_compose_resolver(IMSG_REPLACE_DNS, 0,
+		    &rdns_proposal, sizeof(rdns_proposal));
+		break;
 	case RTM_IFINFO:
 		frontend_imsg_compose_resolver(IMSG_NETWORK_CHANGED, 0, NULL,
 		    0);
@@ -1056,7 +1085,7 @@ parse_trust_anchor(struct trust_anchor_head *tah, int fd)
 
 	len = sizeof(rr);
 
-	while ((line = strsep(&str, "\n")) != NULL) {
+	while ((line = strsep(&p, "\n")) != NULL) {
 		if (sldns_str2wire_rr_buf(line, rr, &len, &dname_len,
 		    ROOT_DNSKEY_TTL, NULL, 0, NULL, 0) != 0)
 			continue;
@@ -1144,7 +1173,11 @@ parse_blocklist(int fd)
 			fatal("%s: malloc", __func__);
 		if ((bl_node->domain = strdup(line)) == NULL)
 			fatal("%s: strdup", __func__);
-		RB_INSERT(bl_tree, &bl_head, bl_node);
+		if (RB_INSERT(bl_tree, &bl_head, bl_node) != NULL) {
+			log_warnx("duplicate blocked domain \"%s\"", line);
+			free(bl_node->domain);
+			free(bl_node);
+		}
 	}
 	free(line);
 	if (ferror(f))
@@ -1162,9 +1195,9 @@ free_bl(void)
 {
 	struct bl_node	*n, *nxt;
 
-	for (n = RB_MIN(bl_tree, &bl_head); n != NULL; n = nxt) {
-		nxt = RB_NEXT(bl_tree, &bl_head, n);
+	RB_FOREACH_SAFE(n, bl_tree, &bl_head, nxt) {
 		RB_REMOVE(bl_tree, &bl_head, n);
+		free(n->domain);
 		free(n);
 	}
 }

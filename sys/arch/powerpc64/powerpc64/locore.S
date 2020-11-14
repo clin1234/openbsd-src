@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore.S,v 1.30 2020/07/07 22:43:29 kettenis Exp $	*/
+/*	$OpenBSD: locore.S,v 1.41 2020/10/22 23:35:43 mortimer Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
@@ -21,8 +21,10 @@
 #include <sys/errno.h>
 #include <sys/syscall.h>
 
+#include <machine/param.h>
 #include <machine/opal.h>
 #include <machine/psl.h>
+#include <machine/asm.h>
 
 	.abiversion 2
 
@@ -52,6 +54,39 @@ sigfillsiz:
 	.long	esigfill - sigfill
 
 	.text
+
+#ifdef MULTIPROCESSOR
+
+	.globl cpu_hatch
+cpu_hatch:
+	bl	1f
+1:	mflr	%r31
+	addis	%r2, %r31, (.TOC. - 1b)@ha
+	addi	%r2, %r2, (.TOC. - 1b)@l
+
+	addis	%r1, %r2, tmpstack_end@toc@ha
+	addi	%r1, %r1, tmpstack_end@toc@l
+	addi	%r1, %r1, -32
+
+	bl	cpu_bootstrap
+
+	mfsprg0	%r31
+	ld	%r1, CI_INITSTACK_END(%r31)
+	addi	%r1, %r1, -32
+
+	bl	cpu_start_secondary
+	b	.
+
+	.data
+
+	.align PAGE_SHIFT
+tmpstack:
+	.space PAGE_SIZE
+tmpstack_end:
+
+	.text
+
+#endif
 
 	.globl cpu_idle_enter
 cpu_idle_enter:
@@ -98,20 +133,25 @@ cpu_switchto_asm:
 	std	%r1, PCB_SP(%r31)
 
 1:
+	mfsprg0	%r30
+
 	li	%r31, SONPROC
 	stb	%r31, P_STAT(%r4)
-	std	%r4, CI_CURPROC(%r13)
+	std	%r4, CI_CURPROC(%r30)
 
 	ld	%r31, P_ADDR(%r4)
-	std	%r31, CI_CURPCB(%r13)
+	std	%r31, CI_CURPCB(%r30)
 	ld	%r1, PCB_SP(%r31)
 #if PCB_SP != 0
 	addi	%r31, %r31, PCB_SP
 #endif
 	stdcx.	%r1, 0, %r31	/* clear a possible reservation */
+	ld	%r0, (SFRAMELEN + 16)(%r1)
+	mtlr	%r0
+	RETGUARD_SETUP(cpu_switchto_asm, %r11)
 
 	ld	%r31, P_MD_USER_SLB_PA(%r4)
-	std	%r31, CI_USER_SLB_PA(%r13)
+	std	%r31, CI_USER_SLB_PA(%r30)
 
 	ld	%r31, SF_R31(%r1)
 	ld	%r30, SF_R30(%r1)
@@ -134,28 +174,39 @@ cpu_switchto_asm:
 	ld	%r10, SF_CR(%r1)
 	addi	%r1, %r1, SFRAMELEN
 	mtcr	%r10
-	ld	%r0, 16(%r1)
-	mtlr	%r0
+	RETGUARD_CHECK(cpu_switchto_asm, %r11)
 	blr
 
 	.globl kcopy
 kcopy:
-	ld	%r7, CI_CURPCB(%r13)
+	RETGUARD_SETUP(kcopy, %r11)
+	mfsprg0	%r7
+	ld	%r7, CI_CURPCB(%r7)
 	ld	%r8, PCB_ONFAULT(%r7)
 	addis	%r9, %r2, .Lkcopyfault@toc@ha
 	addi	%r9, %r9, .Lkcopyfault@toc@l
 	std	%r9, PCB_ONFAULT(%r7)
 
-	rldicl.	%r6, %r5, 62, 2
-	beq	0, .Lkcopybytes
+	rldicl.	%r6, %r5, 61, 3
+	beq	0, .Lkcopywords
 
-	addi	%r3, %r3, -4
-	addi	%r4, %r4, -4
+	addi	%r3, %r3, -8
+	addi	%r4, %r4, -8
 	mtctr	%r6
 1:
-	lwzu	%r6, 4(%r3)
-	stwu	%r6, 4(%r4)
+	ldu	%r6, 8(%r3)
+	stdu	%r6, 8(%r4)
 	bdnz	1b
+
+	addi	%r3, %r3, 8
+	addi	%r4, %r4, 8
+
+.Lkcopywords:
+	andi.	%r6, %r5, 4
+	beq	0, .Lkcopybytes
+
+	lwz	%r6, 0(%r3)
+	stw	%r6, 0(%r4)
 
 	addi	%r3, %r3, 4
 	addi	%r4, %r4, 4
@@ -175,16 +226,20 @@ kcopy:
 .Lkcopysuccess:
 	std	%r8, PCB_ONFAULT(%r7)
 	li	%r3, 0
+.Lkcopydone:
+	RETGUARD_CHECK(kcopy, %r11)
 	blr
 
 .Lkcopyfault:
 	std	%r8, PCB_ONFAULT(%r7)
 	li	%r3, EFAULT
-	blr
+	b	.Lkcopydone
 
 	.globl copystr
 copystr:
-	ld	%r7, CI_CURPCB(%r13)
+	RETGUARD_SETUP(copystr, %r11)
+	mfsprg0	%r7
+	ld	%r7, CI_CURPCB(%r7)
 	ld	%r8, PCB_ONFAULT(%r7)
 	addis	%r9, %r2, .Lcopystrfault@toc@ha
 	addi	%r9, %r9, .Lcopystrfault@toc@l
@@ -222,9 +277,11 @@ copystr:
 	std	%r9, 0(%r6)
 2:
 	std	%r8, PCB_ONFAULT(%r7)
+	RETGUARD_CHECK(copystr, %r11)
 	blr
 
 	.globl proc_trampoline
+	.type proc_trampoline, @function
 proc_trampoline:
 #ifdef MULTIPROCESSOR
 	bl	proc_trampoline_mp
@@ -255,6 +312,7 @@ opal_entry:
 #define OPAL_CALL(opal_token, name) \
 	.globl name;			\
 name:					\
+	RETGUARD_SETUP(opal_call, %r12); \
 	li	%r0, opal_token;	\
 	b	opal_call
 
@@ -269,6 +327,8 @@ OPAL_CALL(OPAL_HANDLE_INTERRUPT, opal_handle_interrupt)
 OPAL_CALL(OPAL_POLL_EVENTS, opal_poll_events)
 OPAL_CALL(OPAL_PCI_CONFIG_READ_WORD, opal_pci_config_read_word)
 OPAL_CALL(OPAL_PCI_CONFIG_WRITE_WORD, opal_pci_config_write_word)
+OPAL_CALL(OPAL_SET_XIVE, opal_set_xive)
+OPAL_CALL(OPAL_GET_XIVE, opal_get_xive)
 OPAL_CALL(OPAL_PCI_EEH_FREEZE_STATUS, opal_pci_eeh_freeze_status)
 OPAL_CALL(OPAL_PCI_EEH_FREEZE_CLEAR, opal_pci_eeh_freeze_clear)
 OPAL_CALL(OPAL_PCI_PHB_MMIO_ENABLE, opal_pci_phb_mmio_enable)
@@ -278,8 +338,11 @@ OPAL_CALL(OPAL_PCI_SET_PE, opal_pci_set_pe)
 OPAL_CALL(OPAL_PCI_SET_XIVE_PE, opal_pci_set_xive_pe)
 OPAL_CALL(OPAL_GET_MSI_32, opal_get_msi_32)
 OPAL_CALL(OPAL_GET_MSI_64, opal_get_msi_64)
+OPAL_CALL(OPAL_START_CPU, opal_start_cpu)
+OPAL_CALL(OPAL_PCI_MAP_PE_DMA_WINDOW, opal_pci_map_pe_dma_window)
 OPAL_CALL(OPAL_PCI_MAP_PE_DMA_WINDOW_REAL, opal_pci_map_pe_dma_window_real)
 OPAL_CALL(OPAL_PCI_RESET, opal_pci_reset)
+OPAL_CALL(OPAL_REINIT_CPUS, opal_reinit_cpus)
 OPAL_CALL(OPAL_CHECK_TOKEN, opal_check_token)
 OPAL_CALL(OPAL_SENSOR_READ, opal_sensor_read)
 OPAL_CALL(OPAL_CONSOLE_FLUSH, opal_console_flush)
@@ -297,8 +360,9 @@ OPAL_CALL(OPAL_SENSOR_READ_U64, opal_sensor_read_u64)
 opal_call:
 	mflr	%r11
 	std	%r11, 16(%r1)
-	stdu	%r1, -32(%r1)
+	stdu	%r1, -40(%r1)
 	std	%r2, 24(%r1)
+	RETGUARD_SAVE(%r12, 32(%r1))
 
 	addis	%r11, %r2, opal_base@toc@ha
 	addi	%r11, %r11, opal_base@toc@l
@@ -311,7 +375,7 @@ opal_call:
 	std	%r31, 12(%r1)
 	mfmsr	%r31
 
-	/* Disable transaltion and external interrupts */
+	/* Disable translation and external interrupts */
 	andi.	%r2, %r31, ~(PSL_DR|PSL_IR|PSL_EE)@l
 	mtmsr	%r2
 	isync
@@ -325,10 +389,12 @@ opal_call:
 	isync
 	ld	%r31, 12(%r1)
 
+	RETGUARD_LOAD(%r11, 32(%r1))
 	ld	%r2, 24(%r1)
-	addi	%r1, %r1, 32
+	addi	%r1, %r1, 40
 	ld	%r0, 16(%r1)
 	mtlr	%r0
+	RETGUARD_CHECK(opal_call, %r11)
 	blr
 
 /*
@@ -343,6 +409,7 @@ db_enter:
 
 	.globl setjmp
 setjmp:
+	RETGUARD_SETUP(setjmp, %r11)
 	mflr	%r0
 	mfcr	%r5
 	std	%r0, 0x00(%r3)	/* lr */
@@ -368,6 +435,7 @@ setjmp:
 	std	%r30, 0xa0(%r3)
 	std	%r31, 0xa8(%r3)
 	li	%r3, 0		/* return 0 */
+	RETGUARD_CHECK(setjmp, %r11)
 	blr
 
 	.globl longjmp
@@ -375,6 +443,7 @@ longjmp:
 	ld	%r0, 0x00(%r3)	/* lr */
 	ld	%r5, 0x08(%r3)	/* cr */
 	mtlr	%r0
+	RETGUARD_SETUP(longjmp, %r11)
 	mtcr	%r5
 	ld	%r1, 0x10(%r3)
 	ld	%r2, 0x18(%r3)
@@ -397,5 +466,6 @@ longjmp:
 	ld	%r30, 0xa0(%r3)
 	ld	%r31, 0xa8(%r3)
 	mr	%r4, %r3	/* return val */
+	RETGUARD_CHECK(longjmp, %r11)
 	blr
 #endif

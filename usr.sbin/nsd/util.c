@@ -181,6 +181,17 @@ log_syslog(int priority, const char *message)
 }
 
 void
+log_only_syslog(int priority, const char *message)
+{
+#ifdef HAVE_SYSLOG_H
+	syslog(priority, "%s", message);
+#else /* !HAVE_SYSLOG_H */
+	/* no syslog, use stderr */
+	log_file(priority, message);
+#endif
+}
+
+void
 log_set_log_function(log_function_type *log_function)
 {
 	current_log_function = log_function;
@@ -253,6 +264,19 @@ lookup_by_id(lookup_table_type *table, int id)
 		table++;
 	}
 	return NULL;
+}
+
+char *
+xstrdup(const char *src)
+{
+	char *result = strdup(src);
+
+	if(!result) {
+		log_msg(LOG_ERR, "strdup failed: %s", strerror(errno));
+		exit(1);
+	}
+
+	return result;
 }
 
 void *
@@ -690,10 +714,10 @@ b32_ntop(uint8_t const *src, size_t srclength, char *target, size_t targsize)
 	}
 	if(srclength)
 	{
-		if(targsize < strlen(buf)+1)
+		size_t tlen = strlcpy(target, buf, targsize);
+		if (tlen >= targsize)
 			return -1;
-		strlcpy(target, buf, targsize);
-		len += strlen(buf);
+		len += tlen;
 	}
 	else if(targsize < 1)
 		return -1;

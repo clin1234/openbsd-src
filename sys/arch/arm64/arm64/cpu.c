@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.38 2020/06/04 21:18:16 kettenis Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.43 2020/11/04 10:53:29 jsg Exp $	*/
 
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
@@ -61,8 +61,11 @@
 #define CPU_PART_NEOVERSE_N1	0xd0c
 #define CPU_PART_CORTEX_A77	0xd0d
 #define CPU_PART_CORTEX_A76AE	0xd0e
+#define CPU_PART_NEOVERSE_V1	0xd40
 #define CPU_PART_CORTEX_A78	0xd41
+#define CPU_PART_CORTEX_A78AE	0xd42
 #define CPU_PART_CORTEX_A65AE	0xd43
+#define CPU_PART_CORTEX_X1	0xd44
 #define CPU_PART_NEOVERSE_E1	0xd4a
 
 #define CPU_PART_THUNDERX_T88	0x0a1
@@ -101,8 +104,11 @@ struct cpu_cores cpu_cores_arm[] = {
 	{ CPU_PART_CORTEX_A76AE, "Cortex-A76AE" },
 	{ CPU_PART_CORTEX_A77, "Cortex-A77" },
 	{ CPU_PART_CORTEX_A78, "Cortex-A78" },
+	{ CPU_PART_CORTEX_A78AE, "Cortex-A78AE" },
+	{ CPU_PART_CORTEX_X1, "Cortex-X1" },
 	{ CPU_PART_NEOVERSE_E1, "Neoverse E1" },
 	{ CPU_PART_NEOVERSE_N1, "Neoverse N1" },
+	{ CPU_PART_NEOVERSE_V1, "Neoverse V1" },
 	{ 0, NULL },
 };
 
@@ -156,7 +162,7 @@ void
 cpu_identify(struct cpu_info *ci)
 {
 	uint64_t midr, impl, part;
-	uint64_t clidr, id_aa64pfr0;
+	uint64_t clidr, id;
 	uint32_t ctr, ccsidr, sets, ways, line;
 	const char *impl_name = NULL;
 	const char *part_name = NULL;
@@ -289,10 +295,140 @@ cpu_identify(struct cpu_info *ci)
 	 * The architecture has been updated to explicitly tell us if
 	 * we're not vulnerable.
 	 */
-	id_aa64pfr0 = READ_SPECIALREG(id_aa64pfr0_el1);
-	if (ID_AA64PFR0_CSV2(id_aa64pfr0) == ID_AA64PFR0_CSV2_IMPL ||
-	    ID_AA64PFR0_CSV2(id_aa64pfr0) == ID_AA64PFR0_CSV2_SCXT)
+
+	id = READ_SPECIALREG(id_aa64pfr0_el1);
+	if (ID_AA64PFR0_CSV2(id) >= ID_AA64PFR0_CSV2_IMPL)
 		ci->ci_flush_bp = cpu_flush_bp_noop;
+
+	/*
+	 * Print CPU features encoded in the ID registers.
+	 */
+
+	printf("\n%s: ", ci->ci_dev->dv_xname);
+
+	/*
+	 * ID_AA64ISAR0
+	 */
+	id = READ_SPECIALREG(id_aa64isar0_el1);
+	sep = "";
+
+	if (ID_AA64ISAR0_DP(id) >= ID_AA64ISAR0_DP_IMPL) {
+		printf("%sDP", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_SM4(id) >= ID_AA64ISAR0_SM4_IMPL) {
+		printf("%sSM4", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_SM3(id) >= ID_AA64ISAR0_SM3_IMPL) {
+		printf("%sSM3", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_SHA3(id) >= ID_AA64ISAR0_SHA3_IMPL) {
+		printf("%sSHA3", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_RDM(id) >= ID_AA64ISAR0_RDM_IMPL) {
+		printf("%sRDM", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_ATOMIC(id) >= ID_AA64ISAR0_ATOMIC_IMPL) {
+		printf("%sAtomic", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_CRC32(id) >= ID_AA64ISAR0_CRC32_BASE) {
+		printf("%sCRC32", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_SHA2(id) >= ID_AA64ISAR0_SHA2_BASE) {
+		printf("%sSHA2", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR0_SHA2(id) >= ID_AA64ISAR0_SHA2_512)
+		printf("+SHA512");
+
+	if (ID_AA64ISAR0_SHA1(id) >= ID_AA64ISAR0_SHA1_BASE) {
+		printf("%sSHA1", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_AES(id) >= ID_AA64ISAR0_AES_BASE) {
+		printf("%sAES", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR0_AES(id) >= ID_AA64ISAR0_AES_PMULL)
+		printf("+PMULL");
+
+	/*
+	 * ID_AA64ISAR1
+	 */
+	id = READ_SPECIALREG(id_aa64isar1_el1);
+
+	if (ID_AA64ISAR1_DPB(id) >= ID_AA64ISAR1_DPB_IMPL) {
+		printf("%sDPB", sep);
+		sep = ",";
+	}
+
+	/*
+	 * ID_AA64MMFR1
+	 *
+	 * We omit printing virtualization related fields like XNX, VH
+	 * and VMIDBits as they are not really relevant for us.
+	 */
+	id = READ_SPECIALREG(id_aa64mmfr1_el1);
+
+	if (ID_AA64MMFR1_SPECSEI(id) >= ID_AA64MMFR1_SPECSEI_IMPL) {
+		printf("%sSpecSEI", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64MMFR1_PAN(id) >= ID_AA64MMFR1_PAN_IMPL) {
+		printf("%sPAN", sep);
+		sep = ",";
+	}
+	if (ID_AA64MMFR1_PAN(id) >= ID_AA64MMFR1_PAN_ATS1E1)
+		printf("+ATS1E1");
+
+	if (ID_AA64MMFR1_LO(id) >= ID_AA64MMFR1_LO_IMPL) {
+		printf("%sLO", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64MMFR1_HPDS(id) >= ID_AA64MMFR1_HPDS_IMPL) {
+		printf("%sHPDS", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64MMFR1_HAFDBS(id) >= ID_AA64MMFR1_HAFDBS_AF) {
+		printf("%sHAF", sep);
+		sep = ",";
+	}
+	if (ID_AA64MMFR1_HAFDBS(id) >= ID_AA64MMFR1_HAFDBS_AF_DBS)
+		printf("DBS");
+
+	/*
+	 * ID_AA64PFR0
+	 */
+	id = READ_SPECIALREG(id_aa64pfr0_el1);
+
+	if (ID_AA64PFR0_CSV3(id) >= ID_AA64PFR0_CSV3_IMPL) {
+		printf("%sCSV3", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64PFR0_CSV2(id) >= ID_AA64PFR0_CSV2_IMPL) {
+		printf("%sCSV2", sep);
+		sep = ",";
+	}
+	if (ID_AA64PFR0_CSV2(id) >= ID_AA64PFR0_CSV2_SCXT)
+		printf("+SCTX");
 }
 
 int	cpu_hatch_secondary(struct cpu_info *ci, int, uint64_t);
@@ -321,6 +457,7 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 	struct fdt_attach_args *faa = aux;
 	struct cpu_info *ci;
 	uint64_t mpidr = READ_SPECIALREG(mpidr_el1);
+	uint64_t id_aa64mmfr1, sctlr;
 	uint32_t opp;
 
 	KASSERT(faa->fa_nreg > 0);
@@ -391,6 +528,14 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 		if (OF_getproplen(ci->ci_node, "clocks") > 0) {
 			cpu_node = ci->ci_node;
 			cpu_cpuspeed = cpu_clockspeed;
+		}
+
+		/* Enable PAN. */
+		id_aa64mmfr1 = READ_SPECIALREG(id_aa64mmfr1_el1);
+		if (ID_AA64MMFR1_PAN(id_aa64mmfr1) >= ID_AA64MMFR1_PAN_IMPL) {
+			sctlr = READ_SPECIALREG(sctlr_el1);
+			sctlr &= ~SCTLR_SPAN;
+			WRITE_SPECIALREG(sctlr_el1, sctlr);
 		}
 
 		/* Initialize debug registers. */
@@ -522,6 +667,7 @@ cpu_boot_secondary(struct cpu_info *ci)
 void
 cpu_start_secondary(struct cpu_info *ci)
 {
+	uint64_t id_aa64mmfr1, sctlr;
 	uint64_t tcr;
 	int s;
 
@@ -543,6 +689,14 @@ cpu_start_secondary(struct cpu_info *ci)
 	tcr |= TCR_T0SZ(64 - USER_SPACE_BITS);
 	tcr |= TCR_A1;
 	WRITE_SPECIALREG(tcr_el1, tcr);
+
+	/* Enable PAN. */
+	id_aa64mmfr1 = READ_SPECIALREG(id_aa64mmfr1_el1);
+	if (ID_AA64MMFR1_PAN(id_aa64mmfr1) >= ID_AA64MMFR1_PAN_IMPL) {
+		sctlr = READ_SPECIALREG(sctlr_el1);
+		sctlr &= ~SCTLR_SPAN;
+		WRITE_SPECIALREG(sctlr_el1, sctlr);
+	}
 
 	/* Initialize debug registers. */
 	WRITE_SPECIALREG(mdscr_el1, DBG_MDSCR_TDCC);

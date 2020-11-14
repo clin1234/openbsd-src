@@ -438,13 +438,7 @@ i915_gem_gtt_pread(struct drm_i915_gem_object *obj,
 					       PIN_NOEVICT);
 	if (!IS_ERR(vma)) {
 		node.start = i915_ggtt_offset(vma);
-#ifdef notyet
 		node.flags = 0;
-#else
-		node.hole_follows = 0;
-        	node.allocated = 0;
-		node.scanned_block = 0;
-#endif
 	} else {
 		ret = insert_mappable_node(ggtt, &node, PAGE_SIZE);
 		if (ret)
@@ -670,13 +664,7 @@ i915_gem_gtt_pwrite_fast(struct drm_i915_gem_object *obj,
 					       PIN_NOEVICT);
 	if (!IS_ERR(vma)) {
 		node.start = i915_ggtt_offset(vma);
-#ifdef notyet
 		node.flags = 0;
-#else
-		node.hole_follows = 0;
-        	node.allocated = 0;
-		node.scanned_block = 0;
-#endif
 	} else {
 		ret = insert_mappable_node(ggtt, &node, PAGE_SIZE);
 		if (ret)
@@ -1293,7 +1281,7 @@ void i915_gem_init_early(struct drm_i915_private *dev_priv)
 	i915_gem_init__mm(dev_priv);
 	i915_gem_init__contexts(dev_priv);
 
-	mtx_init(&dev_priv->fb_tracking.lock, IPL_TTY);
+	mtx_init(&dev_priv->fb_tracking.lock, IPL_NONE);
 }
 
 void i915_gem_cleanup_early(struct drm_i915_private *dev_priv)

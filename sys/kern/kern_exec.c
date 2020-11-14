@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exec.c,v 1.216 2020/07/07 02:01:43 deraadt Exp $	*/
+/*	$OpenBSD: kern_exec.c,v 1.219 2020/10/15 16:31:11 cheloha Exp $	*/
 /*	$NetBSD: kern_exec.c,v 1.75 1996/02/09 18:59:28 christos Exp $	*/
 
 /*-
@@ -656,14 +656,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	}
 
 	if (pr->ps_flags & PS_SUGIDEXEC) {
-		int i, s = splclock();
-
-		timeout_del(&pr->ps_realit_to);
-		for (i = 0; i < nitems(pr->ps_timer); i++) {
-			timespecclear(&pr->ps_timer[i].it_interval);
-			timespecclear(&pr->ps_timer[i].it_value);
-		}
-		splx(s);
+		cancel_all_itimers();
 	}
 
 	/* reset CPU time usage for the thread, but not the process */
@@ -914,7 +907,7 @@ exec_timekeep_map(struct process *pr)
 
 	pr->ps_timekeep = 0; /* no hint */
 	uao_reference(timekeep_object);
-	if (uvm_map(&pr->ps_vmspace->vm_map, &pr->ps_timekeep, round_page(timekeep_sz),
+	if (uvm_map(&pr->ps_vmspace->vm_map, &pr->ps_timekeep, timekeep_sz,
 	    timekeep_object, 0, 0, UVM_MAPFLAG(PROT_READ, PROT_READ,
 	    MAP_INHERIT_COPY, MADV_RANDOM, 0))) {
 		uao_detach(timekeep_object);

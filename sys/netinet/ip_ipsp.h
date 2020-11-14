@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_ipsp.h,v 1.194 2020/04/23 19:38:08 tobhe Exp $	*/
+/*	$OpenBSD: ip_ipsp.h,v 1.196 2020/11/05 19:28:28 phessler Exp $	*/
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr),
@@ -303,6 +303,7 @@ struct ipsec_policy {
 #define	IPSP_IDENTITY_PREFIX		1
 #define	IPSP_IDENTITY_FQDN		2
 #define	IPSP_IDENTITY_USERFQDN		3
+#define	IPSP_IDENTITY_ASN1_DN		4
 
 struct tdb {				/* tunnel descriptor block */
 	/*
@@ -513,34 +514,6 @@ extern int ipsec_exp_first_use;		/* seconds between 1st asso & expire */
 #define IPSEC_SOFT_FIRSTUSE		IPCTL_IPSEC_SOFT_FIRSTUSE	/* 23 */
 #define IPSEC_FIRSTUSE			IPCTL_IPSEC_FIRSTUSE		/* 24 */
 #define IPSEC_MAXID	25
-
-#define	IPSECCTL_VARS { \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	NULL, \
-	&encdebug, \
-	NULL, /* ipsecstat */ \
-	&ipsec_expire_acquire, \
-	&ipsec_keep_invalid, \
-	&ipsec_require_pfs, \
-	&ipsec_soft_allocations, \
-	&ipsec_exp_allocations, \
-	&ipsec_soft_bytes, \
-	&ipsec_exp_bytes, \
-	&ipsec_exp_timeout, \
-	&ipsec_soft_timeout, \
-	&ipsec_soft_first_use, \
-	&ipsec_exp_first_use, \
-}
 
 extern char ipsec_def_enc[];
 extern char ipsec_def_auth[];

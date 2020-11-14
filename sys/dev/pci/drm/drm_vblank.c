@@ -184,7 +184,7 @@ static void drm_reset_vblank_timestamp(struct drm_device *dev, unsigned int pipe
 	 * interrupt and assign 0 for now, to mark the vblanktimestamp as invalid.
 	 */
 	if (!rc)
-		t_vblank = (struct timeval) {0, 0};
+		t_vblank = 0;
 
 	/*
 	 * +1 to make sure user will never see the same
@@ -293,7 +293,7 @@ static void drm_update_vblank_count(struct drm_device *dev, unsigned int pipe,
 	 * for now, to mark the vblanktimestamp as invalid.
 	 */
 	if (!rc && !in_vblank_irq)
-		t_vblank = (struct timeval) {0, 0};
+		t_vblank = 0;
 
 	store_vblank(dev, pipe, diff, t_vblank, cur_vblank);
 }
@@ -481,7 +481,7 @@ int drm_vblank_init(struct drm_device *dev, unsigned int num_crtcs)
 		init_waitqueue_head(&vblank->queue);
 		setup_timer(&vblank->disable_timer, vblank_disable_fn,
 		    (unsigned long)vblank);
-		seqlock_init(&vblank->seqlock, IPL_NONE);
+		seqlock_init(&vblank->seqlock, IPL_TTY);
 	}
 
 	DRM_INFO("Supports vblank timestamp caching Rev 2 (21.10.2013).\n");
@@ -871,7 +871,7 @@ static u64 drm_vblank_count_and_time(struct drm_device *dev, unsigned int pipe,
 	unsigned int seq;
 
 	if (WARN_ON(pipe >= dev->num_crtcs)) {
-		*vblanktime = (struct timeval) {0, 0};
+		*vblanktime = 0;
 		return 0;
 	}
 

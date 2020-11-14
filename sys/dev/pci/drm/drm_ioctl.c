@@ -781,6 +781,10 @@ pledge_ioctl_drm(struct proc *p, long com, dev_t device)
 		return 0;
 	}
 
+	/* for amdgpu libdrm */
+	if (com == DRM_IOCTL_GET_CLIENT)
+		return 0;
+
 	return EPERM;
 }
 
@@ -1069,7 +1073,9 @@ drm_do_ioctl(struct drm_device *dev, int minor, u_long cmd, caddr_t data)
 		memcpy(adata, data, usize);
 	}
 
-	if (ioctl->flags & DRM_UNLOCKED)
+	/* Enforce sane locking for modern driver ioctls. */
+	if (likely(!drm_core_check_feature(dev, DRIVER_LEGACY)) ||
+	    (ioctl->flags & DRM_UNLOCKED))
 		retcode = func(dev, adata, file_priv);
 	else {
 		mutex_lock(&drm_global_mutex);

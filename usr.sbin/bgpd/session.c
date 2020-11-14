@@ -1,4 +1,4 @@
-/*	$OpenBSD: session.c,v 1.402 2020/06/27 07:24:42 bket Exp $ */
+/*	$OpenBSD: session.c,v 1.405 2020/11/05 14:44:59 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004, 2005 Henning Brauer <henning@openbsd.org>
@@ -100,15 +100,16 @@ void		 session_template_clone(struct peer *, struct sockaddr *,
 		    u_int32_t, u_int32_t);
 int		 session_match_mask(struct peer *, struct bgpd_addr *);
 
-struct bgpd_config	*conf, *nconf;
+static struct bgpd_config	*conf, *nconf;
+static struct imsgbuf		*ibuf_rde;
+static struct imsgbuf		*ibuf_rde_ctl;
+static struct imsgbuf		*ibuf_main;
+
 struct bgpd_sysdep	 sysdep;
 volatile sig_atomic_t	 session_quit;
 int			 pending_reconf;
 int			 csock = -1, rcsock = -1;
 u_int			 peer_cnt;
-struct imsgbuf		*ibuf_rde;
-struct imsgbuf		*ibuf_rde_ctl;
-struct imsgbuf		*ibuf_main;
 
 struct mrt_head		 mrthead;
 time_t			 pauseaccept;
@@ -196,7 +197,6 @@ session_main(int debug, int verbose)
 	struct peer		*p, **peer_l = NULL, *next;
 	struct mrt		*m, *xm, **mrt_l = NULL;
 	struct pollfd		*pfd = NULL;
-	struct ctl_conn		*ctl_conn;
 	struct listen_addr	*la;
 	void			*newp;
 	time_t			 now;
@@ -205,8 +205,7 @@ session_main(int debug, int verbose)
 	log_init(debug, LOG_DAEMON);
 	log_setverbose(verbose);
 
-	bgpd_process = PROC_SE;
-	log_procinit(log_procnames[bgpd_process]);
+	log_procinit(log_procnames[PROC_SE]);
 
 	if ((pw = getpwnam(BGPD_USER)) == NULL)
 		fatal(NULL);
@@ -237,7 +236,6 @@ session_main(int debug, int verbose)
 		fatal(NULL);
 	imsg_init(ibuf_main, 3);
 
-	TAILQ_INIT(&ctl_conns);
 	LIST_INIT(&mrthead);
 	listener_cnt = 0;
 	peer_cnt = 0;
@@ -438,13 +436,10 @@ session_main(int debug, int verbose)
 
 		idx_mrts = i;
 
-		TAILQ_FOREACH(ctl_conn, &ctl_conns, entry) {
-			pfd[i].fd = ctl_conn->ibuf.fd;
-			pfd[i].events = POLLIN;
-			if (ctl_conn->ibuf.w.queued > 0)
-				pfd[i].events |= POLLOUT;
-			i++;
-		}
+		i += control_fill_pfds(pfd + i, pfd_elms -i);
+
+		if (i > pfd_elms)
+			fatalx("poll pfd overflow");
 
 		if (pauseaccept && timeout > 1)
 			timeout = 1;
@@ -511,7 +506,7 @@ session_main(int debug, int verbose)
 				mrt_write(mrt_l[j - idx_peers]);
 
 		for (; j < i; j++)
-			control_dispatch_msg(&pfd[j], &ctl_cnt, &conf->peers);
+			ctl_cnt -= control_dispatch_msg(&pfd[j], &conf->peers);
 	}
 
 	RB_FOREACH_SAFE(p, peer_head, &conf->peers, next) {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: misc.c,v 1.74 2020/07/07 10:33:58 jca Exp $	*/
+/*	$OpenBSD: misc.c,v 1.76 2020/10/26 18:16:51 tb Exp $	*/
 
 /*
  * Miscellaneous functions
@@ -615,6 +615,9 @@ do_gmatch(const unsigned char *s, const unsigned char *se,
 			break;
 
 		case '*':
+			/* collapse consecutive stars */
+			while (ISMAGIC(p[0]) && p[1] == '*')
+				p += 2;
 			if (p == pe)
 				return 1;
 			s--;
@@ -710,7 +713,7 @@ do_gmatch(const unsigned char *s, const unsigned char *se,
 static int
 posix_cclass(const unsigned char *pattern, int test, const unsigned char **ep)
 {
-	struct cclass *cc;
+	const struct cclass *cc;
 	const unsigned char *colon;
 	size_t len;
 	int rval = 0;

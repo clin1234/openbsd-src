@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh_api.c,v 1.20 2020/07/01 16:28:31 markus Exp $ */
+/* $OpenBSD: ssh_api.c,v 1.22 2020/10/18 11:32:02 djm Exp $ */
 /*
  * Copyright (c) 2012 Markus Friedl.  All rights reserved.
  *
@@ -50,7 +50,7 @@ int	_ssh_host_key_sign(struct ssh *, struct sshkey *, struct sshkey *,
  */
 int	use_privsep = 0;
 int	mm_sshkey_sign(struct sshkey *, u_char **, u_int *,
-    const u_char *, u_int, const char *, const char *, u_int);
+    const u_char *, u_int, const char *, const char *, const char *, u_int);
 
 #ifdef WITH_OPENSSL
 DH	*mm_choose_dh(int, int, int);
@@ -62,8 +62,8 @@ u_int session_id2_len = 0;
 
 int
 mm_sshkey_sign(struct sshkey *key, u_char **sigp, u_int *lenp,
-    const u_char *data, u_int datalen, const char *alg, const char *sk_provider,
-    u_int compat)
+    const u_char *data, u_int datalen, const char *alg,
+    const char *sk_provider, const char *sk_pin, u_int compat)
 {
 	return (-1);
 }
@@ -350,7 +350,7 @@ _ssh_read_banner(struct ssh *ssh, struct sshbuf *banner)
 		if (sshbuf_len(banner) >= 4 &&
 		    memcmp(sshbuf_ptr(banner), "SSH-", 4) == 0)
 			break;
-		debug("%s: %.*s", __func__, (int)sshbuf_len(banner),
+		debug_f("%.*s", (int)sshbuf_len(banner),
 		    sshbuf_ptr(banner));
 		/* Accept lines before banner only on client */
 		if (ssh->kex->server || ++n > SSH_MAX_PRE_BANNER_LINES) {
@@ -463,9 +463,9 @@ _ssh_host_public_key(int type, int nid, struct ssh *ssh)
 {
 	struct key_entry *k;
 
-	debug3("%s: need %d", __func__, type);
+	debug3_f("need %d", type);
 	TAILQ_FOREACH(k, &ssh->public_keys, next) {
-		debug3("%s: check %s", __func__, sshkey_type(k->key));
+		debug3_f("check %s", sshkey_type(k->key));
 		if (k->key->type == type &&
 		    (type != KEY_ECDSA || k->key->ecdsa_nid == nid))
 			return (k->key);
@@ -478,9 +478,9 @@ _ssh_host_private_key(int type, int nid, struct ssh *ssh)
 {
 	struct key_entry *k;
 
-	debug3("%s: need %d", __func__, type);
+	debug3_f("need %d", type);
 	TAILQ_FOREACH(k, &ssh->private_keys, next) {
-		debug3("%s: check %s", __func__, sshkey_type(k->key));
+		debug3_f("check %s", sshkey_type(k->key));
 		if (k->key->type == type &&
 		    (type != KEY_ECDSA || k->key->ecdsa_nid == nid))
 			return (k->key);
@@ -493,9 +493,9 @@ _ssh_verify_host_key(struct sshkey *hostkey, struct ssh *ssh)
 {
 	struct key_entry *k;
 
-	debug3("%s: need %s", __func__, sshkey_type(hostkey));
+	debug3_f("need %s", sshkey_type(hostkey));
 	TAILQ_FOREACH(k, &ssh->public_keys, next) {
-		debug3("%s: check %s", __func__, sshkey_type(k->key));
+		debug3_f("check %s", sshkey_type(k->key));
 		if (sshkey_equal_public(hostkey, k->key))
 			return (0);	/* ok */
 	}
@@ -541,8 +541,8 @@ _ssh_order_hostkeyalgs(struct ssh *ssh)
 		}
 	}
 	if (*replace != '\0') {
-		debug2("%s: orig/%d    %s", __func__, ssh->kex->server, orig);
-		debug2("%s: replace/%d %s", __func__, ssh->kex->server, replace);
+		debug2_f("orig/%d    %s", ssh->kex->server, orig);
+		debug2_f("replace/%d %s", ssh->kex->server, replace);
 		free(orig);
 		proposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = replace;
 		replace = NULL;	/* owned by proposal */
@@ -561,5 +561,5 @@ _ssh_host_key_sign(struct ssh *ssh, struct sshkey *privkey,
     const u_char *data, size_t dlen, const char *alg)
 {
 	return sshkey_sign(privkey, signature, slen, data, dlen,
-	    alg, NULL, ssh->compat);
+	    alg, NULL, NULL, ssh->compat);
 }

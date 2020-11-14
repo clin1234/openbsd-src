@@ -1,3 +1,124 @@
+1 October 2020: Wouter
+	- tag for 4.3.3rc1 release.
+
+30 September 2020: Wouter
+	- Updated date in nsd -v output.
+	- Fixup bug013_truncate, checkconf and cutest_qroot tests for new
+	  default EDNS size.
+
+29 September 2020: Willem
+	- Follow DNS flag day 2020 advice and
+	  set default EDNS message size to 1232.
+
+4 September 2020: Wouter
+	- Remove unused space from LIBS on link line.
+
+3 September 2020: Wouter
+	- Merge PR #121: Increase log level of recreated database from
+	  WARNING to ERR.
+
+1 September 2020: Wouter
+	- Fix #119: fix compile warnings from new gcc.
+	- Fix #119: warn when trying to parse a directory.
+
+27 August 2020: Wouter
+	- Merged PR #113 with fixes.  Instead of listing an IP-address to
+	  listen on, an interface name can be specified in nsd.conf, with
+	  ip-address: eth0.  The IP-addresses for that interface are then used.
+
+26 August 2020: Wouter
+	- Add xstrdup for PR #113.
+	- Tidy up code like in PR #113.
+	- Import code from PR #113.
+	- Fix for unknown EVP_MAC_CTX_free function in openssl 3.0.0 tsig code.
+
+24 August 2020: Wouter
+	- Fix that configure checks for EVP_sha256 to detect openssl, because
+	  HMAC_CTX_new is deprecated in 3.0.0.
+	- Port TSIG code for openssl 3.0.0-alpha6.
+	- Sync acx_nlnetlabs.m4 with the unbound repo.
+	- Review fixes for tsig, defensive free and zero.
+
+4 August 2020: Wouter
+	- Merge #117: mini_event.h (4.3.2 and 4.3.1) on OpenBSD cannot find
+	  fd_set - patch.
+
+23 July 2020: Wouter
+	- Merge #115 from millert: Fix strlcpy() usage. From OpenBSD.
+
+15 July 2020: Wouter
+	- Fix make install with --with-pidfile="".
+
+14 July 2020: Wouter
+	- Tag for 4.3.2 release.  Master branch contains the next version
+	  in development, 4.3.3.
+
+7 July 2020: Wouter
+	- Tag for 4.3.2rc1.
+
+6 July 2020: Wouter
+	- Fix compile includes for xfr-inspect tool on FreeBSD.
+	- Add tpkg/run_vm.sh that runs test when in a virtual machine.
+	- Merge #112 from jaredmauch: log old and new serials when NSD
+	  rejects an IXFR due to an old serial number.
+	- Fix bug034 test for vm test changes.
+
+22 June 2020: Wouter
+	- Remove errno reset behaviour from sendmmsg and recvmmsg
+	  replacement functions.
+	- Fix unit test for different nsd-control-setup -h exit code.
+
+19 June 2020: Wouter
+	- Merge #108 from Nomis: Make the max-retry-time description clearer.
+	- Retry when udp send buffer is full to wait until buffer space is
+	  available.
+
+18 June 2020: Wouter
+	- Do not log EAGAIN errors for sendmmsg, to stop log spam on OpenBSD.
+
+17 June 2020: Wouter
+	- Fix #107: nsd -v shows configure line, openssl version and libevent version.
+
+27 May 2020: Wouter
+	- Fix unlink of pidfile warning if not possible due to permissions,
+	  nsd can display the message at high verbosity levels.
+	- Update contrib/nsd.service for chown of nsd.log and /var/log in
+	  ReadWritePaths.
+	- Removed contrib/nsd.service, example is too complicated and not
+	  useful.
+
+15 May 2020: Wouter
+	- Merge PR#102 from and0x000: add missing default in documentation
+	  for drop-updates.
+	- Fix checkconf test for log-only-syslog option.
+
+14 May 2020: Wouter
+	- Document default value for tcp-timeout.
+
+13 May 2020: Jeroen
+	- Fix #99: Fix copying of socket properties with reuseport enabled.
+
+24 April 2020: Wouter
+	- Fix #97: EDNS unknown version: query not in response.
+
+21 April 2020: Wouter
+	- Fix #96: log-only-syslog: yes sets to only use syslog, fixes
+	  that the default configuration and systemd results in duplicate
+	  log messages.
+
+20 April 2020: Wouter
+	- Fix #95: Removed make test check because tpkg not included in
+	  release tarballs.
+	- Fix unused parameter compile warnings.
+
+16 April 2020: Wouter
+	- Tag for 4.3.1 release and track 4.3.2 release in code repository.
+	- note sha256 digest algo use in makedist.sh.
+	- Fix for posix shell syntax for trap in nsd-control-setup.
+	- Fix to omit the listen-on lines from log at startup, unless verbose.
+	- Fix uninitialised values for bindtodevice option at startup with
+	  reuseport and multiple interfaces.
+
 8 April 2020: Wouter
 	- Tag for 4.3.1rc2.
 

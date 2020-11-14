@@ -1,4 +1,4 @@
-.\" $OpenBSD: openssl.1,v 1.122 2020/05/13 10:19:25 inoguchi Exp $
+.\" $OpenBSD: openssl.1,v 1.127 2020/11/01 21:32:03 jmc Exp $
 .\" ====================================================================
 .\" Copyright (c) 1998-2002 The OpenSSL Project.  All rights reserved.
 .\"
@@ -110,7 +110,7 @@
 .\" copied and put under another distribution licence
 .\" [including the GNU Public Licence.]
 .\"
-.Dd $Mdocdate: May 13 2020 $
+.Dd $Mdocdate: November 1 2020 $
 .Dt OPENSSL 1
 .Os
 .Sh NAME
@@ -847,6 +847,61 @@ The default value is
 The same as
 .Fl extensions .
 .El
+.Tg certhash
+.Sh CERTHASH
+.Bl -hang -width "openssl certhash"
+.It Nm openssl certhash
+.Bk -words
+.Op Fl nv
+.Ar dir ...
+.Ek
+.El
+.Pp
+The
+.Nm certhash
+command calculates a hash value of
+.Qq .pem
+file in the specified directory list and creates symbolic links for each file,
+where the name of the link is the hash value.
+See the
+.Xr SSL_CTX_load_verify_locations 3
+manual page for how hash links are used.
+.Pp
+The links created are of the form
+.Qq HHHHHHHH.D ,
+where each
+.Sq H
+is a hexadecimal character and
+.Sq D
+is a single decimal digit.
+The hashes for CRLs look similar, except the letter
+.Sq r
+appears after the period, like this:
+.Qq HHHHHHHH.rD .
+When processing a directory,
+.Nm certhash
+will first remove all links that have a name in that syntax and invalid
+reference.
+.Pp
+Multiple objects may have the same hash; they will be indicated by
+incrementing the
+.Sq D
+value.
+Duplicates are found by comparing the full SHA256 fingerprint.
+A warning will be displayed if a duplicate is found.
+.Pp
+A warning will also be displayed if there are files that cannot be parsed as
+either a certificate or a CRL.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl n
+Perform a dry-run, and do not make any changes.
+.It Fl v
+Print extra details about the processing.
+.It Ar dir ...
+Specify the directories to process.
+.El
 .Tg ciphers
 .Sh CIPHERS
 .Nm openssl ciphers
@@ -1066,7 +1121,7 @@ commands.
 .It Fl binary
 Normally the input message is converted to "canonical" format which is
 effectively using CR/LF as end of line, as required by the S/MIME specification.
-When this option is present no translation occurs.
+When this option is present, no translation occurs.
 This is useful when handling binary data which may not be in MIME format.
 .It Fl CAfile Ar file
 A file containing trusted CA certificates, used with
@@ -1082,7 +1137,7 @@ This directory must be a standard certificate directory: that is a hash
 of each subject name (using
 .Nm x509 Fl hash )
 should be linked to each certificate.
-.It Ar cert.pem...
+.It Ar cert.pem ...
 One or more certificates of message recipients: used when encrypting a message.
 .It Fl certfile Ar file
 Allows additional certificates to be specified.
@@ -1916,7 +1971,7 @@ Encrypt the private key with DES, triple DES, or
 any other cipher supported by
 .Nm openssl .
 A pass phrase is prompted for.
-If none of these options is specified the key is written in plain text.
+If none of these options are specified, the key is written in plain text.
 This means that using the
 .Nm ec
 utility to read in an encrypted key with no
@@ -1927,7 +1982,7 @@ These options can only be used with PEM format output files.
 .It Fl in Ar file
 The input file to read a key from,
 or standard input if not specified.
-If the key is encrypted a pass phrase will be prompted for.
+If the key is encrypted, a pass phrase will be prompted for.
 .It Fl inform Cm der | pem
 The input format.
 .It Fl noout
@@ -2583,7 +2638,7 @@ option, or an error occurs if no issuer certificate is specified.
 Use the digest algorithm
 .Ar alg
 for certificate identification in the OCSP request.
-By default SHA-1 is used.
+By default SHA1 is used.
 .It Xo
 .Fl host Ar hostname : Ns Ar port ,
 .Fl path Ar path
@@ -3301,7 +3356,7 @@ is acceptable, such as
 .It Fl in Ar file
 The input file to read from,
 or standard input if not specified.
-If the key is encrypted a pass phrase will be prompted for.
+If the key is encrypted, a pass phrase will be prompted for.
 .It Fl inform Cm der | pem
 The input format.
 .It Fl noout
@@ -3474,8 +3529,8 @@ For pss
 mode only this option specifies the salt length.
 Two special values are supported:
 -1 sets the salt length to the digest length.
-When signing -2 sets the salt length to the maximum permissible value.
-When verifying -2 causes the salt length to be automatically determined
+When signing, -2 sets the salt length to the maximum permissible value.
+When verifying, -2 causes the salt length to be automatically determined
 based on the PSS block structure.
 .El
 .Pp
@@ -5147,7 +5202,7 @@ Normally, the input message is converted to
 .Qq canonical
 format which uses CR/LF as end of line,
 as required by the S/MIME specification.
-When this option is present no translation occurs.
+When this option is present, no translation occurs.
 This is useful when handling binary data which may not be in MIME format.
 .It Fl CAfile Ar file
 A
@@ -5533,7 +5588,7 @@ The message digest to apply to the data file.
 It supports all the message digest algorithms that are supported by the
 .Nm dgst
 command.
-The default is SHA-1.
+The default is SHA1.
 .It Fl no_nonce
 Specify no nonce in the request.
 The default, to include a 64-bit long pseudo-random nonce,
@@ -5546,7 +5601,7 @@ The policy that the client expects the TSA to use for creating the
 time stamp token.
 Either dotted OID notation or OID names defined
 in the config file can be used.
-If no policy is requested the TSA uses its own default policy.
+If no policy is requested, the TSA uses its own default policy.
 .It Fl text
 Output in human-readable text format instead of DER.
 .El
@@ -5804,6 +5859,7 @@ The default is no.
 .Op Fl inhibit_any
 .Op Fl inhibit_map
 .Op Fl issuer_checks
+.Op Fl legacy_verify
 .Op Fl policy_check
 .Op Fl purpose Ar purpose
 .Op Fl trusted Ar file
@@ -5852,7 +5908,7 @@ The
 should contain one or more CRLs in PEM format.
 .It Fl crl_check
 Check end entity certificate validity by attempting to look up a valid CRL.
-If a valid CRL cannot be found an error occurs.
+If a valid CRL cannot be found, an error occurs.
 .It Fl crl_check_all
 Check the validity of all certificates in the chain by attempting
 to look up valid CRLs.
@@ -5876,6 +5932,8 @@ showing why each candidate issuer certificate was rejected.
 The presence of rejection messages
 does not itself imply that anything is wrong:
 during the normal verify process several rejections may take place.
+.It Fl legacy_verify
+Use the legacy X.509 certificate chain verification code.
 .It Fl policy_check
 Enable certificate policy processing.
 .It Fl purpose Ar purpose
@@ -6505,7 +6563,7 @@ Print the full certificate in text form.
 A trusted certificate is a certificate which has several
 additional pieces of information attached to it such as the permitted
 and prohibited uses of the certificate and an alias.
-When a certificate is being verified at least one certificate must be trusted.
+When a certificate is being verified, at least one certificate must be trusted.
 By default, a trusted certificate must be stored locally and be a root CA.
 The following are x509 trust settings options:
 .Bl -tag -width "XXXX"

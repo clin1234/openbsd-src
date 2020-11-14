@@ -14,6 +14,7 @@
 ./usr/bin/yacc
 ./usr/include/FlexLexer.h
 ./usr/include/a.out.h
+./usr/include/agentx.h
 ./usr/include/ar.h
 ./usr/include/arpa
 ./usr/include/arpa/ftp.h
@@ -96,8 +97,10 @@
 ./usr/include/dev/acpi
 ./usr/include/dev/acpi/acpidebug.h
 ./usr/include/dev/acpi/acpidev.h
+./usr/include/dev/acpi/acpidmar.h
 ./usr/include/dev/acpi/acpireg.h
 ./usr/include/dev/acpi/acpivar.h
+./usr/include/dev/acpi/amd_iommu.h
 ./usr/include/dev/acpi/amltypes.h
 ./usr/include/dev/acpi/dsdt.h
 ./usr/include/dev/acpi/efi.h
@@ -868,6 +871,7 @@
 ./usr/include/dev/wsfont/spleen16x32.h
 ./usr/include/dev/wsfont/spleen32x64.h
 ./usr/include/dev/wsfont/spleen5x8.h
+./usr/include/dev/wsfont/spleen6x12.h
 ./usr/include/dev/wsfont/spleen8x16.h
 ./usr/include/dev/wsfont/wsfont.h
 ./usr/include/dev/x86emu
@@ -1166,6 +1170,7 @@
 ./usr/include/openssl/ui_compat.h
 ./usr/include/openssl/whrlpool.h
 ./usr/include/openssl/x509.h
+./usr/include/openssl/x509_verify.h
 ./usr/include/openssl/x509_vfy.h
 ./usr/include/openssl/x509v3.h
 ./usr/include/panel.h
@@ -1491,6 +1496,8 @@
 ./usr/lib/crt0.o
 ./usr/lib/debug
 ./usr/lib/gcrt0.o
+./usr/lib/libagentx.a
+./usr/lib/libagentx_p.a
 ./usr/lib/libc.a
 ./usr/lib/libc_p.a
 ./usr/lib/libcbor.a
@@ -1950,6 +1957,7 @@
 ./usr/share/man/man3/OPENSSL_sk_new.3
 ./usr/share/man/man3/OpenSSL_add_all_algorithms.3
 ./usr/share/man/man3/PEM_ASN1_read.3
+./usr/share/man/man3/PEM_X509_INFO_read.3
 ./usr/share/man/man3/PEM_bytes_read_bio.3
 ./usr/share/man/man3/PEM_read.3
 ./usr/share/man/man3/PEM_read_SSL_SESSION.3
@@ -2106,7 +2114,9 @@
 ./usr/share/man/man3/SSL_renegotiate.3
 ./usr/share/man/man3/SSL_rstate_string.3
 ./usr/share/man/man3/SSL_session_reused.3
+./usr/share/man/man3/SSL_set1_host.3
 ./usr/share/man/man3/SSL_set1_param.3
+./usr/share/man/man3/SSL_set_SSL_CTX.3
 ./usr/share/man/man3/SSL_set_bio.3
 ./usr/share/man/man3/SSL_set_connect_state.3
 ./usr/share/man/man3/SSL_set_fd.3
@@ -2181,6 +2191,7 @@
 ./usr/share/man/man3/abs.3
 ./usr/share/man/man3/acos.3
 ./usr/share/man/man3/acosh.3
+./usr/share/man/man3/agentx.3
 ./usr/share/man/man3/alarm.3
 ./usr/share/man/man3/alloca.3
 ./usr/share/man/man3/arc4random.3
@@ -2420,6 +2431,7 @@
 ./usr/share/man/man3/fido_cred_verify.3
 ./usr/share/man/man3/fido_credman_metadata_new.3
 ./usr/share/man/man3/fido_dev_get_assert.3
+./usr/share/man/man3/fido_dev_get_touch_begin.3
 ./usr/share/man/man3/fido_dev_info_manifest.3
 ./usr/share/man/man3/fido_dev_make_cred.3
 ./usr/share/man/man3/fido_dev_open.3
@@ -3037,6 +3049,7 @@
 ./usr/share/man/man9/intr_barrier.9
 ./usr/share/man/man9/intrmap_create.9
 ./usr/share/man/man9/intro.9
+./usr/share/man/man9/kcov_remote_register.9
 ./usr/share/man/man9/km_alloc.9
 ./usr/share/man/man9/knote.9
 ./usr/share/man/man9/kstat_create.9

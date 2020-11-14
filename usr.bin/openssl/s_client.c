@@ -1,4 +1,4 @@
-/* $OpenBSD: s_client.c,v 1.49 2020/07/09 14:09:19 inoguchi Exp $ */
+/* $OpenBSD: s_client.c,v 1.52 2020/10/14 05:36:18 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -171,9 +171,9 @@
 #define BUFSIZZ 1024*8
 
 static void sc_usage(void);
-static void print_stuff(BIO * berr, SSL * con, int full);
-static int ocsp_resp_cb(SSL * s, void *arg);
-static BIO *bio_c_out = NULL;
+static void print_stuff(BIO *berr, SSL *con, int full);
+static int ocsp_resp_cb(SSL *s, void *arg);
+static int ssl_servername_cb(SSL *s, int *ad, void *arg);
 
 enum {
 	PROTO_OFF = 0,
@@ -184,6 +184,12 @@ enum {
 	PROTO_FTP,
 	PROTO_XMPP,
 };
+
+/* This is a context that we pass to callbacks */
+typedef struct tlsextctx_st {
+	BIO *biodebug;
+	int ack;
+} tlsextctx;
 
 static struct {
 	int af;
@@ -840,25 +846,6 @@ sc_usage(void)
 	fprintf(stderr, "\n");
 }
 
-/* This is a context that we pass to callbacks */
-typedef struct tlsextctx_st {
-	BIO *biodebug;
-	int ack;
-} tlsextctx;
-
-static int
-ssl_servername_cb(SSL * s, int *ad, void *arg)
-{
-	tlsextctx *p = (tlsextctx *) arg;
-	const char *hn = SSL_get_servername(s, TLSEXT_NAMETYPE_host_name);
-	if (SSL_get_servername_type(s) != -1)
-		p->ack = !SSL_session_reused(s) && hn != NULL;
-	else
-		BIO_printf(bio_err, "Can't use SSL_get_servername\n");
-
-	return SSL_TLSEXT_ERR_OK;
-}
-
 int
 s_client_main(int argc, char **argv)
 {
@@ -876,6 +863,7 @@ s_client_main(int argc, char **argv)
 	int write_tty, read_tty, write_ssl, read_ssl, tty_on, ssl_pending;
 	SSL_CTX *ctx = NULL;
 	int ret = 1, in_init = 1, i;
+	BIO *bio_c_out = NULL;
 	BIO *sbio;
 	int mbuf_len = 0;
 	struct timeval timeout;
@@ -961,14 +949,13 @@ s_client_main(int argc, char **argv)
 			goto end;
 		}
 	}
-	if (bio_c_out == NULL) {
-		if (s_client_config.quiet && !s_client_config.debug &&
-		    !s_client_config.msg) {
-			bio_c_out = BIO_new(BIO_s_null());
-		} else {
-			if (bio_c_out == NULL)
-				bio_c_out = BIO_new_fp(stdout, BIO_NOCLOSE);
-		}
+	if (s_client_config.quiet && !s_client_config.debug &&
+	    !s_client_config.msg) {
+		if ((bio_c_out = BIO_new(BIO_s_null())) == NULL)
+			goto end;
+	} else {
+		if ((bio_c_out = BIO_new_fp(stdout, BIO_NOCLOSE)) == NULL)
+			goto end;
 	}
 
 	ctx = SSL_CTX_new(s_client_config.meth);
@@ -1620,24 +1607,22 @@ s_client_main(int argc, char **argv)
 	X509_VERIFY_PARAM_free(s_client_config.vpm);
 	freezero(cbuf, BUFSIZZ);
 	freezero(sbuf, BUFSIZZ);
+	freezero(pbuf, BUFSIZZ);
 	freezero(mbuf, BUFSIZZ);
-	if (bio_c_out != NULL) {
-		BIO_free(bio_c_out);
-		bio_c_out = NULL;
-	}
+	BIO_free(bio_c_out);
 
 	return (ret);
 }
 
 static void
-print_stuff(BIO * bio, SSL * s, int full)
+print_stuff(BIO *bio, SSL *s, int full)
 {
 	X509 *peer = NULL;
 	char *p;
 	static const char *space = "                ";
 	char buf[BUFSIZ];
-	STACK_OF(X509) * sk;
-	STACK_OF(X509_NAME) * sk2;
+	STACK_OF(X509) *sk;
+	STACK_OF(X509_NAME) *sk2;
 	const SSL_CIPHER *c;
 	X509_NAME *xn;
 	int j, i;
@@ -1757,7 +1742,7 @@ print_stuff(BIO * bio, SSL * s, int full)
 		socklen_t ladd_size = sizeof(ladd);
 		sock = SSL_get_fd(s);
 		getsockname(sock, (struct sockaddr *) & ladd, &ladd_size);
-		BIO_printf(bio_c_out, "LOCAL PORT is %u\n",
+		BIO_printf(bio, "LOCAL PORT is %u\n",
 		    ntohs(ladd.sin_port));
 	}
 #endif
@@ -1818,7 +1803,7 @@ print_stuff(BIO * bio, SSL * s, int full)
 }
 
 static int
-ocsp_resp_cb(SSL * s, void *arg)
+ocsp_resp_cb(SSL *s, void *arg)
 {
 	const unsigned char *p;
 	int len;
@@ -1840,5 +1825,18 @@ ocsp_resp_cb(SSL * s, void *arg)
 	BIO_puts(arg, "======================================\n");
 	OCSP_RESPONSE_free(rsp);
 	return 1;
+}
+
+static int
+ssl_servername_cb(SSL *s, int *ad, void *arg)
+{
+	tlsextctx *p = (tlsextctx *) arg;
+	const char *hn = SSL_get_servername(s, TLSEXT_NAMETYPE_host_name);
+	if (SSL_get_servername_type(s) != -1)
+		p->ack = !SSL_session_reused(s) && hn != NULL;
+	else
+		BIO_printf(bio_err, "Can't use SSL_get_servername\n");
+
+	return SSL_TLSEXT_ERR_OK;
 }
 

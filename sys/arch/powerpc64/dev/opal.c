@@ -1,4 +1,4 @@
-/*	$OpenBSD: opal.c,v 1.7 2020/07/07 22:43:29 kettenis Exp $	*/
+/*	$OpenBSD: opal.c,v 1.10 2020/09/23 03:03:11 gkoehler Exp $	*/
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -18,9 +18,11 @@
 #include <sys/param.h>
 #include <sys/device.h>
 #include <sys/malloc.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 
 #include <machine/bus.h>
+#include <machine/cpu.h>
 #include <machine/fdt.h>
 #include <machine/opal.h>
 
@@ -51,6 +53,10 @@ struct opal_softc {
 	struct intrhand		*sc_handler[OPAL_NUM_HANDLERS];
 
 	struct todr_chip_handle	sc_todr;
+
+	int			*sc_pstate;
+	int			*sc_freq;
+	int			sc_npstate;
 };
 
 struct opal_softc *opal_sc;
@@ -70,6 +76,13 @@ void	opal_attach_deferred(struct device *);
 void	opal_attach_node(struct opal_softc *, int);
 int	opal_gettime(struct todr_chip_handle *, struct timeval *);
 int	opal_settime(struct todr_chip_handle *, struct timeval *);
+
+extern int perflevel;
+
+void	opalpm_init(struct opal_softc *, int);
+int	opalpm_find_index(struct opal_softc *);
+int	opalpm_cpuspeed(int *);
+void	opalpm_setperf(int);
 
 int
 opal_match(struct device *parent, void *match, void *aux)
@@ -132,6 +145,8 @@ opal_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_todr.todr_gettime = opal_gettime;
 	sc->sc_todr.todr_settime = opal_settime;
 	todr_attach(&sc->sc_todr);
+
+	opalpm_init(sc, OF_getnodebyname(faa->fa_node, "power-mgt"));
 
 	node = OF_getnodebyname(faa->fa_node, "consoles");
 	if (node) {
@@ -202,7 +217,7 @@ opal_attach_deferred(struct device *self)
 
 	for (i = 0; i < sc->sc_nintr; i++) {
 		intr_establish(sc->sc_intr[i].oi_isn, IST_LEVEL, IPL_TTY,
-		    opal_intr, &sc->sc_intr[i], sc->sc_dev.dv_xname);
+		    NULL, opal_intr, &sc->sc_intr[i], sc->sc_dev.dv_xname);
 	}
 }
 
@@ -305,4 +320,88 @@ opal_settime(struct todr_chip_handle *ch, struct timeval *tv)
 		return EIO;
 
 	return 0;
+}
+
+void
+opalpm_init(struct opal_softc *sc, int node)
+{
+	int i, len;
+
+	if (!node) {
+		printf("%s: no power-mgt\n", sc->sc_dev.dv_xname);
+		return;
+	}
+	len = OF_getproplen(node, "ibm,pstate-ids");
+	if (len <= 0 || len % sizeof(int) != 0 ||
+	    len != OF_getproplen(node, "ibm,pstate-frequencies-mhz")) {
+		printf("%s: can't parse power-mgt\n", sc->sc_dev.dv_xname);
+		return;
+	}
+	sc->sc_pstate = malloc(len, M_DEVBUF, M_WAITOK);
+	sc->sc_freq = malloc(len, M_DEVBUF, M_WAITOK);
+	sc->sc_npstate = len / sizeof(int);
+	OF_getprop(node, "ibm,pstate-ids", sc->sc_pstate, len);
+	OF_getprop(node, "ibm,pstate-frequencies-mhz", sc->sc_freq, len);
+
+	if ((i = opalpm_find_index(sc)) != -1)
+		perflevel = (sc->sc_npstate - 1 - i) * 100 / sc->sc_npstate;
+	cpu_cpuspeed = opalpm_cpuspeed;
+#ifndef MULTIPROCESSOR
+	cpu_setperf = opalpm_setperf;
+#else
+	ul_setperf = opalpm_setperf;
+	cpu_setperf = mp_setperf;
+#endif
+}
+
+int
+opalpm_find_index(struct opal_softc *sc)
+{
+	int i, pstate;
+
+	/*
+	 * POWER9 23.5.8.3 Power Management Status Register (PMSR)
+	 * 8:15 Local Actual Pstate
+	 */
+	pstate = (mfpmsr() >> 48) & 0xff;
+	for (i = 0; i < sc->sc_npstate; i++) {
+		if (sc->sc_pstate[i] == pstate)
+			return i;
+	}
+	return -1;
+}
+
+int
+opalpm_cpuspeed(int *freq)
+{
+	struct opal_softc *sc = opal_sc;
+	int i;
+
+	if ((i = opalpm_find_index(sc)) == -1)
+		return 1;
+	*freq = sc->sc_freq[i];
+	return 0;
+}
+
+void
+opalpm_setperf(int level)
+{
+	struct opal_softc *sc = opal_sc;
+	uint64_t pstate;
+	int i;
+
+	/*
+	 * Assume that "ibm,pstate-frequencies-mhz" is sorted from
+	 * fastest to slowest.
+	 */
+	i = (100 - level) * (sc->sc_npstate - 1) / 100;
+	pstate = sc->sc_pstate[i];
+
+	/*
+	 * POWER9 23.5.8.1 Power Management Control Register (PMCR)
+	 *  0:7  Upper Pstate request
+	 *  8:15 Lower Pstate request
+	 * 60:63 Version
+	 */
+	mtpmcr((pstate << 56) | (pstate << 48) | 0);
 }

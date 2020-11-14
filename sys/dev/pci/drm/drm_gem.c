@@ -58,12 +58,11 @@ boolean_t drm_flush(struct uvm_object *, voff_t, voff_t, int);
 int drm_fault(struct uvm_faultinfo *, vaddr_t, vm_page_t *, int, int,
     vm_fault_t, vm_prot_t, int);
 
-struct uvm_pagerops drm_pgops = {
-	NULL,
-	drm_ref,
-	drm_unref,
-	drm_fault,
-	drm_flush,
+const struct uvm_pagerops drm_pgops = {
+	.pgo_reference = drm_ref,
+	.pgo_detach = drm_unref,
+	.pgo_fault = drm_fault,
+	.pgo_flush = drm_flush,
 };
 
 void
@@ -102,7 +101,7 @@ drm_fault(struct uvm_faultinfo *ufi, vaddr_t vaddr, vm_page_t *pps,
 	 */
 	
 	if (UVM_ET_ISCOPYONWRITE(entry)) {
-		uvmfault_unlockall(ufi, ufi->entry->aref.ar_amap, uobj, NULL);
+		uvmfault_unlockall(ufi, ufi->entry->aref.ar_amap, uobj);
 		return(VM_PAGER_ERROR);
 	}
 
@@ -116,7 +115,7 @@ drm_fault(struct uvm_faultinfo *ufi, vaddr_t vaddr, vm_page_t *pps,
 	mtx_enter(&dev->quiesce_mtx);
 	if (dev->quiesce && dev->quiesce_count == 0) {
 		mtx_leave(&dev->quiesce_mtx);
-		uvmfault_unlockall(ufi, ufi->entry->aref.ar_amap, uobj, NULL);
+		uvmfault_unlockall(ufi, ufi->entry->aref.ar_amap, uobj);
 		mtx_enter(&dev->quiesce_mtx);
 		while (dev->quiesce) {
 			msleep_nsec(&dev->quiesce, &dev->quiesce_mtx,
@@ -199,7 +198,7 @@ udv_attach_drm(dev_t device, vm_prot_t accessprot, voff_t off, vsize_t size)
 	if (!obj)
 		return NULL;
 
-	if (!drm_vma_node_is_allowed(node, filp)) {
+	if (!drm_vma_node_is_allowed(node, priv)) {
 		drm_gem_object_put_unlocked(obj);
 		return NULL;
 	}
@@ -440,7 +439,7 @@ drm_gem_object_release_handle(int id, void *ptr, void *data)
 		dev->driver->gem_close_object(obj, file_priv);
 
 	drm_gem_remove_prime_handles(obj, file_priv);
-	drm_vma_node_revoke(&obj->vma_node, file_priv->filp);
+	drm_vma_node_revoke(&obj->vma_node, file_priv);
 
 	drm_gem_object_handle_put_unlocked(obj);
 
@@ -584,7 +583,7 @@ drm_gem_handle_create_tail(struct drm_file *file_priv,
 
 	handle = ret;
 
-	ret = drm_vma_node_allow(&obj->vma_node, file_priv->filp);
+	ret = drm_vma_node_allow(&obj->vma_node, file_priv);
 	if (ret)
 		goto err_remove;
 
@@ -602,7 +601,7 @@ drm_gem_handle_create_tail(struct drm_file *file_priv,
 	return 0;
 
 err_revoke:
-	drm_vma_node_revoke(&obj->vma_node, file_priv->filp);
+	drm_vma_node_revoke(&obj->vma_node, file_priv);
 err_remove:
 	spin_lock(&file_priv->table_lock);
 	idr_remove(&file_priv->object_idr, handle);
@@ -903,6 +902,8 @@ int drm_gem_objects_lookup(struct drm_file *filp, void __user *bo_handles,
 	if (!objs)
 		return -ENOMEM;
 
+	*objs_out = objs;
+
 	handles = kvmalloc_array(count, sizeof(u32), GFP_KERNEL);
 	if (!handles) {
 		ret = -ENOMEM;
@@ -916,8 +917,6 @@ int drm_gem_objects_lookup(struct drm_file *filp, void __user *bo_handles,
 	}
 
 	ret = objects_lookup(filp, handles, count, objs);
-	*objs_out = objs;
-
 out:
 	kvfree(handles);
 	return ret;
@@ -1065,9 +1064,6 @@ err:
  * @file_priv: drm file-private structure
  *
  * Open an object using the global name, returning a handle and the size.
- *
- * This handle (of course) holds a reference to the object, so the object
- * will not go away until the handle is deleted.
  */
 int
 drm_gem_open_ioctl(struct drm_device *dev, void *data,
@@ -1092,14 +1088,15 @@ drm_gem_open_ioctl(struct drm_device *dev, void *data,
 
 	/* drm_gem_handle_create_tail unlocks dev->object_name_lock. */
 	ret = drm_gem_handle_create_tail(file_priv, obj, &handle);
-	drm_gem_object_put_unlocked(obj);
 	if (ret)
-		return ret;
+		goto err;
 
 	args->handle = handle;
 	args->size = obj->size;
 
-	return 0;
+err:
+	drm_gem_object_put_unlocked(obj);
+	return ret;
 }
 
 /**

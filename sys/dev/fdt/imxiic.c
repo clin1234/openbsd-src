@@ -1,4 +1,4 @@
-/* $OpenBSD: imxiic.c,v 1.8 2020/01/13 13:28:40 mpi Exp $ */
+/* $OpenBSD: imxiic.c,v 1.13 2020/11/13 20:50:06 patrick Exp $ */
 /*
  * Copyright (c) 2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -32,10 +32,10 @@
 
 /* registers */
 #define I2C_IADR	0x00
-#define I2C_IFDR	0x04
-#define I2C_I2CR	0x08
-#define I2C_I2SR	0x0C
-#define I2C_I2DR	0x10
+#define I2C_IFDR	0x01
+#define I2C_I2CR	0x02
+#define I2C_I2SR	0x03
+#define I2C_I2DR	0x04
 
 #define I2C_I2CR_RSTA	(1 << 2)
 #define I2C_I2CR_TXAK	(1 << 3)
@@ -45,6 +45,7 @@
 #define I2C_I2CR_IEN	(1 << 7)
 #define I2C_I2SR_RXAK	(1 << 0)
 #define I2C_I2SR_IIF	(1 << 1)
+#define I2C_I2SR_IAL	(1 << 4)
 #define I2C_I2SR_IBB	(1 << 5)
 
 struct imxiic_softc {
@@ -52,9 +53,13 @@ struct imxiic_softc {
 	bus_space_tag_t		sc_iot;
 	bus_space_handle_t	sc_ioh;
 	bus_size_t		sc_ios;
-	void			*sc_ih;
+	int			sc_reg_shift;
 	int			sc_node;
 	int			sc_bitrate;
+	uint32_t		sc_clkrate;
+
+	struct imxiic_clk_pair	*sc_clk_div;
+	int			sc_clk_ndiv;
 
 	struct rwlock		sc_buslock;
 	struct i2c_controller	i2c_tag;
@@ -79,14 +84,17 @@ void imxiic_i2c_release_bus(void *, int);
 int imxiic_i2c_exec(void *, i2c_op_t, i2c_addr_t, const void *, size_t,
     void *, size_t, int);
 
-#define HREAD2(sc, reg)							\
-	(bus_space_read_2((sc)->sc_iot, (sc)->sc_ioh, (reg)))
-#define HWRITE2(sc, reg, val)						\
-	bus_space_write_2((sc)->sc_iot, (sc)->sc_ioh, (reg), (val))
-#define HSET2(sc, reg, bits)						\
-	HWRITE2((sc), (reg), HREAD2((sc), (reg)) | (bits))
-#define HCLR2(sc, reg, bits)						\
-	HWRITE2((sc), (reg), HREAD2((sc), (reg)) & ~(bits))
+uint8_t imxiic_read_1(struct imxiic_softc *, int);
+void imxiic_write_1(struct imxiic_softc *, int, uint8_t);
+
+#define HREAD1(sc, reg)							\
+	imxiic_read_1((sc), (reg))
+#define HWRITE1(sc, reg, val)						\
+	imxiic_write_1((sc), (reg), (val))
+#define HSET1(sc, reg, bits)						\
+	HWRITE1((sc), (reg), HREAD1((sc), (reg)) | (bits))
+#define HCLR1(sc, reg, bits)						\
+	HWRITE1((sc), (reg), HREAD1((sc), (reg)) & ~(bits))
 
 void imxiic_scan(struct device *, struct i2cbus_attach_args *, void *);
 
@@ -123,19 +131,24 @@ imxiic_attach(struct device *parent, struct device *self, void *aux)
 	    faa->fa_reg[0].size, 0, &sc->sc_ioh))
 		panic("imxiic_attach: bus_space_map failed!");
 
+	sc->sc_reg_shift = 2;
+	sc->sc_clk_div = imxiic_imx21_clk_div;
+	sc->sc_clk_ndiv = nitems(imxiic_imx21_clk_div);
+
 	printf("\n");
 
 	clock_enable(faa->fa_node, NULL);
 	pinctrl_byname(faa->fa_node, "default");
 
 	/* set speed */
+	sc->sc_clkrate = clock_get_frequency(sc->sc_node, NULL) / 1000;
 	sc->sc_bitrate = OF_getpropint(sc->sc_node,
 	    "clock-frequency", 100000) / 1000;
 	imxiic_setspeed(sc, sc->sc_bitrate);
 
 	/* reset */
-	HWRITE2(sc, I2C_I2CR, 0);
-	HWRITE2(sc, I2C_I2SR, 0);
+	HWRITE1(sc, I2C_I2CR, 0);
+	HWRITE1(sc, I2C_I2SR, 0);
 
 	sc->stopped = 1;
 	rw_init(&sc->sc_buslock, sc->sc_dev.dv_xname);
@@ -159,23 +172,21 @@ void
 imxiic_setspeed(struct imxiic_softc *sc, u_int speed)
 {
 	if (!sc->frequency) {
-		uint32_t i2c_clk_rate;
 		uint32_t div;
 		int i;
 
-		i2c_clk_rate = clock_get_frequency(sc->sc_node, NULL) / 1000;
-		div = (i2c_clk_rate + speed - 1) / speed;
-		if (div < imxiic_clk_div[0][0])
+		div = (sc->sc_clkrate + speed - 1) / speed;
+		if (div < sc->sc_clk_div[0].div)
 			i = 0;
-		else if (div > imxiic_clk_div[49][0])
-			i = 49;
+		else if (div > sc->sc_clk_div[sc->sc_clk_ndiv - 1].div)
+			i = sc->sc_clk_ndiv - 1;
 		else
-			for (i = 0; imxiic_clk_div[i][0] < div; i++);
+			for (i = 0; sc->sc_clk_div[i].div < div; i++);
 
-		sc->frequency = imxiic_clk_div[i][1];
+		sc->frequency = sc->sc_clk_div[i].val;
 	}
 
-	HWRITE2(sc, I2C_IFDR, sc->frequency);
+	HWRITE1(sc, I2C_IFDR, sc->frequency);
 }
 
 int
@@ -184,7 +195,7 @@ imxiic_wait_state(struct imxiic_softc *sc, uint32_t mask, uint32_t value)
 	uint32_t state;
 	int timeout;
 	for (timeout = 1000; timeout > 0; timeout--) {
-		if (((state = HREAD2(sc, I2C_I2SR)) & mask) == value)
+		if (((state = HREAD1(sc, I2C_I2SR)) & mask) == value)
 			return 0;
 		delay(10);
 	}
@@ -201,41 +212,41 @@ imxiic_read(struct imxiic_softc *sc, int addr, const void *cmd, int cmdlen,
 		if (imxiic_write(sc, addr, cmd, cmdlen, NULL, 0))
 			return (EIO);
 
-		HSET2(sc, I2C_I2CR, I2C_I2CR_RSTA);
+		HSET1(sc, I2C_I2CR, I2C_I2CR_RSTA);
 		delay(1);
 		if (imxiic_wait_state(sc, I2C_I2SR_IBB, I2C_I2SR_IBB))
 			return (EIO);
 	}
 
-	HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
-	HWRITE2(sc, I2C_I2DR, (addr << 1) | 1);
+	HCLR1(sc, I2C_I2SR, I2C_I2SR_IIF);
+	HWRITE1(sc, I2C_I2DR, (addr << 1) | 1);
 
 	if (imxiic_wait_state(sc, I2C_I2SR_IIF, I2C_I2SR_IIF))
 		return (EIO);
-	HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
-	if (HREAD2(sc, I2C_I2SR) & I2C_I2SR_RXAK)
+	HCLR1(sc, I2C_I2SR, I2C_I2SR_IIF);
+	if (HREAD1(sc, I2C_I2SR) & I2C_I2SR_RXAK)
 		return (EIO);
 
-	HCLR2(sc, I2C_I2CR, I2C_I2CR_MTX);
+	HCLR1(sc, I2C_I2CR, I2C_I2CR_MTX);
 	if (len - 1)
-		HCLR2(sc, I2C_I2CR, I2C_I2CR_TXAK);
+		HCLR1(sc, I2C_I2CR, I2C_I2CR_TXAK);
 
 	/* dummy read */
-	HREAD2(sc, I2C_I2DR);
+	HREAD1(sc, I2C_I2DR);
 
 	for (i = 0; i < len; i++) {
 		if (imxiic_wait_state(sc, I2C_I2SR_IIF, I2C_I2SR_IIF))
 			return (EIO);
-		HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
+		HCLR1(sc, I2C_I2SR, I2C_I2SR_IIF);
 
 		if (i == (len - 1)) {
-			HCLR2(sc, I2C_I2CR, I2C_I2CR_MSTA | I2C_I2CR_MTX);
+			HCLR1(sc, I2C_I2CR, I2C_I2CR_MSTA | I2C_I2CR_MTX);
 			imxiic_wait_state(sc, I2C_I2SR_IBB, 0);
 			sc->stopped = 1;
 		} else if (i == (len - 2)) {
-			HSET2(sc, I2C_I2CR, I2C_I2CR_TXAK);
+			HSET1(sc, I2C_I2CR, I2C_I2CR_TXAK);
 		}
-		((uint8_t*)data)[i] = HREAD2(sc, I2C_I2DR);
+		((uint8_t*)data)[i] = HREAD1(sc, I2C_I2DR);
 	}
 
 	return 0;
@@ -247,30 +258,30 @@ imxiic_write(struct imxiic_softc *sc, int addr, const void *cmd, int cmdlen,
 {
 	int i;
 
-	HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
-	HWRITE2(sc, I2C_I2DR, addr << 1);
+	HCLR1(sc, I2C_I2SR, I2C_I2SR_IIF);
+	HWRITE1(sc, I2C_I2DR, addr << 1);
 
 	if (imxiic_wait_state(sc, I2C_I2SR_IIF, I2C_I2SR_IIF))
 		return (EIO);
-	HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
-	if (HREAD2(sc, I2C_I2SR) & I2C_I2SR_RXAK)
+	HCLR1(sc, I2C_I2SR, I2C_I2SR_IIF);
+	if (HREAD1(sc, I2C_I2SR) & I2C_I2SR_RXAK)
 		return (EIO);
 
 	for (i = 0; i < cmdlen; i++) {
-		HWRITE2(sc, I2C_I2DR, ((uint8_t*)cmd)[i]);
+		HWRITE1(sc, I2C_I2DR, ((uint8_t*)cmd)[i]);
 		if (imxiic_wait_state(sc, I2C_I2SR_IIF, I2C_I2SR_IIF))
 			return (EIO);
-		HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
-		if (HREAD2(sc, I2C_I2SR) & I2C_I2SR_RXAK)
+		HCLR1(sc, I2C_I2SR, I2C_I2SR_IIF);
+		if (HREAD1(sc, I2C_I2SR) & I2C_I2SR_RXAK)
 			return (EIO);
 	}
 
 	for (i = 0; i < len; i++) {
-		HWRITE2(sc, I2C_I2DR, ((uint8_t*)data)[i]);
+		HWRITE1(sc, I2C_I2DR, ((uint8_t*)data)[i]);
 		if (imxiic_wait_state(sc, I2C_I2SR_IIF, I2C_I2SR_IIF))
 			return (EIO);
-		HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
-		if (HREAD2(sc, I2C_I2SR) & I2C_I2SR_RXAK)
+		HCLR1(sc, I2C_I2SR, I2C_I2SR_IIF);
+		if (HREAD1(sc, I2C_I2SR) & I2C_I2SR_RXAK)
 			return (EIO);
 	}
 	return 0;
@@ -290,8 +301,8 @@ imxiic_i2c_acquire_bus(void *cookie, int flags)
 	imxiic_setspeed(sc, sc->sc_bitrate);
 
 	/* enable the controller */
-	HWRITE2(sc, I2C_I2SR, 0);
-	HWRITE2(sc, I2C_I2CR, I2C_I2CR_IEN);
+	HWRITE1(sc, I2C_I2SR, 0);
+	HWRITE1(sc, I2C_I2CR, I2C_I2CR_IEN);
 
 	/* wait for it to be stable */
 	delay(50);
@@ -304,7 +315,7 @@ imxiic_i2c_release_bus(void *cookie, int flags)
 {
 	struct imxiic_softc *sc = cookie;
 
-	HWRITE2(sc, I2C_I2CR, 0);
+	HWRITE1(sc, I2C_I2CR, 0);
 
 	rw_exit(&sc->sc_buslock);
 }
@@ -320,7 +331,7 @@ imxiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr,
 		return EINVAL;
 
 	/* start transaction */
-	HSET2(sc, I2C_I2CR, I2C_I2CR_MSTA);
+	HSET1(sc, I2C_I2CR, I2C_I2CR_MSTA);
 
 	if (imxiic_wait_state(sc, I2C_I2SR_IBB, I2C_I2SR_IBB)) {
 		ret = EIO;
@@ -329,7 +340,7 @@ imxiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr,
 
 	sc->stopped = 0;
 
-	HSET2(sc, I2C_I2CR, I2C_I2CR_IIEN | I2C_I2CR_MTX | I2C_I2CR_TXAK);
+	HSET1(sc, I2C_I2CR, I2C_I2CR_IIEN | I2C_I2CR_MTX | I2C_I2CR_TXAK);
 
 	if (I2C_OP_READ_P(op)) {
 		ret = imxiic_read(sc, addr, cmdbuf, cmdlen, buf, len);
@@ -339,7 +350,7 @@ imxiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr,
 
 fail:
 	if (!sc->stopped) {
-		HCLR2(sc, I2C_I2CR, I2C_I2CR_MSTA | I2C_I2CR_MTX);
+		HCLR1(sc, I2C_I2CR, I2C_I2CR_MSTA | I2C_I2CR_MTX);
 		imxiic_wait_state(sc, I2C_I2SR_IBB, 0);
 		sc->stopped = 1;
 	}
@@ -352,13 +363,29 @@ imxiic_detach(struct device *self, int flags)
 {
 	struct imxiic_softc *sc = (struct imxiic_softc *)self;
 
-	HWRITE2(sc, I2C_IADR, 0);
-	HWRITE2(sc, I2C_IFDR, 0);
-	HWRITE2(sc, I2C_I2CR, 0);
-	HWRITE2(sc, I2C_I2SR, 0);
+	HWRITE1(sc, I2C_IADR, 0);
+	HWRITE1(sc, I2C_IFDR, 0);
+	HWRITE1(sc, I2C_I2CR, 0);
+	HWRITE1(sc, I2C_I2SR, 0);
 
 	bus_space_unmap(sc->sc_iot, sc->sc_ioh, sc->sc_ios);
 	return 0;
+}
+
+uint8_t
+imxiic_read_1(struct imxiic_softc *sc, int reg)
+{
+	reg <<= sc->sc_reg_shift;
+
+	return bus_space_read_1(sc->sc_iot, sc->sc_ioh, reg);
+}
+
+void
+imxiic_write_1(struct imxiic_softc *sc, int reg, uint8_t val)
+{
+	reg <<= sc->sc_reg_shift;
+
+	bus_space_write_1(sc->sc_iot, sc->sc_ioh, reg, val);
 }
 
 void

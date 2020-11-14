@@ -1,4 +1,4 @@
-/*	$OpenBSD: show.c,v 1.114 2018/08/31 15:18:02 yasuoka Exp $	*/
+/*	$OpenBSD: show.c,v 1.116 2020/10/29 21:15:26 denis Exp $	*/
 /*	$NetBSD: show.c,v 1.1 1996/11/15 18:01:41 gwr Exp $	*/
 
 /*
@@ -37,6 +37,7 @@
 #include <net/if_dl.h>
 #include <net/if_types.h>
 #include <net/route.h>
+#include <net/rtable.h>
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 #include <netmpls/mpls.h>
@@ -131,6 +132,55 @@ get_sysctl(const int *mib, u_int mcnt, char **buf)
 }
 
 /*
+ * Print preferred source address
+ */
+void
+printsource(int af, u_int tableid)
+{
+	struct sockaddr *sa;
+	char *buf = NULL, *next, *lim = NULL;
+	size_t needed;
+	int mib[7], mcnt, size;
+
+	mib[0] = CTL_NET;
+	mib[1] = PF_ROUTE;
+	mib[2] = 0;
+	mib[3] = af;
+	mib[4] = NET_RT_SOURCE;
+	mib[5] = tableid;
+	mcnt = 6;
+
+	needed = get_sysctl(mib, mcnt, &buf);
+	lim = buf + needed;
+
+	if (pledge("stdio", NULL) == -1)
+		err(1, "pledge");
+
+	printf("Preferred source address set for rdomain %d\n", tableid);
+
+	if (buf) {
+		for (next = buf; next < lim; next += size) {
+			sa = (struct sockaddr *)next;
+			switch (sa->sa_family) {
+			case AF_INET:
+				size = sizeof(struct sockaddr_in);
+				printf("IPv4: ");
+				break;
+			case AF_INET6:
+				size = sizeof(struct sockaddr_in6);
+				printf("IPv6: ");
+				break;
+			}
+			p_sockaddr(sa, NULL, RTF_HOST, WID_DST(sa->sa_family));
+			printf("\n");
+		}
+	}
+	free(buf);
+	printf("\n");
+
+	exit(0);
+}
+/*
  * Print routing tables.
  */
 void
@@ -174,28 +224,20 @@ p_rttables(int af, u_int tableid, char prio)
  * width of destination/gateway column
  * strlen("fe80::aaaa:bbbb:cccc:dddd@gif0") == 30, strlen("/128") == 4
  */
-#define	WID_GW(af)	((af) == AF_INET6 ? (nflag ? 30 : 18) : 18)
+#define	WID_GW(af)	((af) == AF_INET6 ? 30 : 18)
 
 int
 WID_DST(int af)
 {
 
-	if (nflag)
-		switch (af) {
-		case AF_MPLS:
-			return 9;
-		case AF_INET6:
-			return 34;
-		default:
-			return 18;
-		}
-	else
-		switch (af) {
-		case AF_MPLS:
-			return 9;
- 		default:
-			return 18;
-		}
+	switch (af) {
+	case AF_MPLS:
+		return 9;
+	case AF_INET6:
+		return 34;
+	default:
+		return 18;
+	}
 }
 
 /*

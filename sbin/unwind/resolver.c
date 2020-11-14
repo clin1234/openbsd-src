@@ -1,4 +1,4 @@
-/*	$OpenBSD: resolver.c,v 1.124 2020/05/10 06:44:07 otto Exp $	*/
+/*	$OpenBSD: resolver.c,v 1.126 2020/11/05 16:22:59 florian Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -884,6 +884,7 @@ resolve_done(struct uw_resolver *res, void *arg, int rcode,
 	sldns_buffer		*buf = NULL;
 	struct regional		*region = NULL;
 	struct query_imsg	*query_imsg;
+	struct answer_imsg	 answer_imsg;
 	struct running_query	*rq;
 	struct timespec		 tp, elapsed;
 	int64_t			 ms;
@@ -893,6 +894,7 @@ resolve_done(struct uw_resolver *res, void *arg, int rcode,
 	char			 rcode_buf[16];
 	char			 qclass_buf[16];
 	char			 qtype_buf[16];
+	uint8_t			*p;
 
 	clock_gettime(CLOCK_MONOTONIC, &tp);
 
@@ -1014,12 +1016,31 @@ resolve_done(struct uw_resolver *res, void *arg, int rcode,
 	} else
 		query_imsg->bogus = 0;
 
-	resolver_imsg_compose_frontend(IMSG_ANSWER_HEADER, 0, query_imsg,
-	    sizeof(*query_imsg));
+	if (resolver_imsg_compose_frontend(IMSG_ANSWER_HEADER, 0, query_imsg,
+	    sizeof(*query_imsg)) == -1)
+		fatalx("IMSG_ANSWER_HEADER failed for \"%s %s %s\"",
+		    query_imsg->qname, qclass_buf, qtype_buf);
 
-	/* XXX imsg overflow */
-	resolver_imsg_compose_frontend(IMSG_ANSWER, 0, answer_packet,
-	    answer_len);
+	answer_imsg.id = query_imsg->id;
+	p = answer_packet;
+	while ((size_t)answer_len > MAX_ANSWER_SIZE) {
+		answer_imsg.truncated = 1;
+		answer_imsg.len = MAX_ANSWER_SIZE;
+		memcpy(&answer_imsg.answer, p, MAX_ANSWER_SIZE);
+		if (resolver_imsg_compose_frontend(IMSG_ANSWER, 0, &answer_imsg,
+		    sizeof(answer_imsg)) == -1)
+			fatalx("IMSG_ANSWER failed for \"%s %s %s\"",
+			    query_imsg->qname, qclass_buf, qtype_buf);
+		p += MAX_ANSWER_SIZE;
+		answer_len -= MAX_ANSWER_SIZE;
+	}
+	answer_imsg.truncated = 0;
+	answer_imsg.len = answer_len;
+	memcpy(&answer_imsg.answer, p, answer_len);
+	if (resolver_imsg_compose_frontend(IMSG_ANSWER, 0, &answer_imsg,
+	    sizeof(answer_imsg)) == -1)
+		fatalx("IMSG_ANSWER failed for \"%s %s %s\"",
+		    query_imsg->qname, qclass_buf, qtype_buf);
 
 	TAILQ_REMOVE(&running_queries, rq, entry);
 	evtimer_del(&rq->timer_ev);
@@ -1952,10 +1973,13 @@ replace_autoconf_forwarders(struct imsg_rdns_proposal *rdns_proposal)
 	}
 
 	TAILQ_FOREACH(tmp, &autoconf_forwarder_list, entry) {
-		/* if_index of zero signals to clear all proposals */
-		if (rdns_proposal->src == tmp->src &&
-		    (rdns_proposal->if_index == 0 || rdns_proposal->if_index ==
-		    tmp->if_index))
+		/*
+		 * if_index of zero signals to clear all proposals
+		 * src of zero signals interface gone
+		 */
+		if ((rdns_proposal->src == 0 || rdns_proposal->src ==
+		    tmp->src) && (rdns_proposal->if_index == 0 ||
+		    rdns_proposal->if_index == tmp->if_index))
 			continue;
 		if ((uw_forwarder = calloc(1, sizeof(struct uw_forwarder))) ==
 		    NULL)

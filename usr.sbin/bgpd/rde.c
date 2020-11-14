@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde.c,v 1.502 2020/05/02 14:12:17 claudio Exp $ */
+/*	$OpenBSD: rde.c,v 1.506 2020/11/05 14:44:59 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -98,12 +98,13 @@ static void	 network_flush_upcall(struct rib_entry *, void *);
 void		 rde_shutdown(void);
 int		 ovs_match(struct prefix *, u_int32_t);
 
+static struct imsgbuf		*ibuf_se;
+static struct imsgbuf		*ibuf_se_ctl;
+static struct imsgbuf		*ibuf_main;
+static struct bgpd_config	*conf, *nconf;
+
 volatile sig_atomic_t	 rde_quit = 0;
-struct bgpd_config	*conf, *nconf;
 struct filter_head	*out_rules, *out_rules_tmp;
-struct imsgbuf		*ibuf_se;
-struct imsgbuf		*ibuf_se_ctl;
-struct imsgbuf		*ibuf_main;
 struct rde_memstats	 rdemem;
 int			 softreconfig;
 
@@ -157,8 +158,7 @@ rde_main(int debug, int verbose)
 	log_init(debug, LOG_DAEMON);
 	log_setverbose(verbose);
 
-	bgpd_process = PROC_RDE;
-	log_procinit(log_procnames[bgpd_process]);
+	log_procinit(log_procnames[PROC_RDE]);
 
 	if ((pw = getpwnam(BGPD_USER)) == NULL)
 		fatal("getpwnam");
@@ -509,8 +509,11 @@ badnetdel:
 			if ((s = malloc(sizeof(struct filter_set))) == NULL)
 				fatal(NULL);
 			memcpy(s, imsg.data, sizeof(struct filter_set));
-			if (s->type == ACTION_SET_NEXTHOP)
-				s->action.nh = nexthop_get(&s->action.nexthop);
+			if (s->type == ACTION_SET_NEXTHOP) {
+				s->action.nh_ref =
+				    nexthop_get(&s->action.nexthop);
+				s->type = ACTION_SET_NEXTHOP_REF;
+			}
 			TAILQ_INSERT_TAIL(&session_set, s, entry);
 			break;
 		case IMSG_CTL_SHOW_NETWORK:
@@ -922,8 +925,11 @@ rde_dispatch_imsg_parent(struct imsgbuf *ibuf)
 			if ((s = malloc(sizeof(struct filter_set))) == NULL)
 				fatal(NULL);
 			memcpy(s, imsg.data, sizeof(struct filter_set));
-			if (s->type == ACTION_SET_NEXTHOP)
-				s->action.nh = nexthop_get(&s->action.nexthop);
+			if (s->type == ACTION_SET_NEXTHOP) {
+				s->action.nh_ref =
+				    nexthop_get(&s->action.nexthop);
+				s->type = ACTION_SET_NEXTHOP_REF;
+			}
 			TAILQ_INSERT_TAIL(&parent_set, s, entry);
 			break;
 		case IMSG_MRT_OPEN:
@@ -1028,7 +1034,7 @@ rde_update_dispatch(struct rde_peer *peer, struct imsg *imsg)
 	struct bgpd_addr	 prefix;
 	struct mpattr		 mpa;
 	u_char			*p, *mpp = NULL;
-	int			 error = -1, pos = 0;
+	int			 pos = 0;
 	u_int16_t		 afi, len, mplen;
 	u_int16_t		 withdrawn_len;
 	u_int16_t		 attrpath_len;
@@ -1246,10 +1252,8 @@ rde_update_dispatch(struct rde_peer *peer, struct imsg *imsg)
 			break;
 		}
 
-		if ((state.aspath.flags & ~F_ATTR_MP_UNREACH) == 0) {
-			error = 0;
+		if ((state.aspath.flags & ~F_ATTR_MP_UNREACH) == 0)
 			goto done;
-		}
 	}
 
 	/* shift to NLRI information */

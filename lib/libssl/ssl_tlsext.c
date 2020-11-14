@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_tlsext.c,v 1.78 2020/07/03 07:17:26 tb Exp $ */
+/* $OpenBSD: ssl_tlsext.c,v 1.85 2020/10/14 16:57:33 jsing Exp $ */
 /*
  * Copyright (c) 2016, 2017, 2019 Joel Sing <jsing@openbsd.org>
  * Copyright (c) 2017 Doug Hogan <doug@openbsd.org>
@@ -91,6 +91,7 @@ tlsext_alpn_server_parse(SSL *s, uint16_t msg_types, CBS *cbs, int *alert)
 	if (r == SSL_TLSEXT_ERR_OK) {
 		free(S3I(s)->alpn_selected);
 		if ((S3I(s)->alpn_selected = malloc(selected_len)) == NULL) {
+			S3I(s)->alpn_selected_len = 0;
 			*alert = SSL_AD_INTERNAL_ERROR;
 			return 0;
 		}
@@ -562,7 +563,7 @@ tlsext_sigalgs_client_needs(SSL *s, uint16_t msg_type)
 int
 tlsext_sigalgs_client_build(SSL *s, uint16_t msg_type, CBB *cbb)
 {
-	uint16_t *tls_sigalgs = tls12_sigalgs;
+	const uint16_t *tls_sigalgs = tls12_sigalgs;
 	size_t tls_sigalgs_len = tls12_sigalgs_len;
 	CBB sigalgs;
 
@@ -608,7 +609,7 @@ tlsext_sigalgs_server_needs(SSL *s, uint16_t msg_type)
 int
 tlsext_sigalgs_server_build(SSL *s, uint16_t msg_type, CBB *cbb)
 {
-	uint16_t *tls_sigalgs = tls12_sigalgs;
+	const uint16_t *tls_sigalgs = tls12_sigalgs;
 	size_t tls_sigalgs_len = tls12_sigalgs_len;
 	CBB sigalgs;
 
@@ -853,8 +854,12 @@ tlsext_sni_client_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 int
 tlsext_ocsp_client_needs(SSL *s, uint16_t msg_type)
 {
-	return (s->tlsext_status_type == TLSEXT_STATUSTYPE_ocsp &&
-	    s->version != DTLS1_VERSION);
+	if (SSL_is_dtls(s))
+		return 0;
+	if (msg_type != SSL_TLSEXT_MSG_CH)
+		return 0;
+
+	return (s->tlsext_status_type == TLSEXT_STATUSTYPE_ocsp);
 }
 
 int
@@ -909,6 +914,9 @@ tlsext_ocsp_server_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 	const unsigned char *p;
 	uint8_t status_type;
 	int ret = 0;
+
+	if (msg_type != SSL_TLSEXT_MSG_CH)
+		goto err;
 
 	if (!CBS_get_u8(cbs, &status_type))
 		goto err;
@@ -1018,6 +1026,17 @@ tlsext_ocsp_client_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 	uint8_t status_type;
 
 	if (version >= TLS1_3_VERSION) {
+		if (msg_type == SSL_TLSEXT_MSG_CR) {
+			/*
+			 * RFC 8446, 4.4.2.1 - the server may request an OCSP
+			 * response with an empty status_request.
+			 */
+			if (CBS_len(cbs) == 0)
+				return 1;
+
+			SSLerror(s, SSL_R_LENGTH_MISMATCH);
+			return 0;
+		}
 		if (!CBS_get_u8(cbs, &status_type)) {
 			SSLerror(s, SSL_R_LENGTH_MISMATCH);
 			return 0;
@@ -1185,7 +1204,7 @@ tlsext_sessionticket_client_parse(SSL *s, uint16_t msg_type, CBS *cbs,
 int
 tlsext_srtp_client_needs(SSL *s, uint16_t msg_type)
 {
-	return SSL_IS_DTLS(s) && SSL_get_srtp_profiles(s) != NULL;
+	return SSL_is_dtls(s) && SSL_get_srtp_profiles(s) != NULL;
 }
 
 int
@@ -1194,7 +1213,7 @@ tlsext_srtp_client_build(SSL *s, uint16_t msg_type, CBB *cbb)
 	CBB profiles, mki;
 	int ct, i;
 	STACK_OF(SRTP_PROTECTION_PROFILE) *clnt = NULL;
-	SRTP_PROTECTION_PROFILE *prof;
+	const SRTP_PROTECTION_PROFILE *prof;
 
 	if ((clnt = SSL_get_srtp_profiles(s)) == NULL) {
 		SSLerror(s, SSL_R_EMPTY_SRTP_PROTECTION_PROFILE_LIST);
@@ -1228,7 +1247,7 @@ tlsext_srtp_client_build(SSL *s, uint16_t msg_type, CBB *cbb)
 int
 tlsext_srtp_server_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 {
-	SRTP_PROTECTION_PROFILE *cprof, *sprof;
+	const SRTP_PROTECTION_PROFILE *cprof, *sprof;
 	STACK_OF(SRTP_PROTECTION_PROFILE) *clnt = NULL, *srvr;
 	int i, j;
 	int ret;
@@ -1308,7 +1327,7 @@ tlsext_srtp_server_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 int
 tlsext_srtp_server_needs(SSL *s, uint16_t msg_type)
 {
-	return SSL_IS_DTLS(s) && SSL_get_selected_srtp_profile(s) != NULL;
+	return SSL_is_dtls(s) && SSL_get_selected_srtp_profile(s) != NULL;
 }
 
 int
@@ -1339,7 +1358,7 @@ int
 tlsext_srtp_client_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 {
 	STACK_OF(SRTP_PROTECTION_PROFILE) *clnt;
-	SRTP_PROTECTION_PROFILE *prof;
+	const SRTP_PROTECTION_PROFILE *prof;
 	int i;
 	uint16_t id;
 	CBS profile_ids, mki;
@@ -1395,7 +1414,7 @@ tlsext_keyshare_client_needs(SSL *s, uint16_t msg_type)
 	/* XXX once this gets initialized when we get tls13_client.c */
 	if (S3I(s)->hs_tls13.max_version == 0)
 		return 0;
-	return (!SSL_IS_DTLS(s) && S3I(s)->hs_tls13.max_version >=
+	return (!SSL_is_dtls(s) && S3I(s)->hs_tls13.max_version >=
 	    TLS1_3_VERSION);
 }
 
@@ -1471,7 +1490,7 @@ tlsext_keyshare_server_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 int
 tlsext_keyshare_server_needs(SSL *s, uint16_t msg_type)
 {
-	if (SSL_IS_DTLS(s) || s->version < TLS1_3_VERSION)
+	if (SSL_is_dtls(s) || s->version < TLS1_3_VERSION)
 		return 0;
 
 	return tlsext_extension_seen(s, TLSEXT_TYPE_key_share);
@@ -1536,7 +1555,7 @@ tlsext_keyshare_client_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 int
 tlsext_versions_client_needs(SSL *s, uint16_t msg_type)
 {
-	if (SSL_IS_DTLS(s))
+	if (SSL_is_dtls(s))
 		return 0;
 	return (S3I(s)->hs_tls13.max_version >= TLS1_3_VERSION);
 }
@@ -1619,7 +1638,7 @@ tlsext_versions_server_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 int
 tlsext_versions_server_needs(SSL *s, uint16_t msg_type)
 {
-	return (!SSL_IS_DTLS(s) && s->version >= TLS1_3_VERSION);
+	return (!SSL_is_dtls(s) && s->version >= TLS1_3_VERSION);
 }
 
 int
@@ -1661,7 +1680,7 @@ tlsext_versions_client_parse(SSL *s, uint16_t msg_type, CBS *cbs, int *alert)
 int
 tlsext_cookie_client_needs(SSL *s, uint16_t msg_type)
 {
-	if (SSL_IS_DTLS(s))
+	if (SSL_is_dtls(s))
 		return 0;
 	if (S3I(s)->hs_tls13.max_version < TLS1_3_VERSION)
 		return 0;
@@ -1721,7 +1740,7 @@ int
 tlsext_cookie_server_needs(SSL *s, uint16_t msg_type)
 {
 
-	if (SSL_IS_DTLS(s))
+	if (SSL_is_dtls(s))
 		return 0;
 	if (S3I(s)->hs_tls13.max_version < TLS1_3_VERSION)
 		return 0;
@@ -1796,7 +1815,7 @@ struct tls_extension {
 	struct tls_extension_funcs server;
 };
 
-static struct tls_extension tls_extensions[] = {
+static const struct tls_extension tls_extensions[] = {
 	{
 		.type = TLSEXT_TYPE_supported_versions,
 		.messages = SSL_TLSEXT_MSG_CH | SSL_TLSEXT_MSG_SH |
@@ -1978,7 +1997,7 @@ static struct tls_extension tls_extensions[] = {
 /* Ensure that extensions fit in a uint32_t bitmask. */
 CTASSERT(N_TLS_EXTENSIONS <= (sizeof(uint32_t) * 8));
 
-struct tls_extension *
+const struct tls_extension *
 tls_extension_find(uint16_t type, size_t *tls_extensions_idx)
 {
 	size_t i;
@@ -2003,8 +2022,8 @@ tlsext_extension_seen(SSL *s, uint16_t type)
 	return ((S3I(s)->hs.extensions_seen & (1 << idx)) != 0);
 }
 
-static struct tls_extension_funcs *
-tlsext_funcs(struct tls_extension *tlsext, int is_server)
+static const struct tls_extension_funcs *
+tlsext_funcs(const struct tls_extension *tlsext, int is_server)
 {
 	if (is_server)
 		return &tlsext->server;
@@ -2015,8 +2034,8 @@ tlsext_funcs(struct tls_extension *tlsext, int is_server)
 static int
 tlsext_build(SSL *s, int is_server, uint16_t msg_type, CBB *cbb)
 {
-	struct tls_extension_funcs *ext;
-	struct tls_extension *tlsext;
+	const struct tls_extension_funcs *ext;
+	const struct tls_extension *tlsext;
 	CBB extensions, extension_data;
 	int extensions_present = 0;
 	size_t i;
@@ -2093,8 +2112,8 @@ tlsext_clienthello_hash_extension(SSL *s, uint16_t type, CBS *cbs)
 static int
 tlsext_parse(SSL *s, int is_server, uint16_t msg_type, CBS *cbs, int *alert)
 {
-	struct tls_extension_funcs *ext;
-	struct tls_extension *tlsext;
+	const struct tls_extension_funcs *ext;
+	const struct tls_extension *tlsext;
 	CBS extensions, extension_data;
 	uint16_t type;
 	size_t idx;
@@ -2129,7 +2148,7 @@ tlsext_parse(SSL *s, int is_server, uint16_t msg_type, CBS *cbs, int *alert)
 			    CBS_len(&extension_data),
 			    s->internal->tlsext_debug_arg);
 
-		if (!SSL_IS_DTLS(s) && version >= TLS1_3_VERSION && is_server &&
+		if (!SSL_is_dtls(s) && version >= TLS1_3_VERSION && is_server &&
 		    msg_type == SSL_TLSEXT_MSG_CH) {
 			if (!tlsext_clienthello_hash_extension(s, type,
 			    &extension_data))
@@ -2175,6 +2194,7 @@ tlsext_server_reset_state(SSL *s)
 	S3I(s)->renegotiate_seen = 0;
 	free(S3I(s)->alpn_selected);
 	S3I(s)->alpn_selected = NULL;
+	S3I(s)->alpn_selected_len = 0;
 	s->internal->srtp_profile = NULL;
 }
 
@@ -2200,6 +2220,7 @@ tlsext_client_reset_state(SSL *s)
 	S3I(s)->renegotiate_seen = 0;
 	free(S3I(s)->alpn_selected);
 	S3I(s)->alpn_selected = NULL;
+	S3I(s)->alpn_selected_len = 0;
 }
 
 int
