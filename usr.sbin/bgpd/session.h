@@ -1,4 +1,4 @@
-/*	$OpenBSD: session.h,v 1.147 2020/11/05 11:28:11 claudio Exp $ */
+/*	$OpenBSD: session.h,v 1.151 2021/05/27 08:27:48 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -34,7 +34,8 @@
 #define	MSGSIZE_OPEN_MIN		29
 #define	MSGSIZE_UPDATE_MIN		23
 #define	MSGSIZE_KEEPALIVE		MSGSIZE_HEADER
-#define	MSGSIZE_RREFRESH		MSGSIZE_HEADER + 4
+#define	MSGSIZE_RREFRESH		(MSGSIZE_HEADER + 4)
+#define	MSGSIZE_RREFRESH_MIN		MSGSIZE_RREFRESH
 #define	MSG_PROCESS_LIMIT		25
 #define	SESSION_CLEAR_DELAY		5
 
@@ -59,6 +60,7 @@ enum session_events {
 	EVNT_TIMER_CONNRETRY,
 	EVNT_TIMER_HOLDTIME,
 	EVNT_TIMER_KEEPALIVE,
+	EVNT_TIMER_SENDHOLD,
 	EVNT_RCVD_OPEN,
 	EVNT_RCVD_KEEPALIVE,
 	EVNT_RCVD_UPDATE,
@@ -105,11 +107,13 @@ enum opt_params {
 };
 
 enum capa_codes {
-	CAPA_NONE,
-	CAPA_MP,
-	CAPA_REFRESH,
+	CAPA_NONE = 0,
+	CAPA_MP = 1,
+	CAPA_REFRESH = 2,
 	CAPA_RESTART = 64,
-	CAPA_AS4BYTE = 65
+	CAPA_AS4BYTE = 65,
+	CAPA_ADD_PATH = 69,
+	CAPA_ENHANCED_RR = 70,
 };
 
 struct bgp_msg {
@@ -157,6 +161,12 @@ struct peer_stats {
 	unsigned long long	 msg_sent_notification;
 	unsigned long long	 msg_sent_keepalive;
 	unsigned long long	 msg_sent_rrefresh;
+	unsigned long long	 refresh_rcvd_req;
+	unsigned long long	 refresh_rcvd_borr;
+	unsigned long long	 refresh_rcvd_eorr;
+	unsigned long long	 refresh_sent_req;
+	unsigned long long	 refresh_sent_borr;
+	unsigned long long	 refresh_sent_eorr;
 	unsigned long long	 prefix_rcvd_update;
 	unsigned long long	 prefix_rcvd_withdraw;
 	unsigned long long	 prefix_rcvd_eor;
@@ -180,20 +190,24 @@ enum Timer {
 	Timer_ConnectRetry,
 	Timer_Keepalive,
 	Timer_Hold,
+	Timer_SendHold,
 	Timer_IdleHold,
 	Timer_IdleHoldReset,
 	Timer_CarpUndemote,
 	Timer_RestartTimeout,
+	Timer_Rtr_Refresh,
+	Timer_Rtr_Retry,
+	Timer_Rtr_Expire,
 	Timer_Max
 };
 
-struct peer_timer {
-	TAILQ_ENTRY(peer_timer)	entry;
+struct timer {
+	TAILQ_ENTRY(timer)	entry;
 	enum Timer		type;
 	time_t			val;
 };
 
-TAILQ_HEAD(peer_timer_head, peer_timer);
+TAILQ_HEAD(timer_head, timer);
 
 struct peer {
 	struct peer_config	 conf;
@@ -214,7 +228,7 @@ struct peer {
 	struct bgpd_addr	 local;
 	struct bgpd_addr	 local_alt;
 	struct bgpd_addr	 remote;
-	struct peer_timer_head	 timers;
+	struct timer_head	 timers;
 	struct msgbuf		 wbuf;
 	struct ibuf_read	*rbuf;
 	struct peer		*template;
@@ -279,9 +293,6 @@ void		 mrt_dump_state(struct mrt *, u_int16_t, u_int16_t,
 		     struct peer *);
 void		 mrt_done(struct mrt *);
 
-/* parse.y */
-struct bgpd_config *parse_config(char *, struct peer_head *);
-
 /* pfkey.c */
 int	pfkey_read(int, struct sadb_msg *);
 int	pfkey_establish(struct peer *);
@@ -297,7 +308,30 @@ void	tcp_md5_del_listener(struct bgpd_config *, struct peer *);
 void	print_config(struct bgpd_config *, struct rib_names *);
 
 /* rde.c */
-void	 rde_main(int, int);
+void	rde_main(int, int);
+
+/* rtr_proto.c */
+struct rtr_session;
+size_t			 rtr_count(void);
+void			 rtr_check_events(struct pollfd *, size_t);
+size_t			 rtr_poll_events(struct pollfd *, size_t, time_t *);
+struct rtr_session	*rtr_new(uint32_t, char *);
+struct rtr_session	*rtr_get(uint32_t);
+void			 rtr_free(struct rtr_session *);
+void			 rtr_open(struct rtr_session *, int);
+struct roa_tree		*rtr_get_roa(struct rtr_session *);
+void			 rtr_config_prep(void);
+void			 rtr_config_merge(void);
+void			 rtr_config_keep(struct rtr_session *);
+void			 rtr_roa_merge(struct roa_tree *);
+void			 rtr_shutdown(void);
+void			 rtr_show(struct rtr_session *, pid_t);
+
+/* rtr.c */
+void	roa_insert(struct roa_tree *, struct roa *);
+void	rtr_main(int, int);
+void	rtr_imsg_compose(int, uint32_t, pid_t, void *, size_t);
+void	rtr_recalc(void);
 
 /* session.c */
 RB_PROTOTYPE(peer_head, peer, entry, peer_compare);
@@ -314,11 +348,11 @@ int		 imsg_ctl_rde(int, pid_t, void *, u_int16_t);
 void		 session_stop(struct peer *, u_int8_t);
 
 /* timer.c */
-struct peer_timer	*timer_get(struct peer *, enum Timer);
-struct peer_timer	*timer_nextisdue(struct peer *, time_t);
-time_t			 timer_nextduein(struct peer *, time_t);
-int			 timer_running(struct peer *, enum Timer, time_t *);
-void			 timer_set(struct peer *, enum Timer, u_int);
-void			 timer_stop(struct peer *, enum Timer);
-void			 timer_remove(struct peer *, enum Timer);
-void			 timer_remove_all(struct peer *);
+struct timer	*timer_get(struct timer_head *, enum Timer);
+struct timer	*timer_nextisdue(struct timer_head *, time_t);
+time_t		 timer_nextduein(struct timer_head *, time_t);
+int		 timer_running(struct timer_head *, enum Timer, time_t *);
+void		 timer_set(struct timer_head *, enum Timer, u_int);
+void		 timer_stop(struct timer_head *, enum Timer);
+void		 timer_remove(struct timer_head *, enum Timer);
+void		 timer_remove_all(struct timer_head *);

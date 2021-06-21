@@ -1,4 +1,4 @@
-/*	$OpenBSD: tal.c,v 1.22 2020/10/11 12:39:25 claudio Exp $ */
+/*	$OpenBSD: tal.c,v 1.30 2021/04/01 06:43:23 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -19,48 +19,12 @@
 #include <assert.h>
 #include <ctype.h>
 #include <err.h>
-#include <limits.h>
 #include <libgen.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "extern.h"
-
-static int
-base64_decode(const unsigned char *in, size_t inlen, unsigned char **out,
-   size_t *outlen)
-{
-	static EVP_ENCODE_CTX *ctx;
-	unsigned char *to;
-	int tolen;
-
-	if (ctx == NULL && (ctx = EVP_ENCODE_CTX_new()) == NULL)
-		err(1, "EVP_ENCODE_CTX_new");
-
-	*out = NULL;
-	*outlen = 0;
-
-	if (inlen >= INT_MAX - 3)
-		return -1;
-	tolen = ((inlen + 3) / 4) * 3 + 1;
-	if ((to = malloc(tolen)) == NULL)
-		return -1;
-
-	EVP_DecodeInit(ctx);
-	if (EVP_DecodeUpdate(ctx, to, &tolen, in, inlen) == -1)
-		goto fail;
-	*outlen = tolen;
-	if (EVP_DecodeFinal(ctx, to + tolen, &tolen) == -1)
-		goto fail;
-	*outlen += tolen;
-	*out = to;
-	return 0;
-
-fail:
-	free(to);
-	return -1;
-}
 
 static int
 tal_cmp(const void *a, const void *b)
@@ -81,7 +45,7 @@ tal_parse_buffer(const char *fn, char *buf)
 {
 	char		*nl, *line, *f, *file = NULL;
 	unsigned char	*der;
-	size_t		 sz, dersz;
+	size_t		 dersz;
 	int		 rc = 0;
 	struct tal	*tal = NULL;
 	EVP_PKEY	*pkey = NULL;
@@ -101,6 +65,11 @@ tal_parse_buffer(const char *fn, char *buf)
 		if (*line == '\0')
 			break;
 
+		/* make sure only US-ASCII chars are in the URL */
+		if (!valid_uri(line, nl - line, NULL)) {
+			warnx("%s: invalid URI", fn);
+			goto out;
+		}
 		/* Check that the URI is sensible */
 		if (!(strncasecmp(line, "https://", 8) == 0 ||
 		    strncasecmp(line, "rsync://", 8) == 0)) {
@@ -142,16 +111,12 @@ tal_parse_buffer(const char *fn, char *buf)
 	/* sort uri lexicographically so https:// is preferred */
 	qsort(tal->uri, tal->urisz, sizeof(tal->uri[0]), tal_cmp);
 
-	sz = strlen(buf);
-	if (sz == 0) {
+	/* Now the Base64-encoded public key. */
+	if ((base64_decode(buf, &der, &dersz)) == -1) {
 		warnx("%s: RFC 7730 section 2.1: subjectPublicKeyInfo: "
-		    "zero-length public key", fn);
+		    "bad public key", fn);
 		goto out;
 	}
-
-	/* Now the BASE64-encoded public key. */
-	if ((base64_decode(buf, sz, &der, &dersz)) == -1)
-		errx(1, "base64 decode");
 
 	tal->pkey = der;
 	tal->pkeysz = dersz;
@@ -196,12 +161,10 @@ tal_parse(const char *fn, char *buf)
 	else
 		d++;
 	dlen = strlen(d);
-	if (strcasecmp(d + dlen - 4, ".tal") == 0)
+	if (dlen > 4 && strcasecmp(d + dlen - 4, ".tal") == 0)
 		dlen -= 4;
-	if ((p->descr = malloc(dlen + 1)) == NULL)
+	if ((p->descr = strndup(d, dlen)) == NULL)
 		err(1, NULL);
-	memcpy(p->descr, d, dlen);
-	p->descr[dlen] = '\0';
 
 	return p;
 }
@@ -303,16 +266,16 @@ tal_free(struct tal *p)
  * See tal_read() for the other side of the pipe.
  */
 void
-tal_buffer(char **b, size_t *bsz, size_t *bmax, const struct tal *p)
+tal_buffer(struct ibuf *b, const struct tal *p)
 {
 	size_t	 i;
 
-	io_buf_buffer(b, bsz, bmax, p->pkey, p->pkeysz);
-	io_str_buffer(b, bsz, bmax, p->descr);
-	io_simple_buffer(b, bsz, bmax, &p->urisz, sizeof(size_t));
+	io_buf_buffer(b, p->pkey, p->pkeysz);
+	io_str_buffer(b, p->descr);
+	io_simple_buffer(b, &p->urisz, sizeof(size_t));
 
 	for (i = 0; i < p->urisz; i++)
-		io_str_buffer(b, bsz, bmax, p->uri[i]);
+		io_str_buffer(b, p->uri[i]);
 }
 
 /*
@@ -332,14 +295,17 @@ tal_read(int fd)
 	io_buf_read_alloc(fd, (void **)&p->pkey, &p->pkeysz);
 	assert(p->pkeysz > 0);
 	io_str_read(fd, &p->descr);
+	assert(p->descr);
 	io_simple_read(fd, &p->urisz, sizeof(size_t));
 	assert(p->urisz > 0);
 
 	if ((p->uri = calloc(p->urisz, sizeof(char *))) == NULL)
 		err(1, NULL);
 
-	for (i = 0; i < p->urisz; i++)
+	for (i = 0; i < p->urisz; i++) {
 		io_str_read(fd, &p->uri[i]);
+		assert(p->uri[i]);
+	}
 
 	return p;
 }

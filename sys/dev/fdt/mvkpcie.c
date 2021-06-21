@@ -1,4 +1,4 @@
-/*	$OpenBSD: mvkpcie.c,v 1.7 2020/07/17 08:07:34 patrick Exp $	*/
+/*	$OpenBSD: mvkpcie.c,v 1.10 2021/05/17 17:25:13 kettenis Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
  * Copyright (c) 2020 Patrick Wildt <patrick@blueri.se>
@@ -184,7 +184,7 @@ struct mvkpcie_softc {
 	struct bus_space	sc_bus_iot;
 	struct bus_space	sc_bus_memt;
 
-	struct arm64_pci_chipset sc_pc;
+	struct machine_pci_chipset sc_pc;
 	int			sc_bus;
 
 	uint32_t		sc_bridge_command;
@@ -193,6 +193,8 @@ struct mvkpcie_softc {
 	uint32_t		sc_bridge_io_hi;
 	uint32_t		sc_bridge_mem;
 
+	struct interrupt_controller sc_ic;
+	struct intrhand		*sc_intx_handlers[4];
 	struct interrupt_controller sc_msi_ic;
 	struct intrhand		*sc_msi_handlers[32];
 	struct mvkpcie_dmamem	*sc_msi_addr;
@@ -229,6 +231,7 @@ void	mvkpcie_decompose_tag(void *, pcitag_t, int *, int *, int *);
 int	mvkpcie_conf_size(void *, pcitag_t);
 pcireg_t mvkpcie_conf_read(void *, pcitag_t, int);
 void	mvkpcie_conf_write(void *, pcitag_t, int, pcireg_t);
+int	mvkpcie_probe_device_hook(void *, struct pci_attach_args *);
 
 int	mvkpcie_intr_map(struct pci_attach_args *, pci_intr_handle_t *);
 const char *mvkpcie_intr_string(void *, pci_intr_handle_t);
@@ -242,6 +245,9 @@ int	mvkpcie_bs_memmap(bus_space_tag_t, bus_addr_t, bus_size_t, int,
 	    bus_space_handle_t *);
 
 int	mvkpcie_intc_intr(void *);
+void	*mvkpcie_intc_intr_establish(void *, int *, int, struct cpu_info *,
+	    int (*)(void *), void *, char *);
+void	mvkpcie_intc_intr_disestablish(void *);
 void	*mvkpcie_intc_intr_establish_msi(void *, uint64_t *, uint64_t *,
 	    int , struct cpu_info *, int (*)(void *), void *, char *);
 void	mvkpcie_intc_intr_disestablish_msi(void *);
@@ -267,6 +273,7 @@ mvkpcie_attach(struct device *parent, struct device *self, void *aux)
 	int i, j, nranges, rangeslen;
 	pcireg_t csr, bir, blr;
 	uint32_t reg;
+	int node;
 	int timo;
 
 	if (faa->fa_nreg < 1) {
@@ -510,6 +517,7 @@ mvkpcie_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_pc.pc_conf_size = mvkpcie_conf_size;
 	sc->sc_pc.pc_conf_read = mvkpcie_conf_read;
 	sc->sc_pc.pc_conf_write = mvkpcie_conf_write;
+	sc->sc_pc.pc_probe_device_hook = mvkpcie_probe_device_hook;
 
 	sc->sc_pc.pc_intr_v = sc;
 	sc->sc_pc.pc_intr_map = mvkpcie_intr_map;
@@ -528,6 +536,15 @@ mvkpcie_attach(struct device *parent, struct device *self, void *aux)
 	pba.pba_domain = pci_ndomains++;
 	pba.pba_bus = sc->sc_bus;
 	pba.pba_flags |= PCI_FLAGS_MSI_ENABLED;
+
+	node = OF_getnodebyname(faa->fa_node, "interrupt-controller");
+	if (node) {
+		sc->sc_ic.ic_node = node;
+		sc->sc_ic.ic_cookie = self;
+		sc->sc_ic.ic_establish = mvkpcie_intc_intr_establish;
+		sc->sc_ic.ic_disestablish = mvkpcie_intc_intr_disestablish;
+		arm_intr_register_fdt(&sc->sc_ic);
+	}
 
 	sc->sc_msi_ic.ic_node = faa->fa_node;
 	sc->sc_msi_ic.ic_cookie = self;
@@ -713,9 +730,28 @@ mvkpcie_conf_write(void *v, pcitag_t tag, int off, pcireg_t data)
 }
 
 int
+mvkpcie_probe_device_hook(void *v, struct pci_attach_args *pa)
+{
+	return 0;
+}
+
+int
 mvkpcie_intr_map(struct pci_attach_args *pa, pci_intr_handle_t *ihp)
 {
-	return -1;
+	int pin = pa->pa_rawintrpin;
+
+	if (pin == 0 || pin > PCI_INTERRUPT_PIN_MAX)
+		return -1;
+
+	if (pa->pa_tag == 0)
+		return -1;
+
+	ihp->ih_pc = pa->pa_pc;
+	ihp->ih_tag = pa->pa_intrtag;
+	ihp->ih_intrpin = pa->pa_intrpin;
+	ihp->ih_type = PCI_INTX;
+
+	return 0;
 }
 
 const char *
@@ -835,27 +871,103 @@ mvkpcie_intc_intr(void *cookie)
 	if (!(HREAD4(sc, HOST_CTRL_INT_STATUS) & HOST_CTRL_INT_MASK_CORE_INT))
 		return 0;
 
-	if (!(HREAD4(sc, PCIE_CORE_ISR0_STATUS) & PCIE_CORE_ISR0_MASK_MSI_INT))
-		return 0;
+	if (HREAD4(sc, PCIE_CORE_ISR0_STATUS) & PCIE_CORE_ISR0_MASK_MSI_INT) {
+		pending = HREAD4(sc, PCIE_CORE_MSI_STATUS);
+		while (pending) {
+			i = ffs(pending) - 1;
+			HWRITE4(sc, PCIE_CORE_MSI_STATUS, (1 << i));
+			pending &= ~(1 << i);
 
-	pending = HREAD4(sc, PCIE_CORE_MSI_STATUS);
-	while (pending) {
-		i = ffs(pending) - 1;
-		HWRITE4(sc, PCIE_CORE_MSI_STATUS, (1 << i));
-		pending &= ~(1 << i);
-
-		i = HREAD4(sc, PCIE_CORE_MSI_PAYLOAD) & 0xff;
-		if ((ih = sc->sc_msi_handlers[i]) != NULL) {
-			s = splraise(ih->ih_ipl);
-			if (ih->ih_func(ih->ih_arg))
-				ih->ih_count.ec_count++;
-			splx(s);
+			i = HREAD4(sc, PCIE_CORE_MSI_PAYLOAD) & 0xff;
+			if ((ih = sc->sc_msi_handlers[i]) != NULL) {
+				s = splraise(ih->ih_ipl);
+				if (ih->ih_func(ih->ih_arg))
+					ih->ih_count.ec_count++;
+				splx(s);
+			}
 		}
+		HWRITE4(sc, PCIE_CORE_ISR0_STATUS, PCIE_CORE_ISR0_MASK_MSI_INT);
 	}
 
-	HWRITE4(sc, PCIE_CORE_ISR0_STATUS, PCIE_CORE_ISR0_MASK_MSI_INT);
+	pending = HREAD4(sc, PCIE_CORE_ISR1_STATUS);
+	for (i = 0; i < nitems(sc->sc_intx_handlers); i++) {
+		if (pending & PCIE_CORE_ISR1_MASK_INTX(i)) {
+			if ((ih = sc->sc_intx_handlers[i]) != NULL) {
+				s = splraise(ih->ih_ipl);
+				if (ih->ih_func(ih->ih_arg))
+					ih->ih_count.ec_count++;
+				splx(s);
+			}
+		}
+	}
+	HWRITE4(sc, PCIE_CORE_ISR1_STATUS, pending);
+
 	HWRITE4(sc, HOST_CTRL_INT_STATUS, HOST_CTRL_INT_MASK_CORE_INT);
 	return 1;
+}
+
+void *
+mvkpcie_intc_intr_establish(void *cookie, int *cell, int level,
+    struct cpu_info *ci, int (*func)(void *), void *arg, char *name)
+{
+	struct mvkpcie_softc *sc = (struct mvkpcie_softc *)cookie;
+	struct intrhand *ih;
+	int irq = cell[0];
+	int s;
+
+	if (ci != NULL && !CPU_IS_PRIMARY(ci))
+		return NULL;
+
+	if (irq < 0 || irq > nitems(sc->sc_intx_handlers))
+		return NULL;
+
+	/* Don't allow shared interrupts for now. */
+	if (sc->sc_intx_handlers[irq])
+		return NULL;
+
+	ih = malloc(sizeof(*ih), M_DEVBUF, M_WAITOK);
+	ih->ih_func = func;
+	ih->ih_arg = arg;
+	ih->ih_ipl = level & IPL_IRQMASK;
+	ih->ih_irq = irq;
+	ih->ih_name = name;
+	ih->ih_sc = sc;
+
+	s = splhigh();
+
+	sc->sc_intx_handlers[irq] = ih;
+
+	if (name != NULL)
+		evcount_attach(&ih->ih_count, name, &ih->ih_irq);
+
+	mvkpcie_intc_recalc_ipl(sc);
+
+	splx(s);
+
+	HCLR4(sc, PCIE_CORE_ISR1_MASK, PCIE_CORE_ISR1_MASK_INTX(irq));
+
+	return (ih);
+}
+
+void
+mvkpcie_intc_intr_disestablish(void *cookie)
+{
+	struct intrhand *ih = cookie;
+	struct mvkpcie_softc *sc = ih->ih_sc;
+	int s;
+
+	HSET4(sc, PCIE_CORE_ISR1_MASK, PCIE_CORE_ISR1_MASK_INTX(ih->ih_irq));
+
+	s = splhigh();
+
+	sc->sc_intx_handlers[ih->ih_irq] = NULL;
+	if (ih->ih_name != NULL)
+		evcount_detach(&ih->ih_count);
+	free(ih, M_DEVBUF, sizeof(*ih));
+
+	mvkpcie_intc_recalc_ipl(sc);
+
+	splx(s);
 }
 
 void *
@@ -937,8 +1049,8 @@ mvkpcie_intc_recalc_ipl(struct mvkpcie_softc *sc)
 	int min = IPL_HIGH;
 	int irq;
 
-	for (irq = 0; irq < nitems(sc->sc_msi_handlers); irq++) {
-		ih = sc->sc_msi_handlers[irq];
+	for (irq = 0; irq < nitems(sc->sc_intx_handlers); irq++) {
+		ih = sc->sc_intx_handlers[irq];
 		if (ih == NULL)
 			continue;
 

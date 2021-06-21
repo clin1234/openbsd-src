@@ -1,4 +1,4 @@
-/*	$OpenBSD: mbr.c,v 1.67 2016/09/01 16:17:46 krw Exp $	*/
+/*	$OpenBSD: mbr.c,v 1.77 2021/06/20 18:44:19 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -34,13 +34,16 @@
 
 struct mbr initial_mbr;
 
-static int gpt_chk_mbr(struct dos_partition *, u_int64_t);
+static int gpt_chk_mbr(struct dos_partition *, uint64_t);
 
 int
 MBR_protective_mbr(struct mbr *mbr)
 {
 	struct dos_partition dp[NDOSPART], dos_partition;
 	int i;
+
+	if (mbr->offset != 0)
+		return (-1);
 
 	for (i = 0; i < NDOSPART; i++) {
 		PRT_make(&mbr->part[i], mbr->offset, mbr->reloffset,
@@ -74,9 +77,13 @@ MBR_init_GPT(struct mbr *mbr)
 void
 MBR_init(struct mbr *mbr)
 {
-	extern u_int32_t b_arg;
-	u_int64_t adj;
-	daddr_t i;
+	extern uint32_t b_sectors, b_offset;
+	extern uint8_t b_type;
+	uint64_t adj;
+	daddr_t daddr;
+
+	memset(&gh, 0, sizeof(gh));
+	memset(&gp, 0, sizeof(gp));
 
 	/*
 	 * XXX Do *NOT* zap all MBR parts! Some archs still read initmbr
@@ -86,9 +93,6 @@ MBR_init(struct mbr *mbr)
 	mbr->part[0].flag = 0;
 	mbr->part[1].flag = 0;
 	mbr->part[2].flag = 0;
-
-	memset(&gh, 0, sizeof(gh));
-	memset(&gp, 0, sizeof(gp));
 
 	mbr->part[3].flag = DOSACTIVE;
 	mbr->signature = DOSMBR_SIGNATURE;
@@ -129,14 +133,14 @@ MBR_init(struct mbr *mbr)
 	}
 	/* Fix up start/length fields */
 	PRT_fix_BN(&mbr->part[3], 3);
-#endif
-#if defined(__i386__) || defined(__amd64__)
-	if (b_arg > 0) {
-		/* Add an EFI system partition on i386/amd64. */
-		mbr->part[0].id = DOSPTYP_EFISYS;
-		mbr->part[0].bs = 64;
-		mbr->part[0].ns = b_arg;
+#else
+	if (b_sectors > 0) {
+		mbr->part[0].flag = DOSACTIVE;
+		mbr->part[0].id = b_type;
+		mbr->part[0].bs = b_offset;
+		mbr->part[0].ns = b_sectors;
 		PRT_fix_CHS(&mbr->part[0]);
+		mbr->part[3].flag = 0;
 		mbr->part[3].ns += mbr->part[3].bs;
 		mbr->part[3].bs = mbr->part[0].bs + mbr->part[0].ns;
 		mbr->part[3].ns -= mbr->part[3].bs;
@@ -145,10 +149,10 @@ MBR_init(struct mbr *mbr)
 #endif
 
 	/* Start OpenBSD MBR partition on a power of 2 block number. */
-	i = 1;
-	while (i < DL_SECTOBLK(&dl, mbr->part[3].bs))
-		i *= 2;
-	adj = DL_BLKTOSEC(&dl, i) - mbr->part[3].bs;
+	daddr = 1;
+	while (daddr < DL_SECTOBLK(&dl, mbr->part[3].bs))
+		daddr *= 2;
+	adj = DL_BLKTOSEC(&dl, daddr) - mbr->part[3].bs;
 	mbr->part[3].bs += adj;
 	mbr->part[3].ns -= adj;
 	PRT_fix_CHS(&mbr->part[3]);
@@ -245,83 +249,36 @@ MBR_write(off_t where, struct dos_mbr *dos_mbr)
 }
 
 /*
- * If *dos_mbr has a 0xee or 0xef partition, nothing needs to happen. If no
- * such partition is present but the first or last sector on the disk has a
- * GPT, zero the GPT to ensure the MBR takes priority and fewer BIOSes get
- * confused.
- */
-void
-MBR_zapgpt(struct dos_mbr *dos_mbr, uint64_t lastsec)
-{
-	struct dos_partition dos_parts[NDOSPART];
-	char *secbuf;
-	uint64_t sig;
-	int i;
-
-	memcpy(dos_parts, dos_mbr->dmbr_parts, sizeof(dos_parts));
-
-	for (i = 0; i < NDOSPART; i++)
-		if ((dos_parts[i].dp_typ == DOSPTYP_EFI) ||
-		    (dos_parts[i].dp_typ == DOSPTYP_EFISYS))
-			return;
-
-	secbuf = DISK_readsector(GPTSECTOR);
-	if (secbuf == NULL)
-		return;
-
-	memcpy(&sig, secbuf, sizeof(sig));
-	if (letoh64(sig) == GPTSIGNATURE) {
-		memset(secbuf, 0, sizeof(sig));
-		DISK_writesector(secbuf, GPTSECTOR);
-	}
-	free(secbuf);
-
-	secbuf = DISK_readsector(lastsec);
-	if (secbuf == NULL)
-		return;
-
-	memcpy(&sig, secbuf, sizeof(sig));
-	if (letoh64(sig) == GPTSIGNATURE) {
-		memset(secbuf, 0, sizeof(sig));
-		DISK_writesector(secbuf, lastsec);
-	}
-	free(secbuf);
-}
-
-/*
- * Returns 0 if the MBR with the provided partition array is a GPT protective
- * MBR, and returns 1 otherwise. A GPT protective MBR would have one and only
- * one MBR partition, an EFI partition that either covers the whole disk or as
- * much of it as is possible with a 32bit size field.
+ * Return the index into dp[] of the EFI GPT (0xEE) partition, or -1 if no such
+ * partition exists.
  *
  * Taken from kern/subr_disk.c.
  *
- * NOTE: MS always uses a size of UINT32_MAX for the EFI partition!**
  */
 int
 gpt_chk_mbr(struct dos_partition *dp, u_int64_t dsize)
 {
 	struct dos_partition *dp2;
-	int efi, found, i;
-	u_int32_t psize;
+	int efi, eficnt, found, i;
+	uint32_t psize;
 
-	found = efi = 0;
-	for (dp2=dp, i=0; i < NDOSPART; i++, dp2++) {
+	found = efi = eficnt = 0;
+	for (dp2 = dp, i = 0; i < NDOSPART; i++, dp2++) {
 		if (dp2->dp_typ == DOSPTYP_UNUSED)
 			continue;
 		found++;
 		if (dp2->dp_typ != DOSPTYP_EFI)
 			continue;
+		if (letoh32(dp2->dp_start) != GPTSECTOR)
+			continue;
 		psize = letoh32(dp2->dp_size);
-		if (psize == (dsize - 1) ||
-		    psize == UINT32_MAX) {
-			if (letoh32(dp2->dp_start) == 1)
-				efi++;
+		if (psize <= (dsize - GPTSECTOR) || psize == UINT32_MAX) {
+			efi = i;
+			eficnt++;
 		}
 	}
-	if (found == 1 && efi == 1)
-		return (0);
+	if (found == 1 && eficnt == 1)
+		return (efi);
 
-	return (1);
+	return (-1);
 }
-

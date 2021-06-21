@@ -1,4 +1,4 @@
-/*	$OpenBSD: relay_http.c,v 1.79 2020/09/04 13:09:14 bket Exp $	*/
+/*	$OpenBSD: relay_http.c,v 1.81 2021/03/24 20:59:54 benno Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -77,6 +77,7 @@ int		 relay_match_actions(struct ctl_relay_event *,
 		    struct relay_rule *, struct kvlist *, struct kvlist *,
 		    struct relay_table **);
 void		 relay_httpdesc_free(struct http_descriptor *);
+char *		 server_root_strip(char *, int);
 
 static struct relayd	*env = NULL;
 
@@ -109,6 +110,21 @@ relay_http_init(struct relay *rlay)
 
 	/* Calculate skip step for the filter rules (may take a while) */
 	relay_calc_skip_steps(&rlay->rl_proto->rules);
+}
+
+int
+relay_http_priv_init(struct rsession *con)
+{
+
+	struct http_session	*hs;
+
+	if ((hs = calloc(1, sizeof(*hs))) == NULL)
+		return (-1);
+	SIMPLEQ_INIT(&hs->hs_methods);
+	DPRINTF("%s: session %d http_session %p", __func__,
+		con->se_id, hs);
+	con->se_priv = hs;
+	return (relay_httpdesc_init(&con->se_in));
 }
 
 int
@@ -161,6 +177,9 @@ relay_read_http(struct bufferevent *bev, void *arg)
 	size_t			 size, linelen;
 	struct kv		*hdr = NULL;
 	struct kv		*upgrade = NULL, *upgrade_ws = NULL;
+	struct http_method_node	*hmn;
+	struct http_session	*hs;
+	enum httpmethod		 request_method;
 
 	getmonotime(&con->se_tv_last);
 	cre->timedout = 0;
@@ -238,11 +257,34 @@ relay_read_http(struct bufferevent *bev, void *arg)
 		DPRINTF("%s: session %d: header '%s: %s'", __func__,
 		    con->se_id, key, value);
 
+		hs = con->se_priv;
+		DPRINTF("%s: session %d http_session %p", __func__,
+			con->se_id, hs);
+
 		/*
 		 * Identify and handle specific HTTP request methods
 		 */
 		if (cre->line == 1 && cre->dir == RELAY_DIR_RESPONSE) {
 			desc->http_method = HTTP_METHOD_RESPONSE;
+			hmn = SIMPLEQ_FIRST(&hs->hs_methods);
+
+			/*
+			 * There is nothing preventing the relay to send
+			 * an unbalanced response.  Be prepared.
+			 */
+			if (hmn == NULL) {
+				request_method = HTTP_METHOD_NONE;
+				DPRINTF("%s: session %d unbalanced response",
+				    __func__, con->se_id);
+			} else {
+				SIMPLEQ_REMOVE_HEAD(&hs->hs_methods, hmn_entry);
+				request_method = hmn->hmn_method;
+				DPRINTF("%s: session %d dequeing %s", __func__,
+				    con->se_id,
+				    relay_httpmethod_byid(request_method));
+				free(hmn);
+			}
+
 			/*
 			 * Decode response path and query
 			 */
@@ -286,6 +328,15 @@ relay_read_http(struct bufferevent *bev, void *arg)
 				free(line);
 				goto fail;
 			}
+			if ((hmn = calloc(1, sizeof *hmn)) == NULL) {
+				free(line);
+				goto fail;
+			}
+			hmn->hmn_method = desc->http_method;
+			DPRINTF("%s: session %d enqueing %s", __func__,
+			    con->se_id,
+			    relay_httpmethod_byid(hmn->hmn_method));
+			SIMPLEQ_INSERT_TAIL(&hs->hs_methods, hmn, hmn_entry);
 			/*
 			 * Decode request path and query
 			 */
@@ -331,16 +382,26 @@ relay_read_http(struct bufferevent *bev, void *arg)
 				goto abort;
 			}
 			/*
-			 * Need to read data from the client after the
-			 * HTTP header.
-			 * XXX What about non-standard clients not using
-			 * the carriage return? And some browsers seem to
-			 * include the line length in the content-length.
+			 * HEAD responses may provide a Content-Length header,
+			 * but if so it should just be ignored, since there is
+			 * no actual payload in the response.
 			 */
-			cre->toread = strtonum(value, 0, LLONG_MAX, &errstr);
-			if (errstr) {
-				relay_abort_http(con, 500, errstr, 0);
-				goto abort;
+			if (desc->http_method != HTTP_METHOD_RESPONSE
+			    || request_method != HTTP_METHOD_HEAD) {
+				/*
+				 * Need to read data from the client after the
+				 * HTTP header.
+				 * XXX What about non-standard clients not
+				 * using the carriage return? And some browsers
+				 * seem to include the line length in the
+				 * content-length.
+				 */
+				cre->toread = strtonum(value, 0, LLONG_MAX,
+				    &errstr);
+				if (errstr) {
+					relay_abort_http(con, 500, errstr, 0);
+					goto abort;
+				}
 			}
 			/*
 			 * response with a status code of 1xx
@@ -501,8 +562,9 @@ relay_read_http(struct bufferevent *bev, void *arg)
 		case HTTP_METHOD_SEARCH:
 		case HTTP_METHOD_PATCH:
 			/* HTTP request payload */
-			if (cre->toread > 0)
+			if (cre->toread > 0) {
 				bev->readcb = relay_read_httpcontent;
+			}
 
 			/* Single-pass HTTP body */
 			if (cre->toread < 0) {
@@ -1116,6 +1178,19 @@ relay_abort_http(struct rsession *con, u_int code, const char *msg,
 void
 relay_close_http(struct rsession *con)
 {
+	struct http_session	*hs = con->se_priv;
+	struct http_method_node	*hmn;
+
+	DPRINTF("%s: session %d http_session %p", __func__,
+		con->se_id, hs);
+	if (hs != NULL)
+		while (!SIMPLEQ_EMPTY(&hs->hs_methods)) {
+			hmn = SIMPLEQ_FIRST(&hs->hs_methods);
+			SIMPLEQ_REMOVE_HEAD(&hs->hs_methods, hmn_entry);
+			DPRINTF("%s: session %d freeing %s", __func__,
+			    con->se_id, relay_httpmethod_byid(hmn->hmn_method));
+			free(hmn);
+		}
 	relay_httpdesc_free(con->se_in.desc);
 	free(con->se_in.desc);
 	relay_httpdesc_free(con->se_out.desc);
@@ -1421,14 +1496,16 @@ relay_httppath_test(struct ctl_relay_event *cre, struct relay_rule *rule,
 
 	if (cre->dir == RELAY_DIR_RESPONSE || kv->kv_type != KEY_TYPE_PATH)
 		return (0);
-	else if (kv->kv_key == NULL)
-		return (0);
-	else if (fnmatch(kv->kv_key, desc->http_path, 0) == FNM_NOMATCH)
-		return (-1);
-	else if (kv->kv_value != NULL && kv->kv_option == KEY_OPTION_NONE) {
-		query = desc->http_query == NULL ? "" : desc->http_query;
-		if (fnmatch(kv->kv_value, query, FNM_CASEFOLD) == FNM_NOMATCH)
+	else if (kv->kv_option != KEY_OPTION_STRIP) {
+		if (kv->kv_key == NULL)
+			return (0);
+		else if (fnmatch(kv->kv_key, desc->http_path, 0) == FNM_NOMATCH)
 			return (-1);
+		else if (kv->kv_value != NULL && kv->kv_option == KEY_OPTION_NONE) {
+			query = desc->http_query == NULL ? "" : desc->http_query;
+			if (fnmatch(kv->kv_value, query, FNM_CASEFOLD) == FNM_NOMATCH)
+				return (-1);
+		}
 	}
 
 	relay_match(actions, kv, match, NULL);
@@ -1554,7 +1631,7 @@ relay_apply_actions(struct ctl_relay_event *cre, struct kvlist *actions,
 	struct kv		*host = NULL;
 	const char		*value;
 	struct kv		*kv, *match, *kp, *mp, kvcopy, matchcopy, key;
-	int			 addkv, ret;
+	int			 addkv, ret, nstrip;
 	char			 buf[IBUF_READ_SIZE], *ptr;
 	char			*msg = NULL;
 	const char		*meth = NULL;
@@ -1654,6 +1731,15 @@ relay_apply_actions(struct ctl_relay_event *cre, struct kvlist *actions,
 			break;
 		case KEY_OPTION_LOG:
 			/* perform this later */
+			break;
+		case KEY_OPTION_STRIP:
+			nstrip = strtonum(kv->kv_value, 0, INT_MAX, NULL);
+			if (kv->kv_type == KEY_TYPE_PATH) {
+				if (kv_setkey(match,
+				    server_root_strip(match->kv_key,
+				    nstrip)) == -1)
+					goto fail;
+			}
 			break;
 		default:
 			fatalx("%s: invalid action", __func__);
@@ -1932,3 +2018,19 @@ relay_match(struct kvlist *actions, struct kv *kv, struct kv *match,
 		TAILQ_INSERT_TAIL(actions, kv, kv_match_entry);
 	}
 }
+
+char *
+server_root_strip(char *path, int n)
+{
+	char *p;
+
+	/* Strip strip leading directories. Leading '/' is ignored. */
+	for (; n > 0 && *path != '\0'; n--)
+		if ((p = strchr(++path, '/')) != NULL)
+			path = p;
+		else
+			path--;
+
+	return (path);
+}
+

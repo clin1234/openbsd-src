@@ -1,4 +1,4 @@
-/*	$OpenBSD: priv.c,v 1.15 2019/06/28 13:32:51 deraadt Exp $	*/
+/*	$OpenBSD: priv.c,v 1.17 2021/03/29 23:37:01 dv Exp $	*/
 
 /*
  * Copyright (c) 2016 Reyk Floeter <reyk@openbsd.org>
@@ -81,7 +81,8 @@ priv_run(struct privsep *ps, struct privsep_proc *p, void *arg)
 int
 priv_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
-	const char		*desct[] = { "tap", "switch", "bridge", NULL };
+	const char		*desct[] = { "tap", "switch", "bridge",
+				     "veb", NULL };
 	struct privsep		*ps = p->p_ps;
 	struct vmop_ifreq	 vfr;
 	struct vmd		*env = ps->ps_env;
@@ -91,6 +92,8 @@ priv_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 	struct ifaliasreq	 ifra;
 	struct in6_aliasreq	 in6_ifra;
 	struct if_afreq		 ifar;
+	struct vmop_addr_req	 vareq;
+	struct vmop_addr_result	 varesult;
 	char			 type[IF_NAMESIZE];
 
 	switch (imsg->hdr.type) {
@@ -114,6 +117,7 @@ priv_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		break;
 	case IMSG_VMDOP_CONFIG:
 	case IMSG_CTL_RESET:
+	case IMSG_VMDOP_PRIV_GET_ADDR:
 		break;
 	default:
 		return (-1);
@@ -243,6 +247,22 @@ priv_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 
 		if (ioctl(env->vmd_fd6, SIOCAIFADDR_IN6, &in6_ifra) == -1)
 			log_warn("SIOCAIFADDR_IN6");
+		break;
+	case IMSG_VMDOP_PRIV_GET_ADDR:
+		IMSG_SIZE_CHECK(imsg, &vareq);
+		memcpy(&vareq, imsg->data, sizeof(vareq));
+
+		varesult.var_vmid = vareq.var_vmid;
+		varesult.var_nic_idx = vareq.var_nic_idx;
+
+		/* resolve lladdr for the tap(4) and send back to parent */
+		if (ioctl(imsg->fd, SIOCGIFADDR, &varesult.var_addr) != 0)
+			log_warn("SIOCGIFADDR");
+		else
+			proc_compose_imsg(ps, PROC_PARENT, -1,
+			    IMSG_VMDOP_PRIV_GET_ADDR_RESPONSE, imsg->hdr.peerid,
+			    -1, &varesult, sizeof(varesult));
+		close(imsg->fd);
 		break;
 	case IMSG_VMDOP_CONFIG:
 		config_getconfig(env, imsg);

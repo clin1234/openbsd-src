@@ -1,4 +1,4 @@
-/* $OpenBSD: tls1.h,v 1.41 2020/06/05 18:14:05 jsing Exp $ */
+/* $OpenBSD: tls1.h,v 1.45 2021/06/14 05:32:10 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -177,18 +177,15 @@ extern "C" {
 #define TLS1_VERSION_MAJOR		0x03
 #define TLS1_VERSION_MINOR		0x01
 
+#ifndef LIBRESSL_INTERNAL
 #define TLS1_get_version(s) \
 		((s->version >> 8) == TLS1_VERSION_MAJOR ? s->version : 0)
 
 #define TLS1_get_client_version(s) \
 		((s->client_version >> 8) == TLS1_VERSION_MAJOR ? s->client_version : 0)
+#endif
 
-/*
- * TLS Alert codes.
- *
- * https://www.iana.org/assignments/tls-parameters/#tls-parameters-6
- */
-
+#ifndef LIBRESSL_INTERNAL
 #define TLS1_AD_DECRYPTION_FAILED		21
 #define TLS1_AD_RECORD_OVERFLOW			22
 #define TLS1_AD_UNKNOWN_CA			48	/* fatal */
@@ -211,6 +208,7 @@ extern "C" {
 #define TLS1_AD_BAD_CERTIFICATE_HASH_VALUE	114
 /* Code 115 from RFC 4279. */
 #define TLS1_AD_UNKNOWN_PSK_IDENTITY		115	/* fatal */
+#endif
 
 /*
  * TLS ExtensionType values.

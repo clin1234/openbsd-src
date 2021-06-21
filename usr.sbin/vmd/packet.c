@@ -1,4 +1,4 @@
-/*	$OpenBSD: packet.c,v 1.1 2017/04/19 15:38:32 reyk Exp $	*/
+/*	$OpenBSD: packet.c,v 1.4 2021/06/16 16:55:02 dv Exp $	*/
 
 /* Packet assembly code, originally contributed by Archie Cobbs. */
 
@@ -57,7 +57,6 @@
 
 #include "dhcp.h"
 #include "vmd.h"
-#include "proc.h"
 
 u_int32_t	checksum(unsigned char *, u_int32_t, u_int32_t);
 u_int32_t	wrapsum(u_int32_t);
@@ -169,6 +168,8 @@ decode_hw_header(unsigned char *buf, size_t buflen,
     size_t offset, struct packet_ctx *pc, unsigned int intfhtype)
 {
 	u_int32_t ip_len;
+	u_int16_t ether_type;
+	struct ether_header *eh;
 	struct ip *ip;
 
 	switch (intfhtype) {
@@ -196,9 +197,14 @@ decode_hw_header(unsigned char *buf, size_t buflen,
 		if (buflen < offset + ETHER_HDR_LEN)
 			return (-1);
 
-		memcpy(pc->pc_dmac, buf + offset, ETHER_ADDR_LEN);
-		memcpy(pc->pc_smac, buf + offset + ETHER_ADDR_LEN,
-		    ETHER_ADDR_LEN);
+		eh = (struct ether_header *)(buf + offset);
+		memcpy(pc->pc_dmac, eh->ether_dhost, ETHER_ADDR_LEN);
+		memcpy(pc->pc_smac, eh->ether_shost, ETHER_ADDR_LEN);
+		memcpy(&ether_type, &eh->ether_type, sizeof(ether_type));
+
+		if (ether_type != htons(ETHERTYPE_IP))
+			return (-1);
+
 		offset += ETHER_HDR_LEN;
 
 		pc->pc_htype = ARPHRD_ETHER;
@@ -220,35 +226,25 @@ decode_udp_ip_header(unsigned char *buf, size_t buflen,
 	unsigned char *data;
 	u_int32_t ip_len;
 	u_int32_t sum, usum;
-	static unsigned int ip_packets_seen;
-	static unsigned int ip_packets_bad_checksum;
-	static unsigned int udp_packets_seen;
-	static unsigned int udp_packets_bad_checksum;
-	static unsigned int udp_packets_length_checked;
-	static unsigned int udp_packets_length_overflow;
 	int len;
 
 	/* Assure that an entire IP header is within the buffer. */
 	if (buflen < offset + sizeof(*ip))
 		return (-1);
-	ip_len = (buf[offset] & 0xf) << 2;
-	if (buflen < offset + ip_len)
+	ip = (struct ip *)(buf + offset);
+	if (ip->ip_v != IPVERSION)
+		return (-1);
+	ip_len = ip->ip_hl << 2;
+	if (ip_len < sizeof(struct ip) ||
+	    buflen < offset + ip_len)
 		return (-1);
 
-	ip = (struct ip *)(buf + offset);
-	ip_packets_seen++;
+	if (ip->ip_p != IPPROTO_UDP)
+		return (-1);
 
 	/* Check the IP header checksum - it should be zero. */
-	if (wrapsum(checksum(buf + offset, ip_len, 0)) != 0) {
-		ip_packets_bad_checksum++;
-		if (ip_packets_seen > 4 && ip_packets_bad_checksum != 0 &&
-		    (ip_packets_seen / ip_packets_bad_checksum) < 2) {
-			log_info("%u bad IP checksums seen in %u packets",
-			    ip_packets_bad_checksum, ip_packets_seen);
-			ip_packets_seen = ip_packets_bad_checksum = 0;
-		}
+	if (wrapsum(checksum(buf + offset, ip_len, 0)) != 0)
 		return (-1);
-	}
 
 	pc->pc_src.ss_len = sizeof(struct sockaddr_in);
 	pc->pc_src.ss_family = AF_INET;
@@ -274,7 +270,6 @@ decode_udp_ip_header(unsigned char *buf, size_t buflen,
 	if (buflen < offset + ip_len + sizeof(*udp))
 		return (-1);
 	udp = (struct udphdr *)(buf + offset + ip_len);
-	udp_packets_seen++;
 
 	/* Assure that the entire UDP packet is within the buffer. */
 	if (buflen < offset + ip_len + ntohs(udp->uh_ulen))
@@ -286,20 +281,8 @@ decode_udp_ip_header(unsigned char *buf, size_t buflen,
 	 * UDP header and the data. If the UDP checksum field is zero,
 	 * we're not supposed to do a checksum.
 	 */
-	udp_packets_length_checked++;
 	len = ntohs(udp->uh_ulen) - sizeof(*udp);
 	if ((len < 0) || (len + data > buf + buflen)) {
-		udp_packets_length_overflow++;
-		if (udp_packets_length_checked > 4 &&
-		    udp_packets_length_overflow != 0 &&
-		    (udp_packets_length_checked /
-		    udp_packets_length_overflow) < 2) {
-			log_info("%u udp packets in %u too long - dropped",
-			    udp_packets_length_overflow,
-			    udp_packets_length_checked);
-			udp_packets_length_overflow =
-			    udp_packets_length_checked = 0;
-		}
 		return (-1);
 	}
 	if (len + data != buf + buflen)
@@ -313,17 +296,8 @@ decode_udp_ip_header(unsigned char *buf, size_t buflen,
 	    2 * sizeof(ip->ip_src),
 	    IPPROTO_UDP + (u_int32_t)ntohs(udp->uh_ulen)))));
 
-	udp_packets_seen++;
-	if (usum && usum != sum) {
-		udp_packets_bad_checksum++;
-		if (udp_packets_seen > 4 && udp_packets_bad_checksum != 0 &&
-		    (udp_packets_seen / udp_packets_bad_checksum) < 2) {
-			log_info("%u bad udp checksums in %u packets",
-			    udp_packets_bad_checksum, udp_packets_seen);
-			udp_packets_seen = udp_packets_bad_checksum = 0;
-		}
+	if (usum && usum != sum)
 		return (-1);
-	}
 
 	ss2sin(&pc->pc_src)->sin_port = udp->uh_sport;
 	ss2sin(&pc->pc_dst)->sin_port = udp->uh_dport;

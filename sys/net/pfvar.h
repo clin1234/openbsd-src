@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfvar.h,v 1.497 2020/10/14 19:22:14 naddy Exp $ */
+/*	$OpenBSD: pfvar.h,v 1.500 2021/03/10 10:21:48 jsg Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -128,7 +128,7 @@ enum	{ PFTM_TCP_FIRST_PACKET, PFTM_TCP_OPENING, PFTM_TCP_ESTABLISHED,
 
 /*
  * The number of entries in the fragment queue must be limited
- * to avoid DoS by linear seaching.  Instead of a global limit,
+ * to avoid DoS by linear searching.  Instead of a global limit,
  * use a limit per entry point.  For large packets these sum up.
  */
 #define PF_FRAG_ENTRY_LIMIT		64
@@ -156,7 +156,7 @@ enum	{ PF_ADDR_ADDRMASK, PF_ADDR_NOROUTE, PF_ADDR_DYNIFTL,
 
 #define	PF_LOG			0x01
 #define	PF_LOG_ALL		0x02
-#define	PF_LOG_SOCKET_LOOKUP	0x04
+#define	PF_LOG_USER		0x04
 #define	PF_LOG_FORCE		0x08
 #define	PF_LOG_MATCHES		0x10
 
@@ -762,7 +762,6 @@ struct pf_state {
 	struct pf_sn_head	 src_nodes;
 	struct pf_state_key	*key[2];	/* addresses stack and wire  */
 	struct pfi_kif		*kif;
-	struct pfi_kif		*rt_kif;
 	u_int64_t		 packets[2];
 	u_int64_t		 bytes[2];
 	int32_t			 creation;
@@ -797,6 +796,7 @@ struct pf_state {
 	u_int16_t		 if_index_out;
 	pf_refcnt_t		 refcnt;
 	u_int16_t		 delay;
+	u_int8_t		 rt;
 };
 
 /*
@@ -852,7 +852,7 @@ struct pfsync_state {
 	u_int8_t	 proto;
 	u_int8_t	 direction;
 	u_int8_t	 log;
-	u_int8_t	 pad0;
+	u_int8_t	 rt;
 	u_int8_t	 timeout;
 	u_int8_t	 sync_flags;
 	u_int8_t	 updates;
@@ -1798,8 +1798,8 @@ int	pf_state_key_attach(struct pf_state_key *, struct pf_state *, int);
 int	pf_translate(struct pf_pdesc *, struct pf_addr *, u_int16_t,
 	    struct pf_addr *, u_int16_t, u_int16_t, int);
 int	pf_translate_af(struct pf_pdesc *);
-void	pf_route(struct pf_pdesc *, struct pf_rule *, struct pf_state *);
-void	pf_route6(struct pf_pdesc *, struct pf_rule *, struct pf_state *);
+void	pf_route(struct pf_pdesc *, struct pf_state *);
+void	pf_route6(struct pf_pdesc *, struct pf_state *);
 void	pf_init_threshold(struct pf_threshold *, u_int32_t, u_int32_t);
 int	pf_delay_pkt(struct mbuf *, u_int);
 

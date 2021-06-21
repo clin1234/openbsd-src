@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_wg.c,v 1.14 2020/09/01 19:06:59 tb Exp $ */
+/*	$OpenBSD: if_wg.c,v 1.17 2021/05/16 15:10:20 deraadt Exp $ */
 
 /*
  * Copyright (C) 2015-2020 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
@@ -885,7 +885,7 @@ wg_tag_get(struct mbuf *m)
 
 /*
  * The following section handles the timeout callbacks for a WireGuard session.
- * These functions provide an "event based" model for controling wg(8) session
+ * These functions provide an "event based" model for controlling wg(8) session
  * timers. All function calls occur after the specified event below.
  *
  * wg_timers_event_data_sent:
@@ -1356,7 +1356,7 @@ wg_handshake(struct wg_softc *sc, struct mbuf *m)
 			    &t->t_endpoint);
 			goto error;
 		} else if (res != 0) {
-			panic("unexpected response: %d\n", res);
+			panic("unexpected response: %d", res);
 		}
 
 		if (noise_consume_initiation(&sc->sc_local, &remote,
@@ -1392,7 +1392,7 @@ wg_handshake(struct wg_softc *sc, struct mbuf *m)
 			    &t->t_endpoint);
 			goto error;
 		} else if (res != 0) {
-			panic("unexpected response: %d\n", res);
+			panic("unexpected response: %d", res);
 		}
 
 		if ((remote = wg_index_get(sc, resp->r_idx)) == NULL) {
@@ -1532,7 +1532,7 @@ wg_encap(struct wg_softc *sc, struct mbuf *m)
 	} else if (__predict_false(res == ESTALE)) {
 		wg_timers_event_want_initiation(&peer->p_timers);
 	} else if (__predict_false(res != 0)) {
-		panic("unexpected result: %d\n", res);
+		panic("unexpected result: %d", res);
 	}
 
 	/* A packet with length 0 is a keepalive packet */
@@ -1596,7 +1596,7 @@ wg_decap(struct wg_softc *sc, struct mbuf *m)
 	} else if (__predict_false(res == ESTALE)) {
 		wg_timers_event_want_initiation(&peer->p_timers);
 	} else if (__predict_false(res != 0)) {
-		panic("unexpected response: %d\n", res);
+		panic("unexpected response: %d", res);
 	}
 
 	wg_peer_set_endpoint_from_tag(peer, t);
@@ -2270,7 +2270,7 @@ wg_ioctl_set(struct wg_softc *sc, struct wg_data_io *data)
 
 		/* Peer must have public key */
 		if (!(peer_o.p_flags & WG_PEER_HAS_PUBLIC))
-			continue;
+			goto next_peer;
 
 		/* 0 = latest protocol, 1 = this protocol */
 		if (peer_o.p_protocol_version != 0) {
@@ -2283,7 +2283,7 @@ wg_ioctl_set(struct wg_softc *sc, struct wg_data_io *data)
 		/* Get local public and check that peer key doesn't match */
 		if (noise_local_keys(&sc->sc_local, public, NULL) == 0 &&
 		    bcmp(public, peer_o.p_public, WG_KEY_SIZE) == 0)
-			continue;
+			goto next_peer;
 
 		/* Lookup peer, or create if it doesn't exist */
 		if ((peer = wg_peer_lookup(sc, peer_o.p_public)) == NULL) {
@@ -2291,7 +2291,7 @@ wg_ioctl_set(struct wg_softc *sc, struct wg_data_io *data)
 			 * Also, don't create a new one if we only want to
 			 * update. */
 			if (peer_o.p_flags & (WG_PEER_REMOVE|WG_PEER_UPDATE))
-				continue;
+				goto next_peer;
 
 			if ((peer = wg_peer_create(sc,
 			    peer_o.p_public)) == NULL) {
@@ -2303,7 +2303,7 @@ wg_ioctl_set(struct wg_softc *sc, struct wg_data_io *data)
 		/* Remove peer and continue if specified */
 		if (peer_o.p_flags & WG_PEER_REMOVE) {
 			wg_peer_destroy(peer);
-			continue;
+			goto next_peer;
 		}
 
 		if (peer_o.p_flags & WG_PEER_HAS_ENDPOINT)
@@ -2332,6 +2332,11 @@ wg_ioctl_set(struct wg_softc *sc, struct wg_data_io *data)
 			aip_p++;
 		}
 
+		peer_p = (struct wg_peer_io *)aip_p;
+		continue;
+next_peer:
+		aip_p = &peer_p->p_aips[0];
+		aip_p += peer_o.p_aips_count;
 		peer_p = (struct wg_peer_io *)aip_p;
 	}
 

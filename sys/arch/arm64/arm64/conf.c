@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.16 2020/10/07 13:37:32 jan Exp $	*/
+/*	$OpenBSD: conf.c,v 1.18 2021/04/26 06:05:55 jsg Exp $	*/
 
 /*
  * Copyright (c) 1994, 1995 Charles M. Hannum.  All rights reserved.
@@ -72,21 +72,6 @@ struct bdevsw	bdevsw[] =
 };
 int	nblkdev = nitems(bdevsw);
 
-/* open, close, ioctl, select -- XXX should be a generic device */
-#define cdev_ocis_init(c,n) { \
-        dev_init(c,n,open), dev_init(c,n,close), (dev_type_read((*))) enodev, \
-        (dev_type_write((*))) enodev, dev_init(c,n,ioctl), \
-        (dev_type_stop((*))) enodev, 0,  dev_init(c,n,poll), \
-        (dev_type_mmap((*))) enodev, 0 }
-
-/* open, close, read */
-#define cdev_nvram_init(c,n) { \
-	dev_init(c,n,open), dev_init(c,n,close), dev_init(c,n,read), \
-	(dev_type_write((*))) enodev, (dev_type_ioctl((*))) enodev, \
-	(dev_type_stop((*))) enodev, 0, seltrue, \
-	(dev_type_mmap((*))) enodev, 0, 0, seltrue_kqfilter }
-
-
 #define	mmread	mmrw
 #define	mmwrite	mmrw
 cdev_decl(mm);
@@ -99,7 +84,6 @@ cdev_decl(com);
 cdev_decl(lpt);
 #include "ch.h"
 #include "bpfilter.h"
-cdev_decl(spkr);
 #include "tun.h"
 #include "audio.h"
 #include "video.h"
@@ -110,6 +94,7 @@ cdev_decl(spkr);
 #include "usb.h"
 #include "uhid.h"
 #include "fido.h"
+#include "ujoy.h"
 #include "ugen.h"
 #include "ulpt.h"
 #include "ucom.h"
@@ -248,6 +233,7 @@ struct cdevsw	cdevsw[] =
 	cdev_switch_init(NSWITCH,switch), /* 97: switch(4) control interface */
 	cdev_fido_init(NFIDO,fido),	/* 98: FIDO/U2F security key */
 	cdev_pppx_init(NPPPX,pppac),	/* 99: PPP Access Concentrator */
+	cdev_ujoy_init(NUJOY,ujoy),	/* 100: USB joystick/gamecontroller */
 };
 int	nchrdev = nitems(cdevsw);
 

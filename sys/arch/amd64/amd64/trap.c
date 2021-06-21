@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.87 2020/10/22 13:41:51 deraadt Exp $	*/
+/*	$OpenBSD: trap.c,v 1.89 2021/06/02 00:39:26 cheloha Exp $	*/
 /*	$NetBSD: trap.c,v 1.2 2003/05/04 23:51:56 fvdl Exp $	*/
 
 /*-
@@ -87,6 +87,7 @@
 #include <machine/psl.h>
 #include <machine/trap.h>
 #ifdef DDB
+#include <ddb/db_output.h>
 #include <machine/db_machdep.h>
 #endif
 
@@ -135,20 +136,21 @@ static inline void debug_trap(struct trapframe *_frame, struct proc *_p,
     long _type);
 
 static inline void
-fault(const char *format, ...)
+fault(const char *fmt, ...)
 {
-	static char faultbuf[512];
+	struct cpu_info *ci = curcpu();
 	va_list ap;
 
-	/*
-	 * Save the fault info for DDB.  Kernel lock protects
-	 * faultbuf from being overwritten by another CPU.
-	 */
-	va_start(ap, format);
-	vsnprintf(faultbuf, sizeof faultbuf, format, ap);
+	atomic_cas_ptr(&panicstr, NULL, ci->ci_panicbuf);
+
+	va_start(ap, fmt);
+	vsnprintf(ci->ci_panicbuf, sizeof(ci->ci_panicbuf), fmt, ap);
 	va_end(ap);
-	printf("%s\n", faultbuf);
-	faultstr = faultbuf;
+#ifdef DDB
+	db_printf("%s\n", ci->ci_panicbuf);
+#else
+	printf("%s\n", ci->ci_panicbuf);
+#endif
 }
 
 static inline int
@@ -176,10 +178,7 @@ upageflttrap(struct trapframe *frame, uint64_t cr2)
 	union sigval sv;
 	int signal, sicode, error;
 
-	KERNEL_LOCK();
 	error = uvm_fault(&p->p_vmspace->vm_map, va, 0, access_type);
-	KERNEL_UNLOCK();
-
 	if (error == 0) {
 		uvm_grow(p, va);
 		return 1;
@@ -261,9 +260,7 @@ kpageflttrap(struct trapframe *frame, uint64_t cr2)
 	if (curcpu()->ci_inatomic == 0 || map == kernel_map) {
 		onfault = pcb->pcb_onfault;
 		pcb->pcb_onfault = NULL;
-		KERNEL_LOCK();
 		error = uvm_fault(map, va, 0, access_type);
-		KERNEL_UNLOCK();
 		pcb->pcb_onfault = onfault;
 
 		if (error == 0 && map != kernel_map)

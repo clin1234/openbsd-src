@@ -1,4 +1,4 @@
-.\" $OpenBSD: ober_get_string.3,v 1.2 2019/10/25 04:00:10 tb Exp $
+.\" $OpenBSD: ober_get_string.3,v 1.6 2021/03/31 19:31:35 schwarze Exp $
 .\"
 .\" Copyright (c) 2007, 2012 Reyk Floeter <reyk@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: October 25 2019 $
+.Dd $Mdocdate: March 31 2021 $
 .Dt OBER_GET_STRING 3
 .Os
 .Sh NAME
@@ -62,25 +62,42 @@
 Functions which take two arguments save the value contained in the
 .Fa root
 element into the storage location pointed to by the second argument.
+If the storage location is
+.Dv NULL
+then only a type check is performed.
 Additionally,
 .Fn ober_get_nstring
 and
 .Fn ober_get_bitstring
 save the number of bytes contained in the string into
 .Pf * Fa size .
+If
+.Fa buf
+is
+.Dv NULL
+and size is not
+.Dv NULL ,
+size is set.
+.Fa size
+must not be
+.Dv NULL
+to return a valid
+.Fa buf .
 .Pp
 .Fn ober_scanf_elements
 retrieves the values from zero or more elements starting at
 .Fa root .
-For each byte in
+For each character in
 .Fa fmt ,
 arguments of the types given in the following table are consumed
 and passed to the function listed, processing one
 .Vt ber_element
-per byte.
-The following bytes are valid:
-.Bl -column -offset indent bytes ober_get_enumerated() "1: struct ber_element **"
-.It Sy byte Ta Sy function Ta Sy arguments
+per character.
+The following characters are valid:
+.Bl -column -offset indent\
+ characte ober_get_enumerated_ "1: struct ber_element **"
+.It Sy character Ta Sy function Ta Sy arguments
+.It $ Ta see below              Ta 0
 .It B Ta Fn ober_get_bitstring  Ta 2: Vt void ** , size_t *
 .It b Ta Fn ober_get_boolean    Ta 1: Vt int *
 .It d Ta Fn ober_get_integer    Ta 1: Vt int *
@@ -121,6 +138,9 @@ For
 .Sq t ,
 the class and type of the element are stored in the two corresponding
 variables, but if the element contains a value, that value is ignored.
+A
+.Sq $
+mandates the end of a sequence or set.
 .Pp
 For an opening parenthesis or brace, it is checked that the element
 is a sequence or a set, and parsing continues with its children.

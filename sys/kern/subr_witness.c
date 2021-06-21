@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_witness.c,v 1.38 2020/11/12 05:49:26 semarie Exp $	*/
+/*	$OpenBSD: subr_witness.c,v 1.47 2021/03/23 10:22:20 mpi Exp $	*/
 
 /*-
  * Copyright (c) 2008 Isilon Systems, Inc.
@@ -234,9 +234,10 @@ struct witness {
 	const char		*w_subtype;
 	uint32_t		w_index;  /* Index in the relationship matrix */
 	struct lock_class	*w_class;
-	SIMPLEQ_ENTRY(witness)	w_list;		/* List of all witnesses. */
-	SIMPLEQ_ENTRY(witness)	w_typelist;	/* Witnesses of a type. */
-	struct witness		*w_hash_next; /* Linked list in hash buckets. */
+	SLIST_ENTRY(witness)	w_list;		/* List of all witnesses. */
+	SLIST_ENTRY(witness)	w_typelist;	/* Witnesses of a type. */
+	SLIST_ENTRY(witness)	w_hash_next;	/* Linked list in
+						 * hash buckets. */
 	uint16_t		w_num_ancestors; /* direct/indirect
 						  * ancestor count */
 	uint16_t		w_num_descendants; /* direct/indirect
@@ -247,16 +248,16 @@ struct witness {
 	unsigned		w_reversed:1;
 };
 
-SIMPLEQ_HEAD(witness_list, witness);
+SLIST_HEAD(witness_list, witness);
 
 /*
  * The witness hash table. Keys are witness names (const char *), elements are
  * witness objects (struct witness *).
  */
 struct witness_hash {
-	struct witness	*wh_array[WITNESS_HASH_SIZE];
-	uint32_t	wh_size;
-	uint32_t	wh_count;
+	struct witness_list	wh_array[WITNESS_HASH_SIZE];
+	uint32_t		wh_size;
+	uint32_t		wh_count;
 };
 
 /*
@@ -396,12 +397,12 @@ static struct mutex w_mtx;
 static struct rwlock w_ctlock = RWLOCK_INITIALIZER("w_ctlock");
 
 /* w_list */
-static struct witness_list w_free = SIMPLEQ_HEAD_INITIALIZER(w_free);
-static struct witness_list w_all = SIMPLEQ_HEAD_INITIALIZER(w_all);
+static struct witness_list w_free = SLIST_HEAD_INITIALIZER(w_free);
+static struct witness_list w_all = SLIST_HEAD_INITIALIZER(w_all);
 
 /* w_typelist */
-static struct witness_list w_spin = SIMPLEQ_HEAD_INITIALIZER(w_spin);
-static struct witness_list w_sleep = SIMPLEQ_HEAD_INITIALIZER(w_sleep);
+static struct witness_list w_spin = SLIST_HEAD_INITIALIZER(w_spin);
+static struct witness_list w_sleep = SLIST_HEAD_INITIALIZER(w_sleep);
 
 /* lock list */
 static struct lock_list_entry *w_lock_list_free = NULL;
@@ -504,11 +505,11 @@ witness_initialize(void)
 		w_data[i].w_index = i;	/* Witness index never changes. */
 		witness_free(w);
 	}
-	KASSERTMSG(SIMPLEQ_FIRST(&w_free)->w_index == 0,
+	KASSERTMSG(SLIST_FIRST(&w_free)->w_index == 0,
 	    "%s: Invalid list of free witness objects", __func__);
 
 	/* Witness with index 0 is not used to aid in debugging. */
-	SIMPLEQ_REMOVE_HEAD(&w_free, w_list);
+	SLIST_REMOVE_HEAD(&w_free, w_list);
 	w_free_cnt--;
 
 	for (i = 0; i < witness_count; i++) {
@@ -607,14 +608,13 @@ witness_ddb_compute_levels(void)
 	/*
 	 * First clear all levels.
 	 */
-	SIMPLEQ_FOREACH(w, &w_all, w_list)
+	SLIST_FOREACH(w, &w_all, w_list)
 		w->w_ddb_level = -1;
 
 	/*
 	 * Look for locks with no parents and level all their descendants.
 	 */
-	SIMPLEQ_FOREACH(w, &w_all, w_list) {
-
+	SLIST_FOREACH(w, &w_all, w_list) {
 		/* If the witness has ancestors (is not a root), skip it. */
 		if (w->w_num_ancestors > 0)
 			continue;
@@ -673,7 +673,7 @@ witness_ddb_display_list(int(*prnt)(const char *fmt, ...),
 {
 	struct witness *w;
 
-	SIMPLEQ_FOREACH(w, list, w_typelist) {
+	SLIST_FOREACH(w, list, w_typelist) {
 		if (!w->w_acquired || w->w_ddb_level > 0)
 			continue;
 
@@ -691,7 +691,7 @@ witness_ddb_display(int(*prnt)(const char *fmt, ...))
 	witness_ddb_compute_levels();
 
 	/* Clear all the displayed flags. */
-	SIMPLEQ_FOREACH(w, &w_all, w_list)
+	SLIST_FOREACH(w, &w_all, w_list)
 		w->w_displayed = 0;
 
 	/*
@@ -711,7 +711,7 @@ witness_ddb_display(int(*prnt)(const char *fmt, ...))
 	 * Finally, any locks which have not been acquired yet.
 	 */
 	prnt("\nLocks which were never acquired:\n");
-	SIMPLEQ_FOREACH(w, &w_all, w_list) {
+	SLIST_FOREACH(w, &w_all, w_list) {
 		if (w->w_acquired)
 			continue;
 		prnt("%s (type: %s, depth: %d)\n", w->w_type->lt_name,
@@ -764,7 +764,7 @@ witness_checkorder(struct lock_object *lock, int flags,
 
 	if (witness_cold || witness_watch < 1 || panicstr != NULL || db_active)
 		return;
-	
+
 	if ((lock->lo_flags & LO_INITIALIZED) == 0) {
 		if (witness_uninitialized_report > 0) {
 			witness_uninitialized_report--;
@@ -1084,6 +1084,9 @@ witness_checkorder(struct lock_object *lock, int flags,
 					    w1->w_class->lc_name);
 					stacktrace_print(
 					    &wlod1->wlod_stack, printf);
+				} else {
+					printf("lock order data "
+					    "w2 -> w1 missing\n");
 				}
 				if (wlod2 != NULL) {
 					printf("lock order \"%s\"(%s) -> "
@@ -1094,6 +1097,9 @@ witness_checkorder(struct lock_object *lock, int flags,
 					    w->w_class->lc_name);
 					stacktrace_print(
 					    &wlod2->wlod_stack, printf);
+				} else {
+					printf("lock order data "
+					    "w1 -> w2 missing\n");
 				}
 			}
 			witness_debugger(0);
@@ -1499,12 +1505,12 @@ enroll(const struct lock_type *type, const char *subtype,
 	w->w_type = type;
 	w->w_subtype = subtype;
 	w->w_class = lock_class;
-	SIMPLEQ_INSERT_HEAD(&w_all, w, w_list);
+	SLIST_INSERT_HEAD(&w_all, w, w_list);
 	if (lock_class->lc_flags & LC_SPINLOCK) {
-		SIMPLEQ_INSERT_HEAD(&w_spin, w, w_typelist);
+		SLIST_INSERT_HEAD(&w_spin, w, w_typelist);
 		w_spin_cnt++;
 	} else if (lock_class->lc_flags & LC_SLEEPLOCK) {
-		SIMPLEQ_INSERT_HEAD(&w_sleep, w, w_typelist);
+		SLIST_INSERT_HEAD(&w_sleep, w, w_typelist);
 		w_sleep_cnt++;
 	}
 
@@ -1622,26 +1628,18 @@ adopt(struct witness *parent, struct witness *child)
 static void
 itismychild(struct witness *parent, struct witness *child)
 {
-	int unlocked;
-
 	KASSERT(child != NULL && parent != NULL);
 	if (witness_cold == 0)
 		MUTEX_ASSERT_LOCKED(&w_mtx);
 
 	if (!witness_lock_type_equal(parent, child)) {
-		if (witness_cold == 0) {
-			unlocked = 1;
+		if (witness_cold == 0)
 			mtx_leave(&w_mtx);
-		} else {
-			unlocked = 0;
-		}
 		panic(
 		    "%s: parent \"%s\" (%s) and child \"%s\" (%s) are not "
 		    "the same lock type", __func__, parent->w_type->lt_name,
 		    parent->w_class->lc_name, child->w_type->lt_name,
 		    child->w_class->lc_name);
-		if (unlocked)
-			mtx_enter(&w_mtx);
 	}
 	adopt(parent, child);
 }
@@ -1695,7 +1693,7 @@ isitmychild(struct witness *parent, struct witness *child)
 }
 
 /*
- * Checks if @descendant is a direct or inderect descendant of @ancestor.
+ * Checks if @descendant is a direct or indirect descendant of @ancestor.
  */
 static int
 isitmydescendant(struct witness *ancestor, struct witness *descendant)
@@ -1718,14 +1716,14 @@ witness_get(void)
 		mtx_leave(&w_mtx);
 		return (NULL);
 	}
-	if (SIMPLEQ_EMPTY(&w_free)) {
+	if (SLIST_EMPTY(&w_free)) {
 		witness_watch = -1;
 		mtx_leave(&w_mtx);
 		printf("WITNESS: unable to allocate a new witness object\n");
 		return (NULL);
 	}
-	w = SIMPLEQ_FIRST(&w_free);
-	SIMPLEQ_REMOVE_HEAD(&w_free, w_list);
+	w = SLIST_FIRST(&w_free);
+	SLIST_REMOVE_HEAD(&w_free, w_list);
 	w_free_cnt--;
 	index = w->w_index;
 	KASSERT(index > 0 && index == w_max_used_index + 1 &&
@@ -1740,8 +1738,7 @@ witness_get(void)
 static void
 witness_free(struct witness *w)
 {
-
-	SIMPLEQ_INSERT_HEAD(&w_free, w, w_list);
+	SLIST_INSERT_HEAD(&w_free, w, w_list);
 	w_free_cnt++;
 }
 
@@ -2273,9 +2270,9 @@ db_witness_print_fullgraph(void)
 	error = 0;
 
 	mtx_enter(&w_mtx);
-	SIMPLEQ_FOREACH(w, &w_all, w_list)
+	SLIST_FOREACH(w, &w_all, w_list)
 		w->w_displayed = 0;
-	SIMPLEQ_FOREACH(w, &w_all, w_list)
+	SLIST_FOREACH(w, &w_all, w_list)
 		db_witness_add_fullgraph(w);
 	mtx_leave(&w_mtx);
 }
@@ -2336,7 +2333,7 @@ witness_init_hash_tables(void)
 
 	/* Initialize the hash tables. */
 	for (i = 0; i < WITNESS_HASH_SIZE; i++)
-		w_hash.wh_array[i] = NULL;
+		SLIST_INIT(&w_hash.wh_array[i]);
 
 	w_hash.wh_size = WITNESS_HASH_SIZE;
 	w_hash.wh_count = 0;
@@ -2365,11 +2362,9 @@ witness_hash_get(const struct lock_type *type, const char *subtype)
 		MUTEX_ASSERT_LOCKED(&w_mtx);
 	hash = (uint32_t)((uintptr_t)type ^ (uintptr_t)subtype) %
 	    w_hash.wh_size;
-	w = w_hash.wh_array[hash];
-	while (w != NULL) {
+	SLIST_FOREACH(w, &w_hash.wh_array[hash], w_hash_next) {
 		if (w->w_type == type && w->w_subtype == subtype)
 			goto out;
-		w = w->w_hash_next;
 	}
 
 out:
@@ -2387,13 +2382,12 @@ witness_hash_put(struct witness *w)
 		MUTEX_ASSERT_LOCKED(&w_mtx);
 	KASSERTMSG(witness_hash_get(w->w_type, w->w_subtype) == NULL,
 	    "%s: trying to add a hash entry that already exists!", __func__);
-	KASSERTMSG(w->w_hash_next == NULL,
+	KASSERTMSG(SLIST_NEXT(w, w_hash_next) == NULL,
 	    "%s: w->w_hash_next != NULL", __func__);
 
 	hash = (uint32_t)((uintptr_t)w->w_type ^ (uintptr_t)w->w_subtype) %
 	    w_hash.wh_size;
-	w->w_hash_next = w_hash.wh_array[hash];
-	w_hash.wh_array[hash] = w;
+	SLIST_INSERT_HEAD(&w_hash.wh_array[hash], w, w_hash_next);
 	w_hash.wh_count++;
 }
 
@@ -2448,6 +2442,7 @@ witness_lock_order_check(struct witness *parent, struct witness *child)
 static int
 witness_lock_order_add(struct witness *parent, struct witness *child)
 {
+	static int lofree_empty_reported = 0;
 	struct witness_lock_order_data *data = NULL;
 	struct witness_lock_order_key key;
 	unsigned int hash;
@@ -2465,14 +2460,19 @@ witness_lock_order_add(struct witness *parent, struct witness *child)
 	    sizeof(key)) % w_lohash.wloh_size;
 	w_rmatrix[parent->w_index][child->w_index] |= WITNESS_LOCK_ORDER_KNOWN;
 	data = w_lofree;
-	if (data == NULL)
+	if (data == NULL) {
+		if (!lofree_empty_reported) {
+			lofree_empty_reported = 1;
+			printf("witness: out of free lock order entries\n");
+		}
 		return (0);
+	}
 	w_lofree = data->wlod_next;
 	data->wlod_next = w_lohash.wloh_array[hash];
 	data->wlod_key = key;
 	w_lohash.wloh_array[hash] = data;
 	w_lohash.wloh_count++;
-	stacktrace_save(&data->wlod_stack);
+	stacktrace_save_at(&data->wlod_stack, 1);
 	return (1);
 }
 
@@ -2584,17 +2584,15 @@ witness_sysctl_watch(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 	int value;
 
 	value = witness_watch;
-	error = sysctl_int(oldp, oldlenp, newp, newlen, &value);
+	error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+	    &value, -1, 3);
 	if (error == 0 && newp != NULL) {
-		if (value >= -1 && value <= 3) {
-			mtx_enter(&w_mtx);
-			if (value < 0 || witness_watch >= 0)
-				witness_watch = value;
-			else
-				error = EINVAL;
-			mtx_leave(&w_mtx);
-		} else
+		mtx_enter(&w_mtx);
+		if (value < 0 || witness_watch >= 0)
+			witness_watch = value;
+		else
 			error = EINVAL;
+		mtx_leave(&w_mtx);
 	}
 	return (error);
 }

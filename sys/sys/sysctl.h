@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysctl.h,v 1.212 2020/11/07 05:24:20 gnezdo Exp $	*/
+/*	$OpenBSD: sysctl.h,v 1.218 2021/05/17 17:54:31 claudio Exp $	*/
 /*	$NetBSD: sysctl.h,v 1.16 1996/04/09 20:55:36 cgd Exp $	*/
 
 /*
@@ -134,7 +134,7 @@ struct ctlname {
 /* was KERN_RND	31			*/
 #define	KERN_NOSUIDCOREDUMP	32	/* int: no setuid coredumps ever */ 
 #define	KERN_FSYNC		33	/* int: file synchronization support */
-#define	KERN_SYSVMSG		34	/* int: SysV message queue suppoprt */
+#define	KERN_SYSVMSG		34	/* int: SysV message queue support */
 #define	KERN_SYSVSEM		35	/* int: SysV semaphore support */
 #define	KERN_SYSVSHM		36	/* int: SysV shared memory support */
 /* was KERN_ARND		37	*/
@@ -189,7 +189,8 @@ struct ctlname {
 #define	KERN_PFSTATUS		86	/* struct: pf status and stats */
 #define	KERN_TIMEOUT_STATS	87	/* struct: timeout status and stats */
 #define	KERN_UTC_OFFSET		88	/* int: adjust RTC time to UTC */
-#define	KERN_MAXID		89	/* number of valid kern ids */
+#define	KERN_VIDEO		89	/* struct: video properties */
+#define	KERN_MAXID		90	/* number of valid kern ids */
 
 #define	CTL_KERN_NAMES { \
 	{ 0, 0 }, \
@@ -281,6 +282,7 @@ struct ctlname {
 	{ "pfstatus", CTLTYPE_STRUCT }, \
 	{ "timeout_stats", CTLTYPE_STRUCT }, \
 	{ "utc_offset", CTLTYPE_INT }, \
+	{ "video", CTLTYPE_STRUCT }, \
 }
 
 /*
@@ -318,6 +320,17 @@ struct ctlname {
 #define KERN_AUDIO_MAXID	2
 
 #define CTL_KERN_AUDIO_NAMES { \
+	{ 0, 0 }, \
+	{ "record", CTLTYPE_INT }, \
+}
+
+/*
+ * KERN_VIDEO
+ */
+#define KERN_VIDEO_RECORD	1
+#define KERN_VIDEO_MAXID	2
+
+#define CTL_KERN_VIDEO_NAMES { \
 	{ 0, 0 }, \
 	{ "record", CTLTYPE_INT }, \
 }
@@ -987,6 +1000,9 @@ struct sysctl_bounded_args {
 	int maximum; /* read-only variable if minimum > maximum */
 };
 
+/* Special case minimum,maximum marker for sysctl_bounded_args. */
+#define SYSCTL_INT_READONLY	1,0
+
 /*
  * Internal sysctl function calling convention:
  *
@@ -998,10 +1014,10 @@ struct sysctl_bounded_args {
  */
 typedef int (sysctlfn)(int *, u_int, void *, size_t *, void *, size_t, struct proc *);
 
-int sysctl_int(void *, size_t *, void *, size_t, int *);
-int sysctl_int_bounded(void *, size_t *, void *, size_t, int *, int, int);
 int sysctl_int_lower(void *, size_t *, void *, size_t, int *);
+int sysctl_int(void *, size_t *, void *, size_t, int *);
 int sysctl_rdint(void *, size_t *, void *, int);
+int sysctl_int_bounded(void *, size_t *, void *, size_t, int *, int, int);
 int sysctl_bounded_arr(const struct sysctl_bounded_args *, u_int,
     int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_quad(void *, size_t *, void *, size_t, int64_t *);
@@ -1060,6 +1076,7 @@ int pflow_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 int pipex_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 int mpls_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 int pf_sysctl(void *, size_t *, void *, size_t);
+int uipc_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 
 #else	/* !_KERNEL */
 

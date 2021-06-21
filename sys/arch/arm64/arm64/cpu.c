@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.43 2020/11/04 10:53:29 jsg Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.55 2021/06/10 04:49:48 jsg Exp $	*/
 
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
@@ -47,6 +47,7 @@
 #define CPU_IMPL_ARM		0x41
 #define CPU_IMPL_CAVIUM		0x43
 #define CPU_IMPL_AMCC		0x50
+#define CPU_IMPL_APPLE		0x61
 
 #define CPU_PART_CORTEX_A34	0xd02
 #define CPU_PART_CORTEX_A53	0xd03
@@ -66,7 +67,12 @@
 #define CPU_PART_CORTEX_A78AE	0xd42
 #define CPU_PART_CORTEX_A65AE	0xd43
 #define CPU_PART_CORTEX_X1	0xd44
+#define CPU_PART_CORTEX_A510	0xd46
+#define CPU_PART_CORTEX_A710	0xd47
+#define CPU_PART_CORTEX_X2	0xd48
+#define CPU_PART_NEOVERSE_N2	0xd49
 #define CPU_PART_NEOVERSE_E1	0xd4a
+#define CPU_PART_CORTEX_A78C	0xd4b
 
 #define CPU_PART_THUNDERX_T88	0x0a1
 #define CPU_PART_THUNDERX_T81	0x0a2
@@ -74,6 +80,9 @@
 #define CPU_PART_THUNDERX2_T99	0x0af
 
 #define CPU_PART_X_GENE		0x000
+
+#define CPU_PART_ICESTORM	0x022
+#define CPU_PART_FIRESTORM	0x023
 
 #define CPU_IMPL(midr)  (((midr) >> 24) & 0xff)
 #define CPU_PART(midr)  (((midr) >> 4) & 0xfff)
@@ -105,9 +114,14 @@ struct cpu_cores cpu_cores_arm[] = {
 	{ CPU_PART_CORTEX_A77, "Cortex-A77" },
 	{ CPU_PART_CORTEX_A78, "Cortex-A78" },
 	{ CPU_PART_CORTEX_A78AE, "Cortex-A78AE" },
+	{ CPU_PART_CORTEX_A78C, "Cortex-A78C" },
+	{ CPU_PART_CORTEX_A510, "Cortex-A510" },
+	{ CPU_PART_CORTEX_A710, "Cortex-A710" },
 	{ CPU_PART_CORTEX_X1, "Cortex-X1" },
+	{ CPU_PART_CORTEX_X2, "Cortex-X2" },
 	{ CPU_PART_NEOVERSE_E1, "Neoverse E1" },
 	{ CPU_PART_NEOVERSE_N1, "Neoverse N1" },
+	{ CPU_PART_NEOVERSE_N2, "Neoverse N2" },
 	{ CPU_PART_NEOVERSE_V1, "Neoverse V1" },
 	{ 0, NULL },
 };
@@ -125,6 +139,12 @@ struct cpu_cores cpu_cores_amcc[] = {
 	{ 0, NULL },
 };
 
+struct cpu_cores cpu_cores_apple[] = {
+	{ CPU_PART_ICESTORM, "Icestorm" },
+	{ CPU_PART_FIRESTORM, "Firestorm" },
+	{ 0, NULL },
+};
+
 /* arm cores makers */
 const struct implementers {
 	int			id;
@@ -134,11 +154,16 @@ const struct implementers {
 	{ CPU_IMPL_ARM,	"ARM", cpu_cores_arm },
 	{ CPU_IMPL_CAVIUM, "Cavium", cpu_cores_cavium },
 	{ CPU_IMPL_AMCC, "Applied Micro", cpu_cores_amcc },
+	{ CPU_IMPL_APPLE, "Apple", cpu_cores_apple },
 	{ 0, NULL },
 };
 
 char cpu_model[64];
 int cpu_node;
+
+#ifdef CRYPTO
+int arm64_has_aes;
+#endif
 
 struct cpu_info *cpu_info_list = &cpu_info_primary;
 
@@ -229,6 +254,7 @@ cpu_identify(struct cpu_info *ci)
 		if (clidr & CLIDR_CTYPE_INSN) {
 			WRITE_SPECIALREG(csselr_el1,
 			    i << CSSELR_LEVEL_SHIFT | CSSELR_IND);
+			__asm volatile("isb");
 			ccsidr = READ_SPECIALREG(ccsidr_el1);
 			sets = CCSIDR_SETS(ccsidr);
 			ways = CCSIDR_WAYS(ccsidr);
@@ -241,6 +267,7 @@ cpu_identify(struct cpu_info *ci)
 		}
 		if (clidr & CLIDR_CTYPE_DATA) {
 			WRITE_SPECIALREG(csselr_el1, i << CSSELR_LEVEL_SHIFT);
+			__asm volatile("isb");
 			ccsidr = READ_SPECIALREG(ccsidr_el1);
 			sets = CCSIDR_SETS(ccsidr);
 			ways = CCSIDR_WAYS(ccsidr);
@@ -251,6 +278,7 @@ cpu_identify(struct cpu_info *ci)
 		}
 		if (clidr & CLIDR_CTYPE_UNIFIED) {
 			WRITE_SPECIALREG(csselr_el1, i << CSSELR_LEVEL_SHIFT);
+			__asm volatile("isb");
 			ccsidr = READ_SPECIALREG(ccsidr_el1);
 			sets = CCSIDR_SETS(ccsidr);
 			ways = CCSIDR_WAYS(ccsidr);
@@ -312,6 +340,30 @@ cpu_identify(struct cpu_info *ci)
 	id = READ_SPECIALREG(id_aa64isar0_el1);
 	sep = "";
 
+	if (ID_AA64ISAR0_RNDR(id) >= ID_AA64ISAR0_RNDR_IMPL) {
+		printf("%sRNDR", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR0_TLB(id) >= ID_AA64ISAR0_TLB_IOS) {
+		printf("%sTLBIOS", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR0_TLB(id) >= ID_AA64ISAR0_TLB_IRANGE)
+		printf("+IRANGE");
+
+	if (ID_AA64ISAR0_TS(id) >= ID_AA64ISAR0_TS_BASE) {
+		printf("%sTS", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR0_TS(id) >= ID_AA64ISAR0_TS_AXFLAG)
+		printf("+AXFLAG");
+
+	if (ID_AA64ISAR0_FHM(id) >= ID_AA64ISAR0_FHM_IMPL) {
+		printf("%sFHM", sep);
+		sep = ",";
+	}
+
 	if (ID_AA64ISAR0_DP(id) >= ID_AA64ISAR0_DP_IMPL) {
 		printf("%sDP", sep);
 		sep = ",";
@@ -362,6 +414,9 @@ cpu_identify(struct cpu_info *ci)
 	if (ID_AA64ISAR0_AES(id) >= ID_AA64ISAR0_AES_BASE) {
 		printf("%sAES", sep);
 		sep = ",";
+#ifdef CRYPTO
+		arm64_has_aes = 1;
+#endif
 	}
 	if (ID_AA64ISAR0_AES(id) >= ID_AA64ISAR0_AES_PMULL)
 		printf("+PMULL");
@@ -371,8 +426,76 @@ cpu_identify(struct cpu_info *ci)
 	 */
 	id = READ_SPECIALREG(id_aa64isar1_el1);
 
+	if (ID_AA64ISAR1_SPECRES(id) >= ID_AA64ISAR1_SPECRES_IMPL) {
+		printf("%sSPECRES", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_SB(id) >= ID_AA64ISAR1_SB_IMPL) {
+		printf("%sSB", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_FRINTTS(id) >= ID_AA64ISAR1_FRINTTS_IMPL) {
+		printf("%sFRINTTS", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_GPI(id) >= ID_AA64ISAR1_GPI_IMPL) {
+		printf("%sGPI", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_GPA(id) >= ID_AA64ISAR1_GPA_IMPL) {
+		printf("%sGPA", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_LRCPC(id) >= ID_AA64ISAR1_LRCPC_BASE) {
+		printf("%sLRCPC", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR1_LRCPC(id) >= ID_AA64ISAR1_LRCPC_LDAPUR)
+		printf("+LDAPUR");
+
+	if (ID_AA64ISAR1_FCMA(id) >= ID_AA64ISAR1_FCMA_IMPL) {
+		printf("%sFCMA", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_JSCVT(id) >= ID_AA64ISAR1_JSCVT_IMPL) {
+		printf("%sJSCVT", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_API(id) >= ID_AA64ISAR1_API_BASE) {
+		printf("%sAPI", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR1_API(id) >= ID_AA64ISAR1_API_PAC)
+		printf("+PAC");
+
+	if (ID_AA64ISAR1_APA(id) >= ID_AA64ISAR1_APA_BASE) {
+		printf("%sAPA", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR1_APA(id) >= ID_AA64ISAR1_APA_PAC)
+		printf("+PAC");
+
 	if (ID_AA64ISAR1_DPB(id) >= ID_AA64ISAR1_DPB_IMPL) {
 		printf("%sDPB", sep);
+		sep = ",";
+	}
+
+	/*
+	 * ID_AA64MMFR0
+	 *
+	 * We only print ASIDBits for now.
+	 */
+	id = READ_SPECIALREG(id_aa64mmfr0_el1);
+
+	if (ID_AA64MMFR0_ASID_BITS(id) == ID_AA64MMFR0_ASID_BITS_16) {
+		printf("%sASID16", sep);
 		sep = ",";
 	}
 
@@ -429,6 +552,31 @@ cpu_identify(struct cpu_info *ci)
 	}
 	if (ID_AA64PFR0_CSV2(id) >= ID_AA64PFR0_CSV2_SCXT)
 		printf("+SCTX");
+
+#ifdef CPU_DEBUG
+	id = READ_SPECIALREG(id_aa64afr0_el1);
+	printf("\nID_AA64AFR0_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64afr1_el1);
+	printf("\nID_AA64AFR1_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64dfr0_el1);
+	printf("\nID_AA64DFR0_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64dfr1_el1);
+	printf("\nID_AA64DFR1_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64isar0_el1);
+	printf("\nID_AA64ISAR0_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64isar1_el1);
+	printf("\nID_AA64ISAR1_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64mmfr0_el1);
+	printf("\nID_AA64MMFR0_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64mmfr1_el1);
+	printf("\nID_AA64MMFR1_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64mmfr2_el1);
+	printf("\nID_AA64MMFR2_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64pfr0_el1);
+	printf("\nID_AA64PFR0_EL1: 0x%016llx", id);
+	id = READ_SPECIALREG(id_aa64pfr1_el1);
+	printf("\nID_AA64PFR1_EL1: 0x%016llx", id);
+#endif
 }
 
 int	cpu_hatch_secondary(struct cpu_info *ci, int, uint64_t);
@@ -508,7 +656,7 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 		sched_init_cpu(ci);
 		if (cpu_hatch_secondary(ci, spinup_method, spinup_data)) {
 			atomic_setbits_int(&ci->ci_flags, CPUF_IDENTIFY);
-			__asm volatile("dsb sy; sev");
+			__asm volatile("dsb sy; sev" ::: "memory");
 
 			while ((ci->ci_flags & CPUF_IDENTIFIED) == 0 &&
 			    --timeout)
@@ -606,7 +754,7 @@ cpu_hatch_spin_table(struct cpu_info *ci, uint64_t start, uint64_t data)
 	pmap_kenter_cache(start_pg, pa, PROT_READ|PROT_WRITE, PMAP_CACHE_CI);
 
 	*startvec = start;
-	__asm volatile("dsb sy; sev");
+	__asm volatile("dsb sy; sev" ::: "memory");
 
 	pmap_kremove(start_pg, PAGE_SIZE);
 }
@@ -658,7 +806,7 @@ void
 cpu_boot_secondary(struct cpu_info *ci)
 {
 	atomic_setbits_int(&ci->ci_flags, CPUF_GO);
-	__asm volatile("dsb sy; sev");
+	__asm volatile("dsb sy; sev" ::: "memory");
 
 	while ((ci->ci_flags & CPUF_RUNNING) == 0)
 		__asm volatile("wfe");
@@ -672,23 +820,26 @@ cpu_start_secondary(struct cpu_info *ci)
 	int s;
 
 	ci->ci_flags |= CPUF_PRESENT;
-	__asm volatile("dsb sy");
+	__asm volatile("dsb sy" ::: "memory");
 
 	while ((ci->ci_flags & CPUF_IDENTIFY) == 0)
 		__asm volatile("wfe");
 
 	cpu_identify(ci);
 	atomic_setbits_int(&ci->ci_flags, CPUF_IDENTIFIED);
-	__asm volatile("dsb sy");
+	__asm volatile("dsb sy" ::: "memory");
 
 	while ((ci->ci_flags & CPUF_GO) == 0)
 		__asm volatile("wfe");
 
+	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
+	__asm volatile("isb");
 	tcr = READ_SPECIALREG(tcr_el1);
 	tcr &= ~TCR_T0SZ(0x3f);
 	tcr |= TCR_T0SZ(64 - USER_SPACE_BITS);
 	tcr |= TCR_A1;
 	WRITE_SPECIALREG(tcr_el1, tcr);
+	cpu_tlb_flush();
 
 	/* Enable PAN. */
 	id_aa64mmfr1 = READ_SPECIALREG(id_aa64mmfr1_el1);
@@ -709,7 +860,7 @@ cpu_start_secondary(struct cpu_info *ci)
 	nanouptime(&ci->ci_schedstate.spc_runtime);
 
 	atomic_setbits_int(&ci->ci_flags, CPUF_RUNNING);
-	__asm volatile("dsb sy; sev");
+	__asm volatile("dsb sy; sev" ::: "memory");
 
 	spllower(IPL_NONE);
 
@@ -854,7 +1005,7 @@ cpu_opp_init(struct cpu_info *ci, uint32_t phandle)
 	cooling_device_register(cd);
 
 	/*
-	 * Do addional checks at mountroot when all the clocks and
+	 * Do additional checks at mountroot when all the clocks and
 	 * regulators are available.
 	 */
 	config_mountroot(ci->ci_dev, cpu_opp_mountroot);

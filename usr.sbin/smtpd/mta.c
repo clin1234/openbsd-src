@@ -1,4 +1,4 @@
-/*	$OpenBSD: mta.c,v 1.234 2019/12/21 10:34:07 gilles Exp $	*/
+/*	$OpenBSD: mta.c,v 1.240 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2008 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -19,29 +19,14 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-
-#include <ctype.h>
-#include <err.h>
-#include <errno.h>
-#include <event.h>
-#include <imsg.h>
 #include <inttypes.h>
-#include <netdb.h>
-#include <limits.h>
-#include <pwd.h>
-#include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
+#include <tls.h>
 
 #include "smtpd.h"
 #include "log.h"
+#include "ssl.h"
 
 #define MAXERROR_PER_ROUTE	4
 
@@ -57,6 +42,7 @@
 #define RELAY_ONHOLD		0x01
 #define RELAY_HOLDQ		0x02
 
+static void mta_setup_dispatcher(struct dispatcher *);
 static void mta_handle_envelope(struct envelope *, const char *);
 static void mta_query_smarthost(struct envelope *);
 static void mta_on_smarthost(struct envelope *, const char *);
@@ -137,6 +123,12 @@ void mta_unblock(struct mta_source *, char *);
 int mta_is_blocked(struct mta_source *, char *);
 static int mta_block_cmp(const struct mta_block *, const struct mta_block *);
 SPLAY_PROTOTYPE(mta_block_tree, mta_block, entry, mta_block_cmp);
+
+/*
+ * This function is not publicy exported because it is a hack until libtls
+ * has a proper privsep setup
+ */
+void tls_config_use_fake_private_key(struct tls_config *config);
 
 static struct mta_relay_tree		relays;
 static struct mta_domain_tree		domains;
@@ -457,12 +449,88 @@ mta_imsg(struct mproc *p, struct imsg *imsg)
 		return;
 	}
 
-	errx(1, "mta_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
+	fatalx("mta_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
 }
 
 void
 mta_postfork(void)
 {
+	struct dispatcher *dispatcher;
+	const char *key;
+	void *iter;
+
+	iter = NULL;
+	while (dict_iter(env->sc_dispatchers, &iter, &key, (void **)&dispatcher)) {
+		log_debug("%s: %s", __func__, key);
+		mta_setup_dispatcher(dispatcher);
+	}
+}
+
+static void
+mta_setup_dispatcher(struct dispatcher *dispatcher)
+{
+	struct dispatcher_remote *remote;
+	static const char *dheparams[] = { "none", "auto", "legacy" };
+	struct tls_config *config;
+	struct pki *pki;
+	struct ca *ca;
+	const char *ciphers;
+	uint32_t protos;
+
+	if (dispatcher->type != DISPATCHER_REMOTE)
+		return;
+
+	remote = &dispatcher->u.remote;
+
+	if ((config = tls_config_new()) == NULL)
+		fatal("smtpd: tls_config_new");
+
+	ciphers = env->sc_tls_ciphers;
+	if (remote->tls_ciphers)
+		ciphers = remote->tls_ciphers;
+	if (ciphers && tls_config_set_ciphers(config, ciphers) == -1)
+		fatal("%s", tls_config_error(config));
+
+	if (remote->tls_protocols) {
+		if (tls_config_parse_protocols(&protos,
+		    remote->tls_protocols) == -1)
+			fatal("failed to parse protocols \"%s\"",
+			    remote->tls_protocols);
+		if (tls_config_set_protocols(config, protos) == -1)
+			fatal("%s", tls_config_error(config));
+	}
+
+	if (remote->pki) {
+		pki = dict_get(env->sc_pki_dict, remote->pki);
+		if (pki == NULL)
+			fatal("client pki \"%s\" not found ", remote->pki);
+
+		tls_config_set_dheparams(config, dheparams[pki->pki_dhe]);
+		tls_config_use_fake_private_key(config);
+		if (tls_config_set_keypair_mem(config, pki->pki_cert,
+		    pki->pki_cert_len, NULL, 0) == -1)
+		fatal("tls_config_set_keypair_mem");
+	}
+
+	if (remote->ca) {
+		ca = dict_get(env->sc_ca_dict, remote->ca);
+		if (tls_config_set_ca_mem(config, ca->ca_cert, ca->ca_cert_len)
+		    == -1)
+			fatal("tls_config_set_ca_mem");
+	}
+	else if (tls_config_set_ca_file(config, tls_default_ca_cert_file())
+	    == -1)
+		fatal("tls_config_set_ca_file");
+
+	if (remote->tls_noverify) {
+		tls_config_insecure_noverifycert(config);
+		tls_config_insecure_noverifyname(config);
+		tls_config_insecure_noverifytime(config);
+	}
+	else
+		tls_config_verify(config);
+
+	remote->tls_config = config;
 }
 
 void
@@ -1464,7 +1532,7 @@ mta_flush(struct mta_relay *relay, int fail, const char *error)
 	    mta_relay_to_text(relay), fail, error);
 
 	if (fail != IMSG_MTA_DELIVERY_TEMPFAIL && fail != IMSG_MTA_DELIVERY_PERMFAIL)
-		errx(1, "unexpected delivery status %d", fail);
+		fatalx("unexpected delivery status %d", fail);
 
 	n = 0;
 	while ((task = TAILQ_FIRST(&relay->tasks))) {

@@ -18,7 +18,7 @@ our %args = (
 	nouser => 1,
 	loggrep => {
 	    qr/ -F / => 0,
-	    qr/ -d / => 1,
+	    qr/ -d / => '>=1',
 	    qr/\[priv\]: fork\+exec done/ => 1,
 	},
 	fstat => {
@@ -37,7 +37,7 @@ our %args = (
 	    qr/syslogd  CALL  setresuid(.*"_syslogd".*){3}/ => 1,
 	    qr/syslogd  CALL  setresgid(.*"_syslogd".*){3}/ => 1,
 	    qr/syslogd  CALL  setsid/ => 0,
-	    qr/syslogd  RET   execve 0/ => 2,
+	    qr/syslogd  RET   execve \d+/ => 2,
 	    qr/\[\d\] = "-P"/ => 1,
 	},
     },

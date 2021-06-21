@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysctl.c,v 1.252 2020/07/15 07:13:56 kettenis Exp $	*/
+/*	$OpenBSD: sysctl.c,v 1.257 2021/05/18 05:25:40 claudio Exp $	*/
 /*	$NetBSD: sysctl.c,v 1.9 1995/09/30 07:12:50 thorpej Exp $	*/
 
 /*
@@ -130,11 +130,12 @@ struct ctlname machdepname[] = CTL_MACHDEP_NAMES;
 #endif
 struct ctlname ddbname[] = CTL_DDB_NAMES;
 struct ctlname audioname[] = CTL_KERN_AUDIO_NAMES;
+struct ctlname videoname[] = CTL_KERN_VIDEO_NAMES;
 struct ctlname witnessname[] = CTL_KERN_WITNESS_NAMES;
 char names[BUFSIZ];
 int lastused;
 
-/* Maximum size object to expect from sysctl(3) */
+/* Maximum size object to expect from sysctl(2) */
 #define SYSCTL_BUFSIZ	8192
 
 struct list {
@@ -195,6 +196,7 @@ void usage(void);
 int findname(char *, char *, char **, struct list *);
 int sysctl_inet(char *, char **, int *, int, int *);
 int sysctl_inet6(char *, char **, int *, int, int *);
+int sysctl_unix(char *, char **, int *, int, int *);
 int sysctl_link(char *, char **, int *, int, int *);
 int sysctl_bpf(char *, char **, int *, int, int *);
 int sysctl_mpls(char *, char **, int *, int, int *);
@@ -219,6 +221,7 @@ void print_sensor(struct sensor *);
 int sysctl_chipset(char *, char **, int *, int, int *);
 #endif
 int sysctl_audio(char *, char **, int *, int, int *);
+int sysctl_video(char *, char **, int *, int, int *);
 int sysctl_witness(char *, char **, int *, int, int *);
 void vfsinit(void);
 
@@ -517,6 +520,11 @@ parse(char *string, int flags)
 			if (len < 0)
 				return;
 			break;
+		case KERN_VIDEO:
+			len = sysctl_video(string, &bufp, mib, flags, &type);
+			if (len < 0)
+				return;
+			break;
 		case KERN_WITNESS:
 			len = sysctl_witness(string, &bufp, mib, flags, &type);
 			if (len < 0)
@@ -666,6 +674,12 @@ parse(char *string, int flags)
 				    string);
 				return;
 			}
+			break;
+		}
+		if (mib[1] == PF_UNIX) {
+			len = sysctl_unix(string, &bufp, mib, flags, &type);
+			if (len < 0)
+				return;
 			break;
 		}
 		if (mib[1] == PF_LINK) {
@@ -825,12 +839,12 @@ parse(char *string, int flags)
 				    newval);
 				if (len == -1) {
 					warnx("%s: hex string %s: invalid",
-					    string, newval);
+					    string, (char *)newval);
 					return;
 				}
 				if (len > sizeof(hex)) {
 					warnx("%s: hex string %s: too long",
-					    string, newval);
+					    string, (char *)newval);
 					return;
 				}
 
@@ -909,8 +923,8 @@ parse(char *string, int flags)
 		if (!nflag)
 			(void)printf("%s%s", string, equ);
 		(void)printf(
-		    "tick = %d, tickadj = %d, hz = %d, profhz = %d, stathz = %d\n",
-		    clkp->tick, clkp->tickadj, clkp->hz, clkp->profhz, clkp->stathz);
+		    "tick = %d, hz = %d, profhz = %d, stathz = %d\n",
+		    clkp->tick, clkp->hz, clkp->profhz, clkp->stathz);
 		return;
 	}
 	if (special & BOOTTIME) {
@@ -1766,6 +1780,7 @@ struct list shmlist = { shmname, KERN_SHMINFO_MAXID };
 struct list watchdoglist = { watchdogname, KERN_WATCHDOG_MAXID };
 struct list tclist = { tcname, KERN_TIMECOUNTER_MAXID };
 struct list audiolist = { audioname, KERN_AUDIO_MAXID };
+struct list videolist = { videoname, KERN_VIDEO_MAXID };
 struct list witnesslist = { witnessname, KERN_WITNESS_MAXID };
 
 /*
@@ -2272,6 +2287,48 @@ sysctl_inet6(char *string, char **bufpp, int mib[], int flags, int *typep)
 		*typep = lp->list[tindx].ctl_type;
 		return(5);
 	}
+	return (4);
+}
+
+/* handle net.unix requests */
+struct ctlname netunixname[] = CTL_NET_UNIX_NAMES;
+struct ctlname netunixprotoname[] = CTL_NET_UNIX_PROTO_NAMES;
+struct list netunixlist = { netunixname, NET_UNIX_MAXID };
+struct list netunixvars[] = {
+	[SOCK_STREAM] = { netunixprotoname, NET_UNIX_PROTO_MAXID },
+	[SOCK_DGRAM] = { netunixprotoname, NET_UNIX_PROTO_MAXID },
+	[SOCK_SEQPACKET] = { netunixprotoname, NET_UNIX_PROTO_MAXID },
+	[NET_UNIX_MAXID] = { 0, 0 },
+};
+
+int
+sysctl_unix(char *string, char **bufpp, int mib[], int flags, int *typep)
+{
+	struct list *lp;
+	int indx;
+
+	if (*bufpp == NULL) {
+		listall(string, &netunixlist);
+		return (-1);
+	}
+	if ((indx = findname(string, "third", bufpp, &netunixlist)) == -1)
+		return (-1);
+	mib[2] = indx;
+	*typep = netunixname[indx].ctl_type;
+
+	if (indx < NET_UNIX_MAXID && netunixvars[indx].list != NULL)
+		lp = &netunixvars[indx];
+	else
+		return (3);
+
+	if (*bufpp == NULL) {
+		listall(string, lp);
+		return (-1);
+	}
+	if ((indx = findname(string, "fourth", bufpp, lp)) == -1)
+		return (-1);
+	mib[3] = indx;
+	*typep = lp->list[indx].ctl_type;
 	return (4);
 }
 
@@ -2813,6 +2870,25 @@ sysctl_audio(char *string, char **bufpp, int mib[], int flags, int *typep)
 		return (-1);
 	mib[2] = indx;
 	*typep = audiolist.list[indx].ctl_type;
+	return (3);
+}
+
+/*
+ * Handle video support
+ */
+int
+sysctl_video(char *string, char **bufpp, int mib[], int flags, int *typep)
+{
+	int indx;
+
+	if (*bufpp == NULL) {
+		listall(string, &videolist);
+		return (-1);
+	}
+	if ((indx = findname(string, "third", bufpp, &videolist)) == -1)
+		return (-1);
+	mib[2] = indx;
+	*typep = videolist.list[indx].ctl_type;
 	return (3);
 }
 

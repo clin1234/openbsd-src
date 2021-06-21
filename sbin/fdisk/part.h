@@ -1,4 +1,4 @@
-/*	$OpenBSD: part.h,v 1.21 2015/11/26 08:15:07 tim Exp $	*/
+/*	$OpenBSD: part.h,v 1.24 2021/06/21 02:05:30 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -20,16 +20,15 @@
 #define _PART_H
 
 struct prt {
-	u_int64_t bs;
-	u_int64_t ns;
-	u_int32_t shead, scyl, ssect;
-	u_int32_t ehead, ecyl, esect;
+	uint64_t bs;
+	uint64_t ns;
+	uint32_t shead, scyl, ssect;
+	uint32_t ehead, ecyl, esect;
 	unsigned char flag;
 	unsigned char id;
 };
 
 void	PRT_printall(void);
-const char *PRT_ascii_id(int);
 void PRT_parse(struct dos_partition *, off_t, off_t,
     struct prt *);
 void PRT_make(struct prt *, off_t, off_t, struct dos_partition *);
@@ -37,6 +36,7 @@ void PRT_print(int, struct prt *, char *);
 char *PRT_uuid_to_typename(struct uuid *);
 int PRT_uuid_to_type(struct uuid *);
 struct uuid *PRT_type_to_uuid(int);
+int PRT_protected_guid(struct uuid *);
 
 /* This does CHS -> bs/ns */
 void PRT_fix_BN(struct prt *, int);

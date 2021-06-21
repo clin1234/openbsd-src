@@ -1,4 +1,4 @@
-/* $OpenBSD: amptimer.c,v 1.9 2020/07/14 15:34:14 patrick Exp $ */
+/* $OpenBSD: amptimer.c,v 1.13 2021/05/16 03:39:27 jsg Exp $ */
 /*
  * Copyright (c) 2011 Dale Rahn <drahn@openbsd.org>
  *
@@ -17,12 +17,9 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/queue.h>
-#include <sys/malloc.h>
 #include <sys/device.h>
 #include <sys/kernel.h>
 #include <sys/timetc.h>
-#include <sys/evcount.h>
 
 #include <arm/cpufunc.h>
 #include <machine/bus.h>
@@ -67,7 +64,14 @@ int32_t amptimer_frequency = TIMER_FREQUENCY;
 u_int amptimer_get_timecount(struct timecounter *);
 
 static struct timecounter amptimer_timecounter = {
-	amptimer_get_timecount, NULL, 0xffffffff, 0, "amptimer", 0, NULL, 0
+	.tc_get_timecount = amptimer_get_timecount,
+	.tc_poll_pps = NULL,
+	.tc_counter_mask = 0xffffffff,
+	.tc_frequency = 0,
+	.tc_name = "amptimer",
+	.tc_quality = 0,
+	.tc_priv = NULL,
+	.tc_user = 0,
 };
 
 #define MAX_ARM_CPUS	8
@@ -169,7 +173,7 @@ amptimer_attach(struct device *parent, struct device *self, void *args)
 		panic("amptimer_attach: bus_space_map priv timer failed!");
 
 	sc->sc_ticks_per_second = amptimer_frequency;
-	printf(": tick rate %d KHz\n", sc->sc_ticks_per_second /1000);
+	printf(": %d kHz\n", sc->sc_ticks_per_second / 1000);
 
 	sc->sc_ioh = ioh;
 	sc->sc_pioh = pioh;
@@ -331,12 +335,12 @@ amptimer_set_clockrate(int32_t new_frequency)
 
 	sc->sc_ticks_per_second = amptimer_frequency;
 	amptimer_timecounter.tc_frequency = sc->sc_ticks_per_second;
-	printf("amptimer0: adjusting clock: new tick rate %d KHz\n",
-	    sc->sc_ticks_per_second /1000);
+	printf("amptimer0: adjusting clock: new rate %d kHz\n",
+	    sc->sc_ticks_per_second / 1000);
 }
 
 void
-amptimer_cpu_initclocks()
+amptimer_cpu_initclocks(void)
 {
 	struct amptimer_softc	*sc = amptimer_cd.cd_devs[0];
 	struct amptimer_pcpu_softc *pc = &sc->sc_pstat[CPU_INFO_UNIT(curcpu())];

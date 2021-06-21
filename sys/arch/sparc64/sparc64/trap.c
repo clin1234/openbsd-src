@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.107 2020/10/23 16:54:35 deraadt Exp $	*/
+/*	$OpenBSD: trap.c,v 1.109 2021/05/05 07:29:01 mpi Exp $	*/
 /*	$NetBSD: trap.c,v 1.73 2001/08/09 01:03:01 eeh Exp $ */
 
 /*
@@ -380,7 +380,7 @@ trap(struct trapframe64 *tf, unsigned type, vaddr_t pc, long tstate)
 #endif
 		/*
 		 * The kernel needs to use FPU registers for block
-		 * load/store.  If we trap in priviliged code, save
+		 * load/store.  If we trap in privileged code, save
 		 * the FPU state if there is any and enable the FPU.
 		 *
 		 * We rely on the kernel code properly enabling the FPU
@@ -773,10 +773,7 @@ data_access_fault(struct trapframe64 *tf, unsigned type, vaddr_t pc,
 		if (!(addr & TLB_TAG_ACCESS_CTX)) {
 			/* CTXT == NUCLEUS */
 
-			KERNEL_LOCK();
 			error = uvm_fault(kernel_map, va, 0, access_type);
-			KERNEL_UNLOCK();
-
 			if (error == 0)
 				return;
 			goto kfault;
@@ -792,9 +789,7 @@ data_access_fault(struct trapframe64 *tf, unsigned type, vaddr_t pc,
 
 	onfault = (vaddr_t)p->p_addr->u_pcb.pcb_onfault;
 	p->p_addr->u_pcb.pcb_onfault = NULL;
-	KERNEL_LOCK();
 	error = uvm_fault(&p->p_vmspace->vm_map, (vaddr_t)va, 0, access_type);
-	KERNEL_UNLOCK();
 	p->p_addr->u_pcb.pcb_onfault = (void *)onfault;
 
 	/*
@@ -903,7 +898,7 @@ data_access_error(struct trapframe64 *tf, unsigned type, vaddr_t afva,
 		}
 
 		/*
-		 * If this was a priviliged error but not a probe, we
+		 * If this was a privileged error but not a probe, we
 		 * cannot recover, so panic.
 		 */
 		if (afsr & ASFR_PRIV) {
@@ -959,9 +954,7 @@ text_access_fault(struct trapframe64 *tf, unsigned type, vaddr_t pc,
 	    uvm_map_inentry_sp, p->p_vmspace->vm_map.sserial))
 		goto out;
 
-	KERNEL_LOCK();
 	error = uvm_fault(&p->p_vmspace->vm_map, va, 0, access_type);
-	KERNEL_UNLOCK();
 
 	/*
 	 * If this was a stack access we keep track of the maximum
@@ -1055,9 +1048,7 @@ text_access_error(struct trapframe64 *tf, unsigned type, vaddr_t pc,
 	    uvm_map_inentry_sp, p->p_vmspace->vm_map.sserial))
 		goto out;
 
-	KERNEL_LOCK();
 	error = uvm_fault(&p->p_vmspace->vm_map, va, 0, access_type);
-	KERNEL_UNLOCK();
 
 	/*
 	 * If this was a stack access we keep track of the maximum

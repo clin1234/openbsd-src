@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.c,v 1.397 2020/10/29 21:15:27 denis Exp $	*/
+/*	$OpenBSD: route.c,v 1.399 2021/05/25 22:45:09 bluhm Exp $	*/
 /*	$NetBSD: route.c,v 1.14 1996/02/13 22:00:46 christos Exp $	*/
 
 /*
@@ -450,7 +450,7 @@ rt_setgwroute(struct rtentry *rt, u_int rtableid)
 		rt->rt_mtu = nhrt->rt_mtu;
 
 	/*
-	 * To avoid reference counting problems when writting link-layer
+	 * To avoid reference counting problems when writing link-layer
 	 * addresses in an outgoing packet, we ensure that the lifetime
 	 * of a cached entry is greater than the bigger lifetime of the
 	 * gateway entries it is pointed by.
@@ -1061,7 +1061,7 @@ rt_copysa(struct sockaddr *src, struct sockaddr *mask, struct sockaddr **dst)
 	static const u_char maskarray[] = {
 	    0x0, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe };
 	struct sockaddr *ndst;
-	struct domain *dp;
+	const struct domain *dp;
 	u_char *csrc, *cdst;
 	int i, plen;
 
@@ -1253,7 +1253,7 @@ rt_ifa_addlocal(struct ifaddr *ifa)
 }
 
 /*
- * Remove local rtentry of ifa's addresss if it exists.
+ * Remove local rtentry of ifa's address if it exists.
  */
 int
 rt_ifa_dellocal(struct ifaddr *ifa)

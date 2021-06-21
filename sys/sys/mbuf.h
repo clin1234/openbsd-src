@@ -1,4 +1,4 @@
-/*	$OpenBSD: mbuf.h,v 1.250 2020/08/08 19:53:02 florian Exp $	*/
+/*	$OpenBSD: mbuf.h,v 1.253 2021/05/15 08:07:20 yasuoka Exp $	*/
 /*	$NetBSD: mbuf.h,v 1.19 1996/02/09 18:25:14 christos Exp $	*/
 
 /*
@@ -312,7 +312,7 @@ struct mbuf {
 } while (/* CONSTCOND */ 0)
 
 #define MCLGET(m, how) (void) m_clget((m), (how), MCLBYTES)
-#define MCLGETI(m, how, ifp, l) m_clget((m), (how), (l))
+#define MCLGETL(m, how, l) m_clget((m), (how), (l))
 
 u_int mextfree_register(void (*)(caddr_t, u_int, void *));
 #define	MEXTFREE_POOL 0
@@ -435,7 +435,7 @@ int	m_copyback(struct mbuf *, int, int, const void *, int);
 struct mbuf *m_freem(struct mbuf *);
 void	m_purge(struct mbuf *);
 void	m_reclaim(void *, int);
-void	m_copydata(struct mbuf *, int, int, caddr_t);
+void	m_copydata(struct mbuf *, int, int, void *);
 void	m_cat(struct mbuf *, struct mbuf *);
 struct mbuf *m_devget(char *, int, int);
 int	m_apply(struct mbuf *, int, int,
@@ -469,6 +469,7 @@ struct m_tag *m_tag_next(struct mbuf *, struct m_tag *);
 /* Packet tag types */
 #define PACKET_TAG_IPSEC_IN_DONE	0x0001  /* IPsec applied, in */
 #define PACKET_TAG_IPSEC_OUT_DONE	0x0002  /* IPsec applied, out */
+#define PACKET_TAG_IPSEC_FLOWINFO	0x0004	/* IPsec flowinfo */
 #define PACKET_TAG_WIREGUARD		0x0040  /* WireGuard data */
 #define PACKET_TAG_GRE			0x0080  /* GRE processing done */
 #define PACKET_TAG_DLT			0x0100 /* data link layer type */
@@ -479,7 +480,7 @@ struct m_tag *m_tag_next(struct mbuf *, struct m_tag *);
 #define PACKET_TAG_CARP_BAL_IP		0x4000  /* carp(4) ip balanced marker */
 
 #define MTAG_BITS \
-    ("\20\1IPSEC_IN_DONE\2IPSEC_OUT_DONE\3IPSEC_IN_CRYPTO_DONE" \
+    ("\20\1IPSEC_IN_DONE\2IPSEC_OUT_DONE\3IPSEC_FLOWINFO" \
     "\4IPSEC_OUT_CRYPTO_NEEDED\5IPSEC_PENDING_TDB\6BRIDGE\7WG\10GRE\11DLT" \
     "\12PF_DIVERT\14PF_REASSEMBLED\15SRCROUTE\16TUNNEL\17CARP_BAL_IP")
 

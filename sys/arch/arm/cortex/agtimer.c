@@ -1,4 +1,4 @@
-/* $OpenBSD: agtimer.c,v 1.10 2020/07/12 20:36:37 naddy Exp $ */
+/* $OpenBSD: agtimer.c,v 1.14 2021/05/16 03:39:27 jsg Exp $ */
 /*
  * Copyright (c) 2011 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2013 Patrick Wildt <patrick@blueri.se>
@@ -18,19 +18,15 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/queue.h>
-#include <sys/malloc.h>
 #include <sys/device.h>
 #include <sys/kernel.h>
 #include <sys/timetc.h>
-#include <sys/evcount.h>
 
 #include <machine/intr.h>
 #include <machine/bus.h>
 #include <machine/fdt.h>
 
 #include <arm/cpufunc.h>
-#include <arm/cortex/cortex.h>
 
 #include <dev/ofw/fdt.h>
 #include <dev/ofw/openfirm.h>
@@ -46,7 +42,13 @@ int32_t agtimer_frequency = TIMER_FREQUENCY;
 u_int agtimer_get_timecount(struct timecounter *);
 
 static struct timecounter agtimer_timecounter = {
-	agtimer_get_timecount, NULL, 0xffffffff, 0, "agtimer", 0, NULL
+	.tc_get_timecount = agtimer_get_timecount,
+	.tc_poll_pps = NULL,
+	.tc_counter_mask = 0xffffffff,
+	.tc_frequency = 0,
+	.tc_name = "agtimer",
+	.tc_quality = 0,
+	.tc_priv = NULL,
 };
 
 struct agtimer_pcpu_softc {
@@ -154,7 +156,7 @@ agtimer_attach(struct device *parent, struct device *self, void *aux)
 	    OF_getpropint(sc->sc_node, "clock-frequency", agtimer_frequency);
 	sc->sc_ticks_per_second = agtimer_frequency;
 
-	printf(": tick rate %d KHz\n", sc->sc_ticks_per_second /1000);
+	printf(": %d kHz\n", sc->sc_ticks_per_second / 1000);
 
 	/* XXX: disable user access */
 
@@ -263,12 +265,12 @@ agtimer_set_clockrate(int32_t new_frequency)
 
 	sc->sc_ticks_per_second = agtimer_frequency;
 	agtimer_timecounter.tc_frequency = sc->sc_ticks_per_second;
-	printf("agtimer0: adjusting clock: new tick rate %d KHz\n",
-	    sc->sc_ticks_per_second /1000);
+	printf("agtimer0: adjusting clock: new rate %d kHz\n",
+	    sc->sc_ticks_per_second / 1000);
 }
 
 void
-agtimer_cpu_initclocks()
+agtimer_cpu_initclocks(void)
 {
 	struct agtimer_softc	*sc = agtimer_cd.cd_devs[0];
 	struct agtimer_pcpu_softc *pc = &sc->sc_pstat[CPU_INFO_UNIT(curcpu())];

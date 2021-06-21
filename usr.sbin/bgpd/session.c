@@ -1,4 +1,4 @@
-/*	$OpenBSD: session.c,v 1.405 2020/11/05 14:44:59 claudio Exp $ */
+/*	$OpenBSD: session.c,v 1.421 2021/06/17 16:05:26 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004, 2005 Henning Brauer <henning@openbsd.org>
@@ -68,7 +68,7 @@ void	session_tcp_established(struct peer *);
 void	session_capa_ann_none(struct peer *);
 int	session_capa_add(struct ibuf *, u_int8_t, u_int8_t);
 int	session_capa_add_mp(struct ibuf *, u_int8_t);
-int	session_capa_add_gr(struct peer *, struct ibuf *, u_int8_t);
+int	session_capa_add_afi(struct peer *, struct ibuf *, u_int8_t, u_int8_t);
 struct bgp_msg	*session_newmsg(enum msg_type, u_int16_t);
 int	session_sendmsg(struct bgp_msg *, struct peer *);
 void	session_open(struct peer *);
@@ -76,7 +76,7 @@ void	session_keepalive(struct peer *);
 void	session_update(u_int32_t, void *, size_t);
 void	session_notification(struct peer *, u_int8_t, u_int8_t, void *,
 	    ssize_t);
-void	session_rrefresh(struct peer *, u_int8_t);
+void	session_rrefresh(struct peer *, u_int8_t, u_int8_t);
 int	session_graceful_restart(struct peer *);
 int	session_graceful_stop(struct peer *);
 int	session_dispatch_msg(struct pollfd *, struct peer *);
@@ -84,7 +84,7 @@ void	session_process_msg(struct peer *);
 int	parse_header(struct peer *, u_char *, u_int16_t *, u_int8_t *);
 int	parse_open(struct peer *);
 int	parse_update(struct peer *);
-int	parse_refresh(struct peer *);
+int	parse_rrefresh(struct peer *);
 int	parse_notification(struct peer *);
 int	parse_capabilities(struct peer *, u_char *, u_int16_t, u_int32_t *);
 int	capa_neg_calc(struct peer *);
@@ -263,7 +263,8 @@ session_main(int debug, int verbose)
 				if (p->reconf_action == RECONF_REINIT) {
 					session_stop(p, ERR_CEASE_ADMIN_RESET);
 					if (!p->conf.down)
-						timer_set(p, Timer_IdleHold, 0);
+						timer_set(&p->timers,
+						    Timer_IdleHold, 0);
 				}
 
 				/* deletion due? */
@@ -272,7 +273,7 @@ session_main(int debug, int verbose)
 						session_demote(p, -1);
 					p->conf.demote_group[0] = 0;
 					session_stop(p, ERR_CEASE_PEER_UNCONF);
-					timer_remove_all(p);
+					timer_remove_all(&p->timers);
 					tcp_md5_del_listener(conf, p);
 					log_peer_warnx(&p->conf, "removed");
 					RB_REMOVE(peer_head, &conf->peers, p);
@@ -366,13 +367,16 @@ session_main(int debug, int verbose)
 		now = getmonotime();
 		RB_FOREACH(p, peer_head, &conf->peers) {
 			time_t	nextaction;
-			struct peer_timer *pt;
+			struct timer *pt;
 
 			/* check timers */
-			if ((pt = timer_nextisdue(p, now)) != NULL) {
+			if ((pt = timer_nextisdue(&p->timers, now)) != NULL) {
 				switch (pt->type) {
 				case Timer_Hold:
 					bgp_fsm(p, EVNT_TIMER_HOLDTIME);
+					break;
+				case Timer_SendHold:
+					bgp_fsm(p, EVNT_TIMER_SENDHOLD);
 					break;
 				case Timer_ConnectRetry:
 					bgp_fsm(p, EVNT_TIMER_CONNRETRY);
@@ -387,24 +391,27 @@ session_main(int debug, int verbose)
 					p->IdleHoldTime =
 					    INTERVAL_IDLE_HOLD_INITIAL;
 					p->errcnt = 0;
-					timer_stop(p, Timer_IdleHoldReset);
+					timer_stop(&p->timers,
+					    Timer_IdleHoldReset);
 					break;
 				case Timer_CarpUndemote:
-					timer_stop(p, Timer_CarpUndemote);
+					timer_stop(&p->timers,
+					    Timer_CarpUndemote);
 					if (p->demoted &&
 					    p->state == STATE_ESTABLISHED)
 						session_demote(p, -1);
 					break;
 				case Timer_RestartTimeout:
-					timer_stop(p, Timer_RestartTimeout);
+					timer_stop(&p->timers,
+					    Timer_RestartTimeout);
 					session_graceful_stop(p);
 					break;
 				default:
 					fatalx("King Bula lost in time");
 				}
 			}
-			if ((nextaction = timer_nextduein(p, now)) != -1 &&
-			    nextaction < timeout)
+			if ((nextaction = timer_nextduein(&p->timers,
+			    now)) != -1 && nextaction < timeout)
 				timeout = nextaction;
 
 			/* are we waiting for a write? */
@@ -515,7 +522,7 @@ session_main(int debug, int verbose)
 		    "bgpd shutting down",
 		    sizeof(p->conf.reason));
 		session_stop(p, ERR_CEASE_ADMIN_DOWN);
-		timer_remove_all(p);
+		timer_remove_all(&p->timers);
 		free(p);
 	}
 
@@ -569,9 +576,9 @@ init_peer(struct peer *p)
 
 	change_state(p, STATE_IDLE, EVNT_NONE);
 	if (p->conf.down)
-		timer_stop(p, Timer_IdleHold);		/* no autostart */
+		timer_stop(&p->timers, Timer_IdleHold); /* no autostart */
 	else
-		timer_set(p, Timer_IdleHold, 0);	/* start ASAP */
+		timer_set(&p->timers, Timer_IdleHold, 0); /* start ASAP */
 
 	/*
 	 * on startup, demote if requested.
@@ -592,9 +599,10 @@ bgp_fsm(struct peer *peer, enum session_events event)
 	case STATE_IDLE:
 		switch (event) {
 		case EVNT_START:
-			timer_stop(peer, Timer_Hold);
-			timer_stop(peer, Timer_Keepalive);
-			timer_stop(peer, Timer_IdleHold);
+			timer_stop(&peer->timers, Timer_Hold);
+			timer_stop(&peer->timers, Timer_SendHold);
+			timer_stop(&peer->timers, Timer_Keepalive);
+			timer_stop(&peer->timers, Timer_IdleHold);
 
 			/* allocate read buffer */
 			peer->rbuf = calloc(1, sizeof(struct ibuf_read));
@@ -610,14 +618,14 @@ bgp_fsm(struct peer *peer, enum session_events event)
 			peer->stats.last_rcvd_suberr = 0;
 
 			if (!peer->depend_ok)
-				timer_stop(peer, Timer_ConnectRetry);
+				timer_stop(&peer->timers, Timer_ConnectRetry);
 			else if (peer->passive || peer->conf.passive ||
 			    peer->conf.template) {
 				change_state(peer, STATE_ACTIVE, event);
-				timer_stop(peer, Timer_ConnectRetry);
+				timer_stop(&peer->timers, Timer_ConnectRetry);
 			} else {
 				change_state(peer, STATE_CONNECT, event);
-				timer_set(peer, Timer_ConnectRetry,
+				timer_set(&peer->timers, Timer_ConnectRetry,
 				    conf->connectretry);
 				session_connect(peer);
 			}
@@ -636,19 +644,19 @@ bgp_fsm(struct peer *peer, enum session_events event)
 		case EVNT_CON_OPEN:
 			session_tcp_established(peer);
 			session_open(peer);
-			timer_stop(peer, Timer_ConnectRetry);
+			timer_stop(&peer->timers, Timer_ConnectRetry);
 			peer->holdtime = INTERVAL_HOLD_INITIAL;
 			start_timer_holdtime(peer);
 			change_state(peer, STATE_OPENSENT, event);
 			break;
 		case EVNT_CON_OPENFAIL:
-			timer_set(peer, Timer_ConnectRetry,
+			timer_set(&peer->timers, Timer_ConnectRetry,
 			    conf->connectretry);
 			session_close_connection(peer);
 			change_state(peer, STATE_ACTIVE, event);
 			break;
 		case EVNT_TIMER_CONNRETRY:
-			timer_set(peer, Timer_ConnectRetry,
+			timer_set(&peer->timers, Timer_ConnectRetry,
 			    conf->connectretry);
 			session_connect(peer);
 			break;
@@ -665,19 +673,19 @@ bgp_fsm(struct peer *peer, enum session_events event)
 		case EVNT_CON_OPEN:
 			session_tcp_established(peer);
 			session_open(peer);
-			timer_stop(peer, Timer_ConnectRetry);
+			timer_stop(&peer->timers, Timer_ConnectRetry);
 			peer->holdtime = INTERVAL_HOLD_INITIAL;
 			start_timer_holdtime(peer);
 			change_state(peer, STATE_OPENSENT, event);
 			break;
 		case EVNT_CON_OPENFAIL:
-			timer_set(peer, Timer_ConnectRetry,
+			timer_set(&peer->timers, Timer_ConnectRetry,
 			    conf->connectretry);
 			session_close_connection(peer);
 			change_state(peer, STATE_ACTIVE, event);
 			break;
 		case EVNT_TIMER_CONNRETRY:
-			timer_set(peer, Timer_ConnectRetry,
+			timer_set(&peer->timers, Timer_ConnectRetry,
 			    peer->holdtime);
 			change_state(peer, STATE_CONNECT, event);
 			session_connect(peer);
@@ -697,7 +705,7 @@ bgp_fsm(struct peer *peer, enum session_events event)
 			break;
 		case EVNT_CON_CLOSED:
 			session_close_connection(peer);
-			timer_set(peer, Timer_ConnectRetry,
+			timer_set(&peer->timers, Timer_ConnectRetry,
 			    conf->connectretry);
 			change_state(peer, STATE_ACTIVE, event);
 			break;
@@ -705,6 +713,7 @@ bgp_fsm(struct peer *peer, enum session_events event)
 			change_state(peer, STATE_IDLE, event);
 			break;
 		case EVNT_TIMER_HOLDTIME:
+		case EVNT_TIMER_SENDHOLD:
 			session_notification(peer, ERR_HOLDTIMEREXPIRED,
 			    0, NULL, 0);
 			change_state(peer, STATE_IDLE, event);
@@ -720,7 +729,7 @@ bgp_fsm(struct peer *peer, enum session_events event)
 			if (parse_notification(peer)) {
 				change_state(peer, STATE_IDLE, event);
 				/* don't punish, capa negotiation */
-				timer_set(peer, Timer_IdleHold, 0);
+				timer_set(&peer->timers, Timer_IdleHold, 0);
 				peer->IdleHoldTime /= 2;
 			} else
 				change_state(peer, STATE_IDLE, event);
@@ -745,6 +754,7 @@ bgp_fsm(struct peer *peer, enum session_events event)
 			change_state(peer, STATE_IDLE, event);
 			break;
 		case EVNT_TIMER_HOLDTIME:
+		case EVNT_TIMER_SENDHOLD:
 			session_notification(peer, ERR_HOLDTIMEREXPIRED,
 			    0, NULL, 0);
 			change_state(peer, STATE_IDLE, event);
@@ -780,6 +790,7 @@ bgp_fsm(struct peer *peer, enum session_events event)
 			change_state(peer, STATE_IDLE, event);
 			break;
 		case EVNT_TIMER_HOLDTIME:
+		case EVNT_TIMER_SENDHOLD:
 			session_notification(peer, ERR_HOLDTIMEREXPIRED,
 			    0, NULL, 0);
 			change_state(peer, STATE_IDLE, event);
@@ -815,18 +826,18 @@ void
 start_timer_holdtime(struct peer *peer)
 {
 	if (peer->holdtime > 0)
-		timer_set(peer, Timer_Hold, peer->holdtime);
+		timer_set(&peer->timers, Timer_Hold, peer->holdtime);
 	else
-		timer_stop(peer, Timer_Hold);
+		timer_stop(&peer->timers, Timer_Hold);
 }
 
 void
 start_timer_keepalive(struct peer *peer)
 {
 	if (peer->holdtime > 0)
-		timer_set(peer, Timer_Keepalive, peer->holdtime / 3);
+		timer_set(&peer->timers, Timer_Keepalive, peer->holdtime / 3);
 	else
-		timer_stop(peer, Timer_Keepalive);
+		timer_stop(&peer->timers, Timer_Keepalive);
 }
 
 void
@@ -868,11 +879,12 @@ change_state(struct peer *peer, enum session_state state,
 		if (peer->IdleHoldTime == 0)
 			peer->IdleHoldTime = INTERVAL_IDLE_HOLD_INITIAL;
 		peer->holdtime = INTERVAL_HOLD_INITIAL;
-		timer_stop(peer, Timer_ConnectRetry);
-		timer_stop(peer, Timer_Keepalive);
-		timer_stop(peer, Timer_Hold);
-		timer_stop(peer, Timer_IdleHold);
-		timer_stop(peer, Timer_IdleHoldReset);
+		timer_stop(&peer->timers, Timer_ConnectRetry);
+		timer_stop(&peer->timers, Timer_Keepalive);
+		timer_stop(&peer->timers, Timer_Hold);
+		timer_stop(&peer->timers, Timer_SendHold);
+		timer_stop(&peer->timers, Timer_IdleHold);
+		timer_stop(&peer->timers, Timer_IdleHoldReset);
 		session_close_connection(peer);
 		msgbuf_clear(&peer->wbuf);
 		free(peer->rbuf);
@@ -884,7 +896,8 @@ change_state(struct peer *peer, enum session_state state,
 			    peer->conf.id, 0, -1, NULL, 0);
 
 		if (event != EVNT_STOP) {
-			timer_set(peer, Timer_IdleHold, peer->IdleHoldTime);
+			timer_set(&peer->timers, Timer_IdleHold,
+			    peer->IdleHoldTime);
 			if (event != EVNT_NONE &&
 			    peer->IdleHoldTime < MAX_IDLE_HOLD/2)
 				peer->IdleHoldTime *= 2;
@@ -894,7 +907,7 @@ change_state(struct peer *peer, enum session_state state,
 			    (event == EVNT_CON_CLOSED ||
 			    event == EVNT_CON_FATAL)) {
 				/* don't punish graceful restart */
-				timer_set(peer, Timer_IdleHold, 0);
+				timer_set(&peer->timers, Timer_IdleHold, 0);
 				peer->IdleHoldTime /= 2;
 				session_graceful_restart(peer);
 			} else
@@ -915,11 +928,12 @@ change_state(struct peer *peer, enum session_state state,
 			/* do the graceful restart dance */
 			session_graceful_restart(peer);
 			peer->holdtime = INTERVAL_HOLD_INITIAL;
-			timer_stop(peer, Timer_ConnectRetry);
-			timer_stop(peer, Timer_Keepalive);
-			timer_stop(peer, Timer_Hold);
-			timer_stop(peer, Timer_IdleHold);
-			timer_stop(peer, Timer_IdleHoldReset);
+			timer_stop(&peer->timers, Timer_ConnectRetry);
+			timer_stop(&peer->timers, Timer_Keepalive);
+			timer_stop(&peer->timers, Timer_Hold);
+			timer_stop(&peer->timers, Timer_SendHold);
+			timer_stop(&peer->timers, Timer_IdleHold);
+			timer_stop(&peer->timers, Timer_IdleHoldReset);
 			session_close_connection(peer);
 			msgbuf_clear(&peer->wbuf);
 			bzero(&peer->capa.peer, sizeof(peer->capa.peer));
@@ -935,9 +949,10 @@ change_state(struct peer *peer, enum session_state state,
 	case STATE_OPENCONFIRM:
 		break;
 	case STATE_ESTABLISHED:
-		timer_set(peer, Timer_IdleHoldReset, peer->IdleHoldTime);
+		timer_set(&peer->timers, Timer_IdleHoldReset,
+		    peer->IdleHoldTime);
 		if (peer->demoted)
-			timer_set(peer, Timer_CarpUndemote,
+			timer_set(&peer->timers, Timer_CarpUndemote,
 			    INTERVAL_HOLD_DEMOTED);
 		session_up(peer);
 		break;
@@ -981,7 +996,7 @@ session_accept(int listenfd)
 	p = getpeerbyip(conf, (struct sockaddr *)&cliaddr);
 
 	if (p != NULL && p->state == STATE_IDLE && p->errcnt < 2) {
-		if (timer_running(p, Timer_IdleHold, NULL)) {
+		if (timer_running(&p->timers, Timer_IdleHold, NULL)) {
 			/* fast reconnect after clear */
 			p->passive = 1;
 			bgp_fsm(p, EVNT_START);
@@ -1071,7 +1086,7 @@ session_connect(struct peer *peer)
 		bind_addr = &peer->conf.local_addr_v6;
 		break;
 	}
-	if (bind_addr && (sa = addr2sa(bind_addr, 0, &sa_len)) != NULL) {
+	if ((sa = addr2sa(bind_addr, 0, &sa_len)) != NULL) {
 		if (bind(peer->fd, sa, sa_len) == -1) {
 			log_peer_warn(&peer->conf, "session_connect bind");
 			bgp_fsm(peer, EVNT_CON_OPENFAIL);
@@ -1217,7 +1232,8 @@ get_alternate_addr(struct sockaddr *sa, struct bgpd_addr *alt)
 		fatal("getifaddrs");
 
 	for (match = ifap; match != NULL; match = match->ifa_next)
-		if (sa_cmp(sa, match->ifa_addr) == 0)
+		if (match->ifa_addr != NULL &&
+		    sa_cmp(sa, match->ifa_addr) == 0)
 			break;
 
 	if (match == NULL) {
@@ -1228,7 +1244,8 @@ get_alternate_addr(struct sockaddr *sa, struct bgpd_addr *alt)
 	switch (sa->sa_family) {
 	case AF_INET6:
 		for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
-			if (ifa->ifa_addr->sa_family == AF_INET &&
+			if (ifa->ifa_addr != NULL &&
+			    ifa->ifa_addr->sa_family == AF_INET &&
 			    strcmp(ifa->ifa_name, match->ifa_name) == 0) {
 				sa2addr(ifa->ifa_addr, alt, NULL);
 				break;
@@ -1237,10 +1254,12 @@ get_alternate_addr(struct sockaddr *sa, struct bgpd_addr *alt)
 		break;
 	case AF_INET:
 		for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
-			struct sockaddr_in6 *s =
-			    (struct sockaddr_in6 *)ifa->ifa_addr;
-			if (ifa->ifa_addr->sa_family == AF_INET6 &&
+			if (ifa->ifa_addr != NULL &&
+			    ifa->ifa_addr->sa_family == AF_INET6 &&
 			    strcmp(ifa->ifa_name, match->ifa_name) == 0) {
+				struct sockaddr_in6 *s =
+				    (struct sockaddr_in6 *)ifa->ifa_addr;
+
 				/* only accept global scope addresses */
 				if (IN6_IS_ADDR_LINKLOCAL(&s->sin6_addr) ||
 				    IN6_IS_ADDR_SITELOCAL(&s->sin6_addr))
@@ -1310,20 +1329,17 @@ session_capa_add_mp(struct ibuf *buf, u_int8_t aid)
 }
 
 int
-session_capa_add_gr(struct peer *p, struct ibuf *b, u_int8_t aid)
+session_capa_add_afi(struct peer *p, struct ibuf *b, u_int8_t aid,
+    u_int8_t flags)
 {
 	u_int		errs = 0;
 	u_int16_t	afi;
-	u_int8_t	flags, safi;
+	u_int8_t	safi;
 
 	if (aid2afi(aid, &afi, &safi)) {
-		log_warn("session_capa_add_gr: bad AID");
+		log_warn("session_capa_add_afi: bad AID");
 		return (1);
 	}
-	if (p->capa.neg.grestart.flags[aid] & CAPA_GR_RESTARTING)
-		flags = CAPA_GR_F_FLAG;
-	else
-		flags = 0;
 
 	afi = htons(afi);
 	errs += ibuf_add(b, &afi, sizeof(afi));
@@ -1424,44 +1440,23 @@ session_open(struct peer *p)
 	/* graceful restart and End-of-RIB marker, RFC 4724 */
 	if (p->capa.ann.grestart.restart) {
 		int		rst = 0;
-		u_int16_t	hdr;
-		u_int8_t	grlen;
+		u_int16_t	hdr = 0;
 
-		if (mpcapa) {
-			grlen = 2 + 4 * mpcapa;
-			for (i = 0; i < AID_MAX; i++) {
-				if (p->capa.neg.grestart.flags[i] &
-				    CAPA_GR_RESTARTING)
-					rst++;
-			}
-		} else {	/* AID_INET */
-			grlen = 2 + 4;
-			if (p->capa.neg.grestart.flags[AID_INET] &
-			    CAPA_GR_RESTARTING)
+		for (i = 0; i < AID_MAX; i++) {
+			if (p->capa.neg.grestart.flags[i] & CAPA_GR_RESTARTING)
 				rst++;
 		}
 
-		hdr = conf->holdtime;		/* default timeout */
-		/* if client does graceful restart don't set R flag */
+		/* Only set the R-flag if no graceful restart is ongoing */
 		if (!rst)
 			hdr |= CAPA_GR_R_FLAG;
 		hdr = htons(hdr);
 
-		errs += session_capa_add(opb, CAPA_RESTART, grlen);
+		errs += session_capa_add(opb, CAPA_RESTART, sizeof(hdr));
 		errs += ibuf_add(opb, &hdr, sizeof(hdr));
-
-		if (mpcapa) {
-			for (i = 0; i < AID_MAX; i++) {
-				if (p->capa.ann.mp[i]) {
-					errs += session_capa_add_gr(p, opb, i);
-				}
-			}
-		} else {	/* AID_INET */
-			errs += session_capa_add_gr(p, opb, AID_INET);
-		}
 	}
 
-	/* 4-bytes AS numbers, draft-ietf-idr-as4bytes-13 */
+	/* 4-bytes AS numbers, RFC6793 */
 	if (p->capa.ann.as4byte) {	/* 4 bytes data */
 		u_int32_t	nas;
 
@@ -1469,6 +1464,32 @@ session_open(struct peer *p)
 		errs += session_capa_add(opb, CAPA_AS4BYTE, sizeof(nas));
 		errs += ibuf_add(opb, &nas, sizeof(nas));
 	}
+
+	/* advertisement of multiple paths, RFC7911 */
+	if (p->capa.ann.add_path[0]) {	/* variable */
+		u_int8_t	aplen;
+
+		if (mpcapa)
+			aplen = 2 + 4 * mpcapa;
+		else	/* AID_INET */
+			aplen = 2 + 4;
+		errs += session_capa_add(opb, CAPA_ADD_PATH, aplen);
+		if (mpcapa) {
+			for (i = AID_MIN; i < AID_MAX; i++) {
+				if (p->capa.ann.mp[i]) {
+					errs += session_capa_add_afi(p, opb,
+					    i, p->capa.ann.add_path[i]);
+				}
+			}
+		} else {	/* AID_INET */
+			errs += session_capa_add_afi(p, opb, AID_INET,
+			    p->capa.ann.add_path[AID_INET]);
+		}
+	}
+
+	/* enhanced route-refresh, RFC7313 */
+	if (p->capa.ann.enhanced_rr)	/* no data */
+		errs += session_capa_add(opb, CAPA_ENHANCED_RR, 0);
 
 	if (ibuf_size(opb))
 		optparamlen = ibuf_size(opb) + sizeof(op_type) +
@@ -1583,6 +1604,13 @@ session_notification(struct peer *p, u_int8_t errcode, u_int8_t subcode,
 
 	log_notification(p, errcode, subcode, data, datalen, "sending");
 
+	/* cap to maximum size */
+	if (datalen > MAX_PKTSIZE - MSGSIZE_NOTIFICATION_MIN) {
+		log_peer_warnx(&p->conf,
+		    "oversized notification, data trunkated");
+		datalen = MAX_PKTSIZE - MSGSIZE_NOTIFICATION_MIN;
+	}
+
 	if ((buf = session_newmsg(NOTIFICATION,
 	    MSGSIZE_NOTIFICATION_MIN + datalen)) == NULL) {
 		bgp_fsm(p, EVNT_CON_FATAL);
@@ -1617,24 +1645,42 @@ session_neighbor_rrefresh(struct peer *p)
 {
 	u_int8_t	i;
 
-	if (!p->capa.peer.refresh)
+	if (!(p->capa.neg.refresh || p->capa.neg.enhanced_rr))
 		return (-1);
 
 	for (i = 0; i < AID_MAX; i++) {
-		if (p->capa.peer.mp[i] != 0)
-			session_rrefresh(p, i);
+		if (p->capa.neg.mp[i] != 0)
+			session_rrefresh(p, i, ROUTE_REFRESH_REQUEST);
 	}
 
 	return (0);
 }
 
 void
-session_rrefresh(struct peer *p, u_int8_t aid)
+session_rrefresh(struct peer *p, u_int8_t aid, u_int8_t subtype)
 {
 	struct bgp_msg		*buf;
 	int			 errs = 0;
 	u_int16_t		 afi;
-	u_int8_t		 safi, null8 = 0;
+	u_int8_t		 safi;
+
+	switch (subtype) {
+	case ROUTE_REFRESH_REQUEST:
+		p->stats.refresh_sent_req++;
+		break;
+	case ROUTE_REFRESH_BEGIN_RR:
+	case ROUTE_REFRESH_END_RR:
+		/* requires enhanced route refresh */
+		if (!p->capa.neg.enhanced_rr)
+			return;
+		if (subtype == ROUTE_REFRESH_BEGIN_RR)
+			p->stats.refresh_sent_borr++;
+		else
+			p->stats.refresh_sent_eorr++;
+		break;
+	default:
+		fatalx("session_rrefresh: bad subtype %d", subtype);
+	}
 
 	if (aid2afi(aid, &afi, &safi) == -1)
 		fatalx("session_rrefresh: bad afi/safi pair");
@@ -1646,7 +1692,7 @@ session_rrefresh(struct peer *p, u_int8_t aid)
 
 	afi = htons(afi);
 	errs += ibuf_add(buf->buf, &afi, sizeof(afi));
-	errs += ibuf_add(buf->buf, &null8, sizeof(null8));
+	errs += ibuf_add(buf->buf, &subtype, sizeof(subtype));
 	errs += ibuf_add(buf->buf, &safi, sizeof(safi));
 
 	if (errs) {
@@ -1669,7 +1715,8 @@ session_graceful_restart(struct peer *p)
 {
 	u_int8_t	i;
 
-	timer_set(p, Timer_RestartTimeout, p->capa.neg.grestart.timeout);
+	timer_set(&p->timers, Timer_RestartTimeout,
+	    p->capa.neg.grestart.timeout);
 
 	for (i = 0; i < AID_MAX; i++) {
 		if (p->capa.neg.grestart.flags[i] & CAPA_GR_PRESENT) {
@@ -1773,6 +1820,10 @@ session_dispatch_msg(struct pollfd *pfd, struct peer *p)
 			return (1);
 		}
 		p->stats.last_write = getmonotime();
+		if (p->holdtime > 0)
+			timer_set(&p->timers, Timer_SendHold,
+			    p->holdtime < INTERVAL_HOLD ? INTERVAL_HOLD :
+			    p->holdtime);
 		if (p->throttled && p->wbuf.queued < SESS_MSG_LOW_MARK) {
 			if (imsg_rde(IMSG_XON, p->conf.id, NULL, 0) == -1)
 				log_peer_warn(&p->conf, "imsg_compose XON");
@@ -1862,7 +1913,7 @@ session_process_msg(struct peer *p)
 			p->stats.msg_rcvd_keepalive++;
 			break;
 		case RREFRESH:
-			parse_refresh(p);
+			parse_rrefresh(p);
 			p->stats.msg_rcvd_rrefresh++;
 			break;
 		default:	/* cannot happen */
@@ -1963,7 +2014,7 @@ parse_header(struct peer *peer, u_char *data, u_int16_t *len, u_int8_t *type)
 		}
 		break;
 	case RREFRESH:
-		if (*len != MSGSIZE_RREFRESH) {
+		if (*len < MSGSIZE_RREFRESH_MIN) {
 			log_peer_warnx(&peer->conf,
 			    "received RREFRESH: illegal len: %u byte", *len);
 			session_notification(peer, ERR_HEADER, ERR_HDR_LEN,
@@ -2131,7 +2182,8 @@ parse_open(struct peer *peer)
 			session_notification(peer, ERR_OPEN, ERR_OPEN_OPT,
 				NULL, 0);
 			change_state(peer, STATE_IDLE, EVNT_RCVD_OPEN);
-			timer_set(peer, Timer_IdleHold, 0);	/* no punish */
+			/* no punish */
+			timer_set(&peer->timers, Timer_IdleHold, 0);
 			peer->IdleHoldTime /= 2;
 			return (-1);
 		}
@@ -2150,6 +2202,16 @@ parse_open(struct peer *peer)
 		log_peer_warnx(&peer->conf, "peer sent wrong AS %s",
 		    log_as(as));
 		session_notification(peer, ERR_OPEN, ERR_OPEN_AS, NULL, 0);
+		change_state(peer, STATE_IDLE, EVNT_RCVD_OPEN);
+		return (-1);
+	}
+
+	/* on iBGP sessions check for bgpid collision */
+	if (!peer->conf.ebgp && peer->remote_bgpid == conf->bgpid) {
+		log_peer_warnx(&peer->conf, "peer BGPID %u conflicts with ours",
+		    ntohl(bgpid));
+		session_notification(peer, ERR_OPEN, ERR_OPEN_BGPID,
+		    NULL, 0);
 		change_state(peer, STATE_IDLE, EVNT_RCVD_OPEN);
 		return (-1);
 	}
@@ -2192,11 +2254,17 @@ parse_update(struct peer *peer)
 }
 
 int
-parse_refresh(struct peer *peer)
+parse_rrefresh(struct peer *peer)
 {
-	u_char		*p;
-	u_int16_t	 afi;
-	u_int8_t	 aid, safi;
+	struct route_refresh rr;
+	u_int16_t afi, datalen;
+	u_int8_t aid, safi, subtype;
+	u_char *p;
+
+	p = peer->rbuf->rptr;
+	p += MSGSIZE_HEADER_MARKER;
+	memcpy(&datalen, p, sizeof(datalen));
+	datalen = ntohs(datalen);
 
 	p = peer->rbuf->rptr;
 	p += MSGSIZE_HEADER;	/* header is already checked */
@@ -2210,10 +2278,59 @@ parse_refresh(struct peer *peer)
 	memcpy(&afi, p, sizeof(afi));
 	afi = ntohs(afi);
 	p += 2;
-	/* reserved, 1 byte */
+	/* subtype, 1 byte */
+	subtype = *p;
 	p += 1;
 	/* safi, 1 byte */
-	memcpy(&safi, p, sizeof(safi));
+	safi = *p;
+
+	/* check subtype if peer announced enhanced route refresh */
+	if (peer->capa.neg.enhanced_rr) {
+		switch (subtype) {
+		case ROUTE_REFRESH_REQUEST:
+			/* no ORF support, so no oversized RREFRESH msgs */
+			if (datalen != MSGSIZE_RREFRESH) {
+				log_peer_warnx(&peer->conf,
+				    "received RREFRESH: illegal len: %u byte",
+				    datalen);
+				datalen = htons(datalen);
+				session_notification(peer, ERR_HEADER,
+				    ERR_HDR_LEN, &datalen, sizeof(datalen));
+				bgp_fsm(peer, EVNT_CON_FATAL);
+				return (-1);
+			}
+			peer->stats.refresh_rcvd_req++;
+			break;
+		case ROUTE_REFRESH_BEGIN_RR:
+		case ROUTE_REFRESH_END_RR:
+			/* special handling for RFC7313 */
+			if (datalen != MSGSIZE_RREFRESH) {
+				log_peer_warnx(&peer->conf,
+				    "received RREFRESH: illegal len: %u byte",
+				    datalen);
+				p = peer->rbuf->rptr;
+				p += MSGSIZE_HEADER;
+				datalen -= MSGSIZE_HEADER;
+				session_notification(peer, ERR_RREFRESH,
+				    ERR_RR_INV_LEN, p, datalen);
+				bgp_fsm(peer, EVNT_CON_FATAL);
+				return (-1);
+			}
+			if (subtype == ROUTE_REFRESH_BEGIN_RR)
+				peer->stats.refresh_rcvd_borr++;
+			else
+				peer->stats.refresh_rcvd_eorr++;
+			break;
+		default:
+			log_peer_warnx(&peer->conf, "peer sent bad refresh, "
+			    "bad subtype %d", subtype);
+			return (0);
+		}
+	} else {
+		/* force subtype to default */
+		subtype = ROUTE_REFRESH_REQUEST;
+		peer->stats.refresh_rcvd_req++;
+	}
 
 	/* afi/safi unchecked -	unrecognized values will be ignored anyway */
 	if (afi2aid(afi, safi, &aid) == -1) {
@@ -2222,7 +2339,15 @@ parse_refresh(struct peer *peer)
 		return (0);
 	}
 
-	if (imsg_rde(IMSG_REFRESH, peer->conf.id, &aid, sizeof(aid)) == -1)
+	if (!peer->capa.neg.refresh && !peer->capa.neg.enhanced_rr) {
+		log_peer_warnx(&peer->conf, "peer sent unexpected refresh");
+		return (0);
+	}
+
+	rr.aid = aid;
+	rr.subtype = subtype;
+
+	if (imsg_rde(IMSG_REFRESH, peer->conf.id, &rr, sizeof(rr)) == -1)
 		return (-1);
 
 	return (0);
@@ -2315,6 +2440,18 @@ parse_notification(struct peer *peer)
 				log_peer_warnx(&peer->conf,
 				    "disabling 4-byte AS num capability");
 				break;
+			case CAPA_ADD_PATH:
+				memset(peer->capa.ann.add_path, 0,
+				    sizeof(peer->capa.ann.add_path));
+				log_peer_warnx(&peer->conf,
+				    "disabling ADD-PATH capability");
+				break;
+			case CAPA_ENHANCED_RR:
+				peer->capa.ann.enhanced_rr = 0;
+				log_peer_warnx(&peer->conf,
+				    "disabling enhanced route refresh "
+				    "capability");
+				break;
 			default:	/* should not happen... */
 				log_peer_warnx(&peer->conf, "received "
 				    "\"unsupported capability\" notification "
@@ -2373,7 +2510,7 @@ parse_capabilities(struct peer *peer, u_char *d, u_int16_t dlen, u_int32_t *as)
 	u_int16_t	 gr_header;
 	u_int8_t	 safi;
 	u_int8_t	 aid;
-	u_int8_t	 gr_flags;
+	u_int8_t	 flags;
 	u_int8_t	 capa_code;
 	u_int8_t	 capa_len;
 	u_int8_t	 i;
@@ -2457,7 +2594,8 @@ parse_capabilities(struct peer *peer, u_char *d, u_int16_t dlen, u_int32_t *as)
 			for (i = 2; i <= capa_len - 4; i += 4) {
 				memcpy(&afi, capa_val + i, sizeof(afi));
 				afi = ntohs(afi);
-				memcpy(&safi, capa_val + i + 2, sizeof(safi));
+				safi = capa_val[i + 2];
+				flags = capa_val[i + 3];
 				if (afi2aid(afi, safi, &aid) == -1) {
 					log_peer_warnx(&peer->conf,
 					    "Received graceful restart capa: "
@@ -2465,11 +2603,9 @@ parse_capabilities(struct peer *peer, u_char *d, u_int16_t dlen, u_int32_t *as)
 					    afi, safi);
 					continue;
 				}
-				memcpy(&gr_flags, capa_val + i + 3,
-				    sizeof(gr_flags));
 				peer->capa.peer.grestart.flags[aid] |=
 				    CAPA_GR_PRESENT;
-				if (gr_flags & CAPA_GR_F_FLAG)
+				if (flags & CAPA_GR_F_FLAG)
 					peer->capa.peer.grestart.flags[aid] |=
 					    CAPA_GR_FORWARD;
 				if (gr_header & CAPA_GR_R_FLAG)
@@ -2498,6 +2634,43 @@ parse_capabilities(struct peer *peer, u_char *d, u_int16_t dlen, u_int32_t *as)
 			}
 			peer->capa.peer.as4byte = 1;
 			break;
+		case CAPA_ADD_PATH:
+			if (capa_len % 4 != 0) {
+				log_peer_warnx(&peer->conf,
+				    "Bad ADD-PATH capability length: "
+				    "%u", capa_len);
+				memset(peer->capa.peer.add_path, 0,
+				    sizeof(peer->capa.peer.add_path));
+				break;
+			}
+			for (i = 0; i <= capa_len - 4; i += 4) {
+				memcpy(&afi, capa_val + i, sizeof(afi));
+				afi = ntohs(afi);
+				safi = capa_val[i + 2];
+				flags = capa_val[i + 3];
+				if (afi2aid(afi, safi, &aid) == -1) {
+					log_peer_warnx(&peer->conf,
+					    "Received ADD-PATH capa: "
+					    " unknown AFI %u, safi %u pair",
+					    afi, safi);
+					memset(peer->capa.peer.add_path, 0,
+					    sizeof(peer->capa.peer.add_path));
+					break;
+				}
+				if (flags & ~CAPA_AP_BIDIR) {
+					log_peer_warnx(&peer->conf,
+					    "Received ADD-PATH capa: "
+					    " bad flags %x", flags);
+					memset(peer->capa.peer.add_path, 0,
+					    sizeof(peer->capa.peer.add_path));
+					break;
+				}
+				peer->capa.peer.add_path[aid] = flags;
+			}
+			break;
+		case CAPA_ENHANCED_RR:
+			peer->capa.peer.enhanced_rr = 1;
+			break;
 		default:
 			break;
 		}
@@ -2511,59 +2684,85 @@ capa_neg_calc(struct peer *p)
 {
 	u_int8_t	i, hasmp = 0;
 
-	/* refresh: does not realy matter here, use peer setting */
-	p->capa.neg.refresh = p->capa.peer.refresh;
+	/* a capability is accepted only if both sides announced it */
 
-	/* as4byte: both side must announce capability */
-	if (p->capa.ann.as4byte && p->capa.peer.as4byte)
-		p->capa.neg.as4byte = 1;
-	else
-		p->capa.neg.as4byte = 0;
+	p->capa.neg.refresh =
+	    (p->capa.ann.refresh && p->capa.peer.refresh) != 0;
+	p->capa.neg.enhanced_rr =
+	    (p->capa.ann.enhanced_rr && p->capa.peer.enhanced_rr) != 0;
 
-	/* MP: both side must announce capability */
+	p->capa.neg.as4byte =
+	    (p->capa.ann.as4byte && p->capa.peer.as4byte) != 0;
+
+	/* MP: both side must agree on the AFI,SAFI pair */
 	for (i = 0; i < AID_MAX; i++) {
-		if (p->capa.ann.mp[i] && p->capa.peer.mp[i]) {
+		if (p->capa.ann.mp[i] && p->capa.peer.mp[i])
 			p->capa.neg.mp[i] = 1;
-			hasmp = 1;
-		} else
+		else
 			p->capa.neg.mp[i] = 0;
+		if (p->capa.ann.mp[i])
+			hasmp = 1;
 	}
 	/* if no MP capability present default to IPv4 unicast mode */
 	if (!hasmp)
 		p->capa.neg.mp[AID_INET] = 1;
 
 	/*
-	 * graceful restart: only the peer capabilities are of interest here.
+	 * graceful restart: the peer capabilities are of interest here.
 	 * It is necessary to compare the new values with the previous ones
 	 * and act acordingly. AFI/SAFI that are not part in the MP capability
 	 * are treated as not being present.
+	 * Also make sure that a flush happens if the session stopped
+	 * supporting graceful restart.
 	 */
 
 	for (i = 0; i < AID_MAX; i++) {
 		int8_t	negflags;
 
 		/* disable GR if the AFI/SAFI is not present */
-		if (p->capa.peer.grestart.flags[i] & CAPA_GR_PRESENT &&
-		    p->capa.neg.mp[i] == 0)
+		if ((p->capa.peer.grestart.flags[i] & CAPA_GR_PRESENT &&
+		    p->capa.neg.mp[i] == 0))
 			p->capa.peer.grestart.flags[i] = 0;	/* disable */
 		/* look at current GR state and decide what to do */
 		negflags = p->capa.neg.grestart.flags[i];
 		p->capa.neg.grestart.flags[i] = p->capa.peer.grestart.flags[i];
 		if (negflags & CAPA_GR_RESTARTING) {
-			if (!(p->capa.peer.grestart.flags[i] &
-			    CAPA_GR_FORWARD)) {
+			if (p->capa.ann.grestart.restart != 0 &&
+			    p->capa.peer.grestart.flags[i] & CAPA_GR_FORWARD) {
+				p->capa.neg.grestart.flags[i] |=
+				    CAPA_GR_RESTARTING;
+			} else {
 				if (imsg_rde(IMSG_SESSION_FLUSH, p->conf.id,
 				    &i, sizeof(i)) == -1)
 					return (-1);
 				log_peer_warnx(&p->conf, "graceful restart of "
 				    "%s, not restarted, flushing", aid2str(i));
-			} else
-				p->capa.neg.grestart.flags[i] |=
-				    CAPA_GR_RESTARTING;
+			}
 		}
 	}
 	p->capa.neg.grestart.timeout = p->capa.peer.grestart.timeout;
 	p->capa.neg.grestart.restart = p->capa.peer.grestart.restart;
+	if (p->capa.ann.grestart.restart == 0)
+		p->capa.neg.grestart.restart = 0;
+
+
+	/*
+	 * ADD-PATH: set only those bits where both sides agree.
+	 * For this compare our send bit with the recv bit from the peer
+	 * and vice versa.
+	 * The flags are stored from this systems view point.
+	 */
+	memset(p->capa.neg.add_path, 0, sizeof(p->capa.neg.add_path));
+	if (p->capa.ann.add_path[0]) {
+		for (i = AID_MIN; i < AID_MAX; i++) {
+			if ((p->capa.ann.add_path[i] & CAPA_AP_RECV) &&
+			    (p->capa.peer.add_path[i] & CAPA_AP_SEND))
+				p->capa.neg.add_path[i] |= CAPA_AP_RECV;
+			if ((p->capa.ann.add_path[i] & CAPA_AP_SEND) &&
+			    (p->capa.peer.add_path[i] & CAPA_AP_RECV))
+				p->capa.neg.add_path[i] |= CAPA_AP_SEND;
+		}
+	}
 
 	return (0);
 }
@@ -2573,6 +2772,7 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 {
 	struct imsg		 imsg;
 	struct mrt		 xmrt;
+	struct route_refresh	 rr;
 	struct mrt		*mrt;
 	struct imsgbuf		*i;
 	struct peer		*p;
@@ -2698,10 +2898,24 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 			}
 			break;
 		case IMSG_RECONF_DRAIN:
-			if (idx != PFD_PIPE_MAIN)
-				fatalx("reconf request not from parent");
-			imsg_compose(ibuf_main, IMSG_RECONF_DRAIN, 0, 0,
-			    -1, NULL, 0);
+			switch (idx) {
+			case PFD_PIPE_ROUTE:
+				if (nconf != NULL)
+					fatalx("got unexpected %s from RDE",
+					    "IMSG_RECONF_DONE");
+				imsg_compose(ibuf_main, IMSG_RECONF_DONE, 0, 0,
+				    -1, NULL, 0);
+				break;
+			case PFD_PIPE_MAIN:
+				if (nconf == NULL)
+					fatalx("got unexpected %s from parent",
+					    "IMSG_RECONF_DONE");
+				imsg_compose(ibuf_main, IMSG_RECONF_DRAIN, 0, 0,
+				    -1, NULL, 0);
+				break;
+			default:
+				fatalx("reconf request not from parent or RDE");
+			}
 			break;
 		case IMSG_RECONF_DONE:
 			if (idx != PFD_PIPE_MAIN)
@@ -2735,8 +2949,10 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 			nconf = NULL;
 			pending_reconf = 0;
 			log_info("SE reconfigured");
-			imsg_compose(ibuf_main, IMSG_RECONF_DONE, 0, 0,
-			    -1, NULL, 0);
+			/*
+			 * IMSG_RECONF_DONE is sent when the RDE drained
+			 * the peer config sent in merge_peers().
+			 */
 			break;
 		case IMSG_IFINFO:
 			if (idx != PFD_PIPE_MAIN)
@@ -2804,6 +3020,8 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 		case IMSG_CTL_SHOW_NEXTHOP:
 		case IMSG_CTL_SHOW_INTERFACE:
 		case IMSG_CTL_SHOW_FIB_TABLES:
+		case IMSG_CTL_SHOW_RTR:
+		case IMSG_CTL_SHOW_TIMER:
 			if (idx != PFD_PIPE_MAIN)
 				fatalx("ctl kroute request not from parent");
 			control_imsg_relay(&imsg);
@@ -2816,6 +3034,7 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 		case IMSG_CTL_SHOW_RIB_HASH:
 		case IMSG_CTL_SHOW_NETWORK:
 		case IMSG_CTL_SHOW_NEIGHBOR:
+		case IMSG_CTL_SHOW_SET:
 			if (idx != PFD_PIPE_ROUTE_CTL)
 				fatalx("ctl rib request not from RDE");
 			control_imsg_relay(&imsg);
@@ -2868,8 +3087,8 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 
 					bgp_fsm(p, EVNT_STOP);
 					if (t)
-						timer_set(p, Timer_IdleHold,
-						    60 * t);
+						timer_set(&p->timers,
+						    Timer_IdleHold, 60 * t);
 					break;
 				default:
 					bgp_fsm(p, EVNT_CON_FATAL);
@@ -2880,6 +3099,23 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 				bgp_fsm(p, EVNT_CON_FATAL);
 				break;
 			}
+			break;
+		case IMSG_REFRESH:
+			if (idx != PFD_PIPE_ROUTE)
+				fatalx("route refresh request not from RDE");
+			if (imsg.hdr.len < IMSG_HEADER_SIZE + sizeof(rr)) {
+				log_warnx("RDE sent invalid refresh msg");
+				break;
+			}
+			if ((p = getpeerbyid(conf, imsg.hdr.peerid)) == NULL) {
+				log_warnx("no such peer: id=%u",
+				    imsg.hdr.peerid);
+				break;
+			}
+			memcpy(&rr, imsg.data, sizeof(rr));
+			if (rr.aid >= AID_MAX)
+				fatalx("IMSG_REFRESH: bad AID");
+			session_rrefresh(p, rr.aid, rr.subtype);
 			break;
 		case IMSG_SESSION_RESTARTED:
 			if (idx != PFD_PIPE_ROUTE)
@@ -2903,7 +3139,7 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 				    aid2str(aid));
 				p->capa.neg.grestart.flags[aid] &=
 				    ~CAPA_GR_RESTARTING;
-				timer_stop(p, Timer_RestartTimeout);
+				timer_stop(&p->timers, Timer_RestartTimeout);
 
 				/* signal back to RDE to cleanup stale routes */
 				if (imsg_rde(IMSG_SESSION_RESTARTED,
@@ -3303,6 +3539,9 @@ merge_peers(struct bgpd_config *c, struct bgpd_config *nc)
 			}
 		}
 	}
+
+	if (imsg_rde(IMSG_RECONF_DRAIN, 0, NULL, 0) == -1)
+		fatalx("imsg_compose error");
 
 	/* pfkeys of new peers already loaded by the parent process */
 	RB_FOREACH_SAFE(np, peer_head, &nc->peers, next) {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_pppx.c,v 1.105 2020/09/20 12:27:40 mvs Exp $ */
+/*	$OpenBSD: if_pppx.c,v 1.110 2021/02/25 02:48:21 dlg Exp $ */
 
 /*
  * Copyright (c) 2010 Claudio Jeker <claudio@openbsd.org>
@@ -371,8 +371,12 @@ pppxwrite(dev_t dev, struct uio *uio, int ioflag)
 	/* Find the interface */
 	th = mtod(top, struct pppx_hdr *);
 	m_adj(top, sizeof(struct pppx_hdr));
+
+	NET_LOCK();
+
 	pxi = pppx_if_find(pxd, th->pppx_id, th->pppx_proto);
 	if (pxi == NULL) {
+		NET_UNLOCK();
 		m_freem(top);
 		return (EINVAL);
 	}
@@ -385,8 +389,6 @@ pppxwrite(dev_t dev, struct uio *uio, int ioflag)
 	/* strip the tunnel header */
 	proto = ntohl(*(uint32_t *)(th + 1));
 	m_adj(top, sizeof(uint32_t));
-
-	NET_LOCK();
 
 	switch (proto) {
 	case AF_INET:
@@ -492,7 +494,7 @@ pppxkqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = (caddr_t)pxd;
 
 	mtx_enter(mtx);
-	klist_insert(klist, kn);
+	klist_insert_locked(klist, kn);
 	mtx_leave(mtx);
 
 	return (0);
@@ -505,7 +507,7 @@ filt_pppx_rdetach(struct knote *kn)
 	struct klist *klist = &pxd->pxd_rsel.si_note;
 
 	mtx_enter(&pxd->pxd_rsel_mtx);
-	klist_remove(klist, kn);
+	klist_remove_locked(klist, kn);
 	mtx_leave(&pxd->pxd_rsel_mtx);
 }
 
@@ -526,7 +528,7 @@ filt_pppx_wdetach(struct knote *kn)
 	struct klist *klist = &pxd->pxd_wsel.si_note;
 
 	mtx_enter(&pxd->pxd_wsel_mtx);
-	klist_remove(klist, kn);
+	klist_remove_locked(klist, kn);
 	mtx_leave(&pxd->pxd_wsel_mtx);
 }
 
@@ -920,12 +922,6 @@ pppx_if_ioctl(struct ifnet *ifp, u_long cmd, caddr_t addr)
 RBT_GENERATE(pppx_ifs, pppx_if, pxi_entry, pppx_if_cmp);
 
 /*
- * pppac(4) - PPP Access Concentrator interface
- */
-
-#include <net/if_tun.h>
-
-/*
  * Locks used to protect struct members and global data
  *       I       immutable after creation
  *       K       kernel lock
@@ -934,7 +930,6 @@ RBT_GENERATE(pppx_ifs, pppx_if, pxi_entry, pppx_if_cmp);
 
 struct pppac_softc {
 	struct ifnet	sc_if;
-	unsigned int	sc_dead;	/* [N] */
 	dev_t		sc_dev;		/* [I] */
 	LIST_ENTRY(pppac_softc)
 			sc_entry;	/* [K] */
@@ -1188,9 +1183,6 @@ pppacioctl(dev_t dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 
 	NET_LOCK();
 	switch (cmd) {
-	case TUNSIFMODE: /* make npppd happy */
-		break;
-
 	case FIONBIO:
 		break;
 	case FIONREAD:
@@ -1259,7 +1251,7 @@ pppackqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = sc;
 
 	mtx_enter(mtx);
-	klist_insert(klist, kn);
+	klist_insert_locked(klist, kn);
 	mtx_leave(mtx);
 
 	return (0);
@@ -1272,7 +1264,7 @@ filt_pppac_rdetach(struct knote *kn)
 	struct klist *klist = &sc->sc_rsel.si_note;
 
 	mtx_enter(&sc->sc_rsel_mtx);
-	klist_remove(klist, kn);
+	klist_remove_locked(klist, kn);
 	mtx_leave(&sc->sc_rsel_mtx);
 }
 
@@ -1293,7 +1285,7 @@ filt_pppac_wdetach(struct knote *kn)
 	struct klist *klist = &sc->sc_wsel.si_note;
 
 	mtx_enter(&sc->sc_wsel_mtx);
-	klist_remove(klist, kn);
+	klist_remove_locked(klist, kn);
 	mtx_leave(&sc->sc_wsel_mtx);
 }
 
@@ -1312,16 +1304,15 @@ pppacclose(dev_t dev, int flags, int mode, struct proc *p)
 	int s;
 
 	NET_LOCK();
-	sc->sc_dead = 1;
 	CLR(ifp->if_flags, IFF_RUNNING);
 	NET_UNLOCK();
+
+	if_detach(ifp);
 
 	s = splhigh();
 	klist_invalidate(&sc->sc_rsel.si_note);
 	klist_invalidate(&sc->sc_wsel.si_note);
 	splx(s);
-
-	if_detach(ifp);
 
 	pool_put(&pipex_session_pool, sc->sc_multicast_session);
 	NET_LOCK();
@@ -1337,12 +1328,8 @@ pppacclose(dev_t dev, int flags, int mode, struct proc *p)
 static int
 pppac_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 {
-	struct pppac_softc *sc = ifp->if_softc;
 	/* struct ifreq *ifr = (struct ifreq *)data; */
 	int error = 0;
-
-	if (sc->sc_dead)
-		return (ENXIO);
 
 	switch (cmd) {
 	case SIOCSIFADDR:
@@ -1454,7 +1441,7 @@ pppac_qstart(struct ifqueue *ifq)
 		case AF_INET:
 			if (m->m_pkthdr.len < sizeof(struct ip))
 				goto bad;
-			m_copydata(m, 0, sizeof(struct ip), (caddr_t)&ip);
+			m_copydata(m, 0, sizeof(struct ip), &ip);
 			if (IN_MULTICAST(ip.ip_dst.s_addr)) {
 				/* pass a copy to pipex */
 				m0 = m_copym(m, 0, M_COPYALL, M_NOWAIT);

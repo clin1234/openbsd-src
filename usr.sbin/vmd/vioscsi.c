@@ -1,4 +1,4 @@
-/*	$OpenBSD: vioscsi.c,v 1.14 2020/09/03 13:11:49 krw Exp $  */
+/*	$OpenBSD: vioscsi.c,v 1.19 2021/06/16 16:55:02 dv Exp $  */
 
 /*
  * Copyright (c) 2017 Carlos Cardenas <ccardenas@openbsd.org>
@@ -17,6 +17,7 @@
  */
 
 #include <sys/types.h>
+
 #include <dev/pci/virtio_pcireg.h>
 #include <dev/pv/vioscsireg.h>
 #include <scsi/scsi_all.h>
@@ -50,7 +51,7 @@ vioscsi_prepare_resp(struct virtio_scsi_res_hdr *resp, uint8_t vio_status,
 
 	/* determine if we need to populate the sense field */
 	if (scsi_status == SCSI_CHECK) {
-		/* 
+		/*
 		 * sense data is a 96 byte field.
 		 * We only need to use the first 14 bytes
 		 * - set the sense_len accordingly
@@ -186,9 +187,15 @@ vioscsi_free_info(struct ioinfo *info)
 }
 
 static struct ioinfo *
-vioscsi_start_read(struct vioscsi_dev *dev, off_t block, ssize_t n_blocks)
+vioscsi_start_read(struct vioscsi_dev *dev, off_t block, size_t n_blocks)
 {
 	struct ioinfo *info;
+
+	/* Limit to 64M for now */
+	if (n_blocks * VIOSCSI_BLOCK_SIZE_CDROM > (1 << 26)) {
+		log_warnx("%s: read size exceeded 64M", __func__);
+		return (NULL);
+	}
 
 	info = calloc(1, sizeof(*info));
 	if (!info)
@@ -237,7 +244,7 @@ vioscsi_handle_tur(struct vioscsi_dev *dev, struct virtio_scsi_req_hdr *req,
 
 	vioscsi_prepare_resp(&resp, VIRTIO_SCSI_S_OK, SCSI_OK, 0, 0, 0);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 	} else {
@@ -295,7 +302,7 @@ vioscsi_handle_inquiry(struct vioscsi_dev *dev,
 	    "idx %d req_idx %d global_idx %d", __func__, acct->resp_desc->addr,
 	    acct->resp_desc->len, acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 		goto free_inq;
@@ -310,7 +317,8 @@ vioscsi_handle_inquiry(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, inq_data, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, inq_data,
+		sizeof(struct scsi_inquiry_data))) {
 		log_warnx("%s: unable to write inquiry"
 		    " response to gpa @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
@@ -337,7 +345,7 @@ vioscsi_handle_mode_sense(struct vioscsi_dev *dev,
 	uint8_t mode_page_ctl;
 	uint8_t mode_page_code;
 	uint8_t *mode_reply;
-	uint8_t mode_reply_len;
+	uint8_t mode_reply_len = 0;
 	struct scsi_mode_sense *mode_sense;
 
 	memset(&resp, 0, sizeof(resp));
@@ -352,11 +360,11 @@ vioscsi_handle_mode_sense(struct vioscsi_dev *dev,
 	if (mode_page_ctl == SMS_PAGE_CTRL_CURRENT &&
 	    (mode_page_code == ERR_RECOVERY_PAGE ||
 	    mode_page_code == CDVD_CAPABILITIES_PAGE)) {
-		/* 
+		/*
 		 * mode sense header is 4 bytes followed
 		 * by a variable page
 		 * ERR_RECOVERY_PAGE is 12 bytes
-		 * CDVD_CAPABILITIES_PAGE is 27 bytes
+		 * CDVD_CAPABILITIES_PAGE is 32 bytes
 		 */
 		switch (mode_page_code) {
 		case ERR_RECOVERY_PAGE:
@@ -376,7 +384,7 @@ vioscsi_handle_mode_sense(struct vioscsi_dev *dev,
 			*(mode_reply + 7) = MODE_READ_RETRY_COUNT;
 			break;
 		case CDVD_CAPABILITIES_PAGE:
-			mode_reply_len = 31;
+			mode_reply_len = 36;
 			mode_reply =
 			    (uint8_t*)calloc(mode_reply_len, sizeof(uint8_t));
 			if (mode_reply == NULL)
@@ -403,11 +411,10 @@ vioscsi_handle_mode_sense(struct vioscsi_dev *dev,
 
 		DPRINTF("%s: writing resp to 0x%llx size %d "
 		    "at local idx %d req_idx %d global_idx %d",
-		    __func__, acct->resp_desc->addr, acct->resp_desc->len,
+		    __func__, acct->resp_desc->addr, mode_reply_len,
 		    acct->resp_idx, acct->req_idx, acct->idx);
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to write OK"
 			    " resp status data @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
@@ -421,12 +428,11 @@ vioscsi_handle_mode_sense(struct vioscsi_dev *dev,
 
 		DPRINTF("%s: writing mode_reply to 0x%llx "
 		    "size %d at local idx %d req_idx %d "
-		    "global_idx %d",__func__, acct->resp_desc->addr,
-		    acct->resp_desc->len, acct->resp_idx, acct->req_idx,
-		    acct->idx);
+		    "global_idx %d", __func__, acct->resp_desc->addr,
+		    mode_reply_len, acct->resp_idx, acct->req_idx, acct->idx);
 
 		if (write_mem(acct->resp_desc->addr, mode_reply,
-		    acct->resp_desc->len)) {
+			mode_reply_len)) {
 			log_warnx("%s: unable to write "
 			    "mode_reply to gpa @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
@@ -452,8 +458,7 @@ mode_sense_error:
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR status data @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
 			goto mode_sense_out;
@@ -478,7 +483,7 @@ vioscsi_handle_mode_sense_big(struct vioscsi_dev *dev,
 	uint8_t mode_page_ctl;
 	uint8_t mode_page_code;
 	uint8_t *mode_reply;
-	uint8_t mode_reply_len;
+	uint8_t mode_reply_len = 0;
 	uint16_t mode_sense_len;
 	struct scsi_mode_sense_big *mode_sense_10;
 
@@ -495,11 +500,11 @@ vioscsi_handle_mode_sense_big(struct vioscsi_dev *dev,
 	if (mode_page_ctl == SMS_PAGE_CTRL_CURRENT &&
 	    (mode_page_code == ERR_RECOVERY_PAGE ||
 	    mode_page_code == CDVD_CAPABILITIES_PAGE)) {
-		/* 
+		/*
 		 * mode sense header is 8 bytes followed
 		 * by a variable page
 		 * ERR_RECOVERY_PAGE is 12 bytes
-		 * CDVD_CAPABILITIES_PAGE is 27 bytes
+		 * CDVD_CAPABILITIES_PAGE is 32 bytes
 		 */
 		switch (mode_page_code) {
 		case ERR_RECOVERY_PAGE:
@@ -519,7 +524,7 @@ vioscsi_handle_mode_sense_big(struct vioscsi_dev *dev,
 			*(mode_reply + 11) = MODE_READ_RETRY_COUNT;
 			break;
 		case CDVD_CAPABILITIES_PAGE:
-			mode_reply_len = 35;
+			mode_reply_len = 40;
 			mode_reply =
 			    (uint8_t*)calloc(mode_reply_len, sizeof(uint8_t));
 			if (mode_reply == NULL)
@@ -549,8 +554,7 @@ vioscsi_handle_mode_sense_big(struct vioscsi_dev *dev,
 		    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 		    acct->resp_idx, acct->req_idx, acct->idx);
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to write OK"
 			    " resp status data @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
@@ -564,11 +568,11 @@ vioscsi_handle_mode_sense_big(struct vioscsi_dev *dev,
 
 		DPRINTF("%s: writing mode_reply to 0x%llx "
 		    "size %d at local idx %d req_idx %d global_idx %d",
-		    __func__, acct->resp_desc->addr, acct->resp_desc->len,
+		    __func__, acct->resp_desc->addr, mode_reply_len,
 		    acct->resp_idx, acct->req_idx, acct->idx);
 
 		if (write_mem(acct->resp_desc->addr, mode_reply,
-		    acct->resp_desc->len)) {
+			mode_reply_len)) {
 			log_warnx("%s: unable to write "
 			    "mode_reply to gpa @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
@@ -594,8 +598,7 @@ mode_sense_big_error:
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR status data @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
 			goto mode_sense_big_out;
@@ -666,7 +669,7 @@ vioscsi_handle_read_capacity(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 		goto free_read_capacity;
@@ -682,7 +685,7 @@ vioscsi_handle_read_capacity(struct vioscsi_dev *dev,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
 	if (write_mem(acct->resp_desc->addr, r_cap_data,
-	    acct->resp_desc->len)) {
+		sizeof(struct scsi_read_cap_data))) {
 		log_warnx("%s: unable to write read_cap_data"
 		    " response to gpa @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
@@ -741,7 +744,7 @@ vioscsi_handle_read_capacity_16(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status "
 		    "data @ 0x%llx", __func__, acct->resp_desc->addr);
 		goto free_read_capacity_16;
@@ -757,7 +760,7 @@ vioscsi_handle_read_capacity_16(struct vioscsi_dev *dev,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
 	if (write_mem(acct->resp_desc->addr, r_cap_data_16,
-	    acct->resp_desc->len)) {
+		sizeof(struct scsi_read_cap_data_16))) {
 		log_warnx("%s: unable to write read_cap_data_16"
 		    " response to gpa @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
@@ -804,8 +807,7 @@ vioscsi_handle_report_luns(struct vioscsi_dev *dev,
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR "
 			    "status data @ 0x%llx", __func__,
 			    acct->resp_desc->addr);
@@ -820,7 +822,7 @@ vioscsi_handle_report_luns(struct vioscsi_dev *dev,
 
 	}
 
-	reply_rpl = calloc(1, sizeof(*reply_rpl));
+	reply_rpl = calloc(1, sizeof(struct vioscsi_report_luns_data));
 
 	if (reply_rpl == NULL) {
 		log_warnx("%s: cannot alloc reply_rpl", __func__);
@@ -841,7 +843,7 @@ vioscsi_handle_report_luns(struct vioscsi_dev *dev,
 	    "idx %d req_idx %d global_idx %d", __func__, acct->resp_desc->addr,
 	    acct->resp_desc->len, acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 		goto free_rpl;
@@ -856,7 +858,8 @@ vioscsi_handle_report_luns(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, reply_rpl, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, reply_rpl,
+		sizeof(struct vioscsi_report_luns_data))) {
 		log_warnx("%s: unable to write reply_rpl"
 		    " response to gpa @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
@@ -906,8 +909,7 @@ vioscsi_handle_read_6(struct vioscsi_dev *dev,
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR "
 			    "status data @ 0x%llx", __func__,
 			    acct->resp_desc->addr);
@@ -942,8 +944,7 @@ vioscsi_handle_read_6(struct vioscsi_dev *dev,
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR "
 			    "status data @ 0x%llx", __func__,
 			    acct->resp_desc->addr);
@@ -969,7 +970,7 @@ vioscsi_handle_read_6(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status "
 		    "data @ 0x%llx", __func__, acct->resp_desc->addr);
 		goto free_read_6;
@@ -984,8 +985,7 @@ vioscsi_handle_read_6(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, read_buf,
-	    acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, read_buf, info->len)) {
 		log_warnx("%s: unable to write read_buf to gpa @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 	} else {
@@ -1014,6 +1014,7 @@ vioscsi_handle_read_10(struct vioscsi_dev *dev,
 	off_t chunk_offset;
 	struct ioinfo *info;
 	struct scsi_rw_10 *read_10;
+	size_t chunk_len = 0;
 
 	memset(&resp, 0, sizeof(resp));
 	read_10 = (struct scsi_rw_10 *)(req->cdb);
@@ -1037,8 +1038,7 @@ vioscsi_handle_read_10(struct vioscsi_dev *dev,
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR status data @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
 		} else {
@@ -1072,8 +1072,7 @@ vioscsi_handle_read_10(struct vioscsi_dev *dev,
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR status data @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
 		} else {
@@ -1098,13 +1097,13 @@ vioscsi_handle_read_10(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status "
 		    "data @ 0x%llx", __func__, acct->resp_desc->addr);
 		goto free_read_10;
 	}
 
-	/* 
+	/*
 	 * Perform possible chunking of writes of read_buf
 	 * based on the segment length allocated by the host.
 	 * At least one write will be performed.
@@ -1120,8 +1119,16 @@ vioscsi_handle_read_10(struct vioscsi_dev *dev,
 		    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 		    acct->resp_idx, acct->req_idx, acct->idx);
 
-		if (write_mem(acct->resp_desc->addr,
-		    read_buf + chunk_offset, acct->resp_desc->len)) {
+		/* Check we don't read beyond read_buf boundaries. */
+		if (acct->resp_desc->len > info->len - chunk_offset) {
+			log_warnx("%s: descriptor length beyond read_buf len",
+			    __func__);
+			chunk_len = info->len - chunk_offset;
+		} else
+			chunk_len = acct->resp_desc->len;
+
+		if (write_mem(acct->resp_desc->addr, read_buf + chunk_offset,
+			chunk_len)) {
 			log_warnx("%s: unable to write read_buf"
 			    " to gpa @ 0x%llx", __func__,
 			    acct->resp_desc->addr);
@@ -1164,7 +1171,7 @@ vioscsi_handle_prevent_allow(struct vioscsi_dev *dev,
 
 	dev->locked = dev->locked ? 0 : 1;
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 	} else {
@@ -1193,7 +1200,8 @@ vioscsi_handle_mechanism_status(struct vioscsi_dev *dev,
 	mech_status_len = (uint16_t)_2btol(mech_status->length);
 	DPRINTF("%s: MECH_STATUS Len %u", __func__, mech_status_len);
 
-	mech_status_header = calloc(1, sizeof(*mech_status_header));
+	mech_status_header = calloc(1,
+	    sizeof(struct scsi_mechanism_status_header));
 
 	if (mech_status_header == NULL)
 		goto mech_out;
@@ -1206,7 +1214,7 @@ vioscsi_handle_mechanism_status(struct vioscsi_dev *dev,
 	acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 	    acct->req_desc, &(acct->resp_idx));
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to set ERR status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 		goto free_mech;
@@ -1217,7 +1225,7 @@ vioscsi_handle_mechanism_status(struct vioscsi_dev *dev,
 	    &(acct->resp_idx));
 
 	if (write_mem(acct->resp_desc->addr, mech_status_header,
-	    acct->resp_desc->len)) {
+		sizeof(struct scsi_mechanism_status_header))) {
 		log_warnx("%s: unable to write "
 		    "mech_status_header response to "
 		    "gpa @ 0x%llx",
@@ -1272,8 +1280,7 @@ vioscsi_handle_read_toc(struct vioscsi_dev *dev,
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR status data @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
 			goto read_toc_out;
@@ -1288,12 +1295,12 @@ vioscsi_handle_read_toc(struct vioscsi_dev *dev,
 		goto read_toc_out;
 	}
 
-	/* 
+	/*
 	 * toc_data is defined as:
 	 * [0-1]: TOC Data Length, typically 0x1a
 	 * [2]: First Track, 1
 	 * [3]: Last Track, 1
-	 * 
+	 *
 	 * Track 1 Descriptor
 	 * [0]: Reserved, 0
 	 * [1]: ADR,Control, 0x14
@@ -1347,7 +1354,7 @@ vioscsi_handle_read_toc(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 		goto read_toc_out;
@@ -1362,8 +1369,7 @@ vioscsi_handle_read_toc(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, toc_data,
-	    acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, toc_data, sizeof(toc_data))) {
 		log_warnx("%s: unable to write toc descriptor data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 	} else {
@@ -1400,8 +1406,7 @@ vioscsi_handle_read_disc_info(struct vioscsi_dev *dev,
 	acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 	    acct->req_desc, &(acct->resp_idx));
 
-	if (write_mem(acct->resp_desc->addr, &resp,
-	    acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to set ERR status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 	} else {
@@ -1441,8 +1446,7 @@ vioscsi_handle_gesn(struct vioscsi_dev *dev,
 		acct->resp_desc = vioscsi_next_ring_desc(acct->desc,
 		    acct->req_desc, &(acct->resp_idx));
 
-		if (write_mem(acct->resp_desc->addr, &resp,
-		    acct->resp_desc->len)) {
+		if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 			log_warnx("%s: unable to set ERR status  data @ 0x%llx",
 			    __func__, acct->resp_desc->addr);
 			goto gesn_out;
@@ -1480,7 +1484,7 @@ vioscsi_handle_gesn(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp, acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to write OK resp status "
 		    "data @ 0x%llx", __func__, acct->resp_desc->addr);
 		goto gesn_out;
@@ -1495,8 +1499,7 @@ vioscsi_handle_gesn(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, gesn_reply,
-	    acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, gesn_reply, sizeof(gesn_reply))) {
 		log_warnx("%s: unable to write gesn_reply"
 		    " response to gpa @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
@@ -1542,7 +1545,7 @@ vioscsi_handle_get_config(struct vioscsi_dev *dev,
 	if (get_conf_reply == NULL)
 		goto get_config_out;
 
-	/* 
+	/*
 	 * Use MMC-5 6.6 for structure and
 	 * MMC-5 5.2 to send back:
 	 * feature header - 8 bytes
@@ -1625,8 +1628,7 @@ vioscsi_handle_get_config(struct vioscsi_dev *dev,
 	    __func__, acct->resp_desc->addr, acct->resp_desc->len,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
-	if (write_mem(acct->resp_desc->addr, &resp,
-	    acct->resp_desc->len)) {
+	if (write_mem(acct->resp_desc->addr, &resp, sizeof(resp))) {
 		log_warnx("%s: unable to set Ok status data @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
 		goto free_get_config;
@@ -1642,7 +1644,7 @@ vioscsi_handle_get_config(struct vioscsi_dev *dev,
 	    acct->resp_idx, acct->req_idx, acct->idx);
 
 	if (write_mem(acct->resp_desc->addr, get_conf_reply,
-	    acct->resp_desc->len)) {
+	    G_CONFIG_REPLY_SIZE)) {
 		log_warnx("%s: unable to write get_conf_reply"
 		    " response to gpa @ 0x%llx",
 		    __func__, acct->resp_desc->addr);
@@ -2046,7 +2048,7 @@ void
 vioscsi_update_qs(struct vioscsi_dev *dev)
 {
 	/* Invalid queue? */
-	if (dev->cfg.queue_select > VIRTIO_MAX_QUEUES) {
+	if (dev->cfg.queue_select >= VIRTIO_MAX_QUEUES) {
 		dev->cfg.queue_size = 0;
 		return;
 	}
@@ -2060,7 +2062,7 @@ void
 vioscsi_update_qa(struct vioscsi_dev *dev)
 {
 	/* Invalid queue? */
-	if (dev->cfg.queue_select > VIRTIO_MAX_QUEUES)
+	if (dev->cfg.queue_select >= VIRTIO_MAX_QUEUES)
 		return;
 
 	dev->vq[dev->cfg.queue_select].qa = dev->cfg.queue_address;
@@ -2072,7 +2074,7 @@ vioscsi_update_qa(struct vioscsi_dev *dev)
  * virtio_scsi_req_hdr with a possible SCSI_DATA_OUT buffer
  * along with a virtio_scsi_res_hdr with a possible SCSI_DATA_IN buffer
  * for consumption.
- * 
+ *
  * Return 1 if an interrupt should be generated (response written)
  *        0 otherwise
  */
@@ -2081,7 +2083,7 @@ vioscsi_notifyq(struct vioscsi_dev *dev)
 {
 	uint64_t q_gpa;
 	uint32_t vr_sz;
-	int ret;
+	int cnt, ret;
 	char *vr;
 	struct virtio_scsi_req_hdr req;
 	struct virtio_scsi_res_hdr resp;
@@ -2090,7 +2092,7 @@ vioscsi_notifyq(struct vioscsi_dev *dev)
 	ret = 0;
 
 	/* Invalid queue? */
-	if (dev->cfg.queue_notify > VIRTIO_MAX_QUEUES)
+	if (dev->cfg.queue_notify >= VIRTIO_MAX_QUEUES)
 		return (ret);
 
 	vr_sz = vring_size(VIOSCSI_QUEUE_SIZE);
@@ -2123,7 +2125,14 @@ vioscsi_notifyq(struct vioscsi_dev *dev)
 		goto out;
 	}
 
+	cnt = 0;
 	while (acct.idx != (acct.avail->idx & VIOSCSI_QUEUE_MASK)) {
+
+		/* Guard against infinite descriptor chains */
+		if (++cnt >= VIOSCSI_QUEUE_SIZE) {
+			log_warnx("%s: invalid descriptor table", __func__);
+			goto out;
+		}
 
 		acct.req_idx = acct.avail->ring[acct.idx] & VIOSCSI_QUEUE_MASK;
 		acct.req_desc = &(acct.desc[acct.req_idx]);
@@ -2138,13 +2147,13 @@ vioscsi_notifyq(struct vioscsi_dev *dev)
 		}
 
 		/* Read command from descriptor ring */
-		if (read_mem(acct.req_desc->addr, &req, acct.req_desc->len)) {
+		if (read_mem(acct.req_desc->addr, &req, sizeof(req))) {
 			log_warnx("%s: command read_mem error @ 0x%llx",
 			    __func__, acct.req_desc->addr);
 			goto out;
 		}
 
-		/* 
+		/*
 		 * req.lun is defined by virtio as
 		 * lun[0] - Always set to 1
 		 * lun[1] - Target, negotiated as VIOSCSI_MAX_TARGET
@@ -2170,8 +2179,13 @@ vioscsi_notifyq(struct vioscsi_dev *dev)
 			vioscsi_prepare_resp(&resp,
 			    VIRTIO_SCSI_S_BAD_TARGET, SCSI_OK, 0, 0, 0);
 
+			if (acct.resp_desc->len > sizeof(resp)) {
+				log_warnx("%s: invalid descriptor length",
+				    __func__);
+				goto out;
+			}
 			if (write_mem(acct.resp_desc->addr, &resp,
-			    acct.resp_desc->len)) {
+				sizeof(resp))) {
 				log_warnx("%s: unable to write BAD_TARGET"
 				    " resp status data @ 0x%llx",
 				    __func__, acct.resp_desc->addr);

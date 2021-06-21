@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_usrreq.c,v 1.142 2019/07/16 21:41:37 bluhm Exp $	*/
+/*	$OpenBSD: uipc_usrreq.c,v 1.148 2021/05/25 22:45:09 bluhm Exp $	*/
 /*	$NetBSD: uipc_usrreq.c,v 1.18 1996/02/09 19:00:50 christos Exp $	*/
 
 /*
@@ -51,34 +51,35 @@
 #include <sys/task.h>
 #include <sys/pledge.h>
 #include <sys/pool.h>
+#include <sys/rwlock.h>
+#include <sys/sysctl.h>
 
-void	uipc_setaddr(const struct unpcb *, struct mbuf *);
-
-/* list of all UNIX domain sockets, for unp_gc() */
-LIST_HEAD(unp_head, unpcb) unp_head = LIST_HEAD_INITIALIZER(unp_head);
+/*
+ * Locks used to protect global data and struct members:
+ *      I       immutable after creation
+ *      U       unp_lock
+ */
+struct rwlock unp_lock = RWLOCK_INITIALIZER("unplock");
 
 /*
  * Stack of sets of files that were passed over a socket but were
  * not received and need to be closed.
  */
 struct	unp_deferral {
-	SLIST_ENTRY(unp_deferral)	ud_link;
-	int	ud_n;
+	SLIST_ENTRY(unp_deferral)	ud_link;	/* [U] */
+	int				ud_n;		/* [I] */
 	/* followed by ud_n struct fdpass */
-	struct fdpass ud_fp[];
+	struct fdpass			ud_fp[];	/* [I] */
 };
 
+void	uipc_setaddr(const struct unpcb *, struct mbuf *);
 void	unp_discard(struct fdpass *, int);
 void	unp_mark(struct fdpass *, int);
 void	unp_scan(struct mbuf *, void (*)(struct fdpass *, int));
 int	unp_nam2sun(struct mbuf *, struct sockaddr_un **, size_t *);
 
 struct pool unpcb_pool;
-/* list of sets of files that were sent over sockets that are now closed */
-SLIST_HEAD(,unp_deferral) unp_deferred = SLIST_HEAD_INITIALIZER(unp_deferred);
-
 struct task unp_gc_task = TASK_INITIALIZER(unp_gc, NULL);
-
 
 /*
  * Unix communications domain.
@@ -88,14 +89,25 @@ struct task unp_gc_task = TASK_INITIALIZER(unp_gc, NULL);
  *	rethink name space problems
  *	need a proper out-of-band
  */
-struct	sockaddr sun_noname = { sizeof(sun_noname), AF_UNIX };
-ino_t	unp_ino;			/* prototype for fake inode numbers */
+const struct	sockaddr sun_noname = { sizeof(sun_noname), AF_UNIX };
+
+/* [U] list of all UNIX domain sockets, for unp_gc() */
+LIST_HEAD(unp_head, unpcb)	unp_head =
+	LIST_HEAD_INITIALIZER(unp_head);
+/* [U] list of sets of files that were sent over sockets that are now closed */
+SLIST_HEAD(,unp_deferral)	unp_deferred =
+	SLIST_HEAD_INITIALIZER(unp_deferred);
+
+ino_t	unp_ino;	/* [U] prototype for fake inode numbers */
+int	unp_rights;	/* [U] file descriptors in flight */
+int	unp_defer;	/* [U] number of deferred fp to close by the GC task */
+int	unp_gcing;	/* [U] GC task currently running */
 
 void
 unp_init(void)
 {
 	pool_init(&unpcb_pool, sizeof(struct unpcb), 0,
-	    IPL_NONE, 0, "unpcb", NULL);
+	    IPL_SOFTNET, 0, "unpcb", NULL);
 }
 
 void
@@ -131,8 +143,6 @@ uipc_usrreq(struct socket *so, int req, struct mbuf *m, struct mbuf *nam,
 		error = EINVAL;
 		goto release;
 	}
-
-	NET_ASSERT_UNLOCKED();
 
 	switch (req) {
 
@@ -214,7 +224,7 @@ uipc_usrreq(struct socket *so, int req, struct mbuf *m, struct mbuf *nam,
 		switch (so->so_type) {
 
 		case SOCK_DGRAM: {
-			struct sockaddr *from;
+			const struct sockaddr *from;
 
 			if (nam) {
 				if (unp->unp_conn) {
@@ -345,13 +355,26 @@ release:
  * and don't really want to reserve the sendspace.  Their recvspace should
  * be large enough for at least one max-size datagram plus address.
  */
-#define	PIPSIZ	4096
-u_long	unpst_sendspace = PIPSIZ;
-u_long	unpst_recvspace = PIPSIZ;
-u_long	unpdg_sendspace = 2*1024;	/* really max datagram size */
-u_long	unpdg_recvspace = 4*1024;
+#define	PIPSIZ	8192
+u_int	unpst_sendspace = PIPSIZ;
+u_int	unpst_recvspace = PIPSIZ;
+u_int	unpsq_sendspace = PIPSIZ;
+u_int	unpsq_recvspace = PIPSIZ;
+u_int	unpdg_sendspace = 2*1024;	/* really max datagram size */
+u_int	unpdg_recvspace = 16*1024;
 
-int	unp_rights;			/* file descriptors in flight */
+const struct sysctl_bounded_args unpstctl_vars[] = {
+	{ UNPCTL_RECVSPACE, &unpst_recvspace, 0, SB_MAX },
+	{ UNPCTL_SENDSPACE, &unpst_sendspace, 0, SB_MAX },
+};
+const struct sysctl_bounded_args unpsqctl_vars[] = {
+	{ UNPCTL_RECVSPACE, &unpsq_recvspace, 0, SB_MAX },
+	{ UNPCTL_SENDSPACE, &unpsq_sendspace, 0, SB_MAX },
+};
+const struct sysctl_bounded_args unpdgctl_vars[] = {
+	{ UNPCTL_RECVSPACE, &unpdg_recvspace, 0, SB_MAX },
+	{ UNPCTL_SENDSPACE, &unpdg_sendspace, 0, SB_MAX },
+};
 
 int
 uipc_attach(struct socket *so, int proto)
@@ -359,14 +382,19 @@ uipc_attach(struct socket *so, int proto)
 	struct unpcb *unp;
 	int error;
 
+	rw_assert_wrlock(&unp_lock);
+
 	if (so->so_pcb)
 		return EISCONN;
 	if (so->so_snd.sb_hiwat == 0 || so->so_rcv.sb_hiwat == 0) {
 		switch (so->so_type) {
 
 		case SOCK_STREAM:
-		case SOCK_SEQPACKET:
 			error = soreserve(so, unpst_sendspace, unpst_recvspace);
+			break;
+
+		case SOCK_SEQPACKET:
+			error = soreserve(so, unpsq_sendspace, unpsq_recvspace);
 			break;
 
 		case SOCK_DGRAM:
@@ -397,35 +425,91 @@ uipc_detach(struct socket *so)
 	if (unp == NULL)
 		return (EINVAL);
 
-	NET_ASSERT_UNLOCKED();
-
 	unp_detach(unp);
 
 	return (0);
 }
 
+int
+uipc_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
+    size_t newlen)
+{
+	int *valp = &unp_defer;
+
+	/* All sysctl names at this level are terminal. */
+	switch (name[0]) {
+	case SOCK_STREAM:
+		if (namelen != 2)
+			return (ENOTDIR);
+		return sysctl_bounded_arr(unpstctl_vars, nitems(unpstctl_vars),
+		    name + 1, namelen - 1, oldp, oldlenp, newp, newlen);
+	case SOCK_SEQPACKET:
+		if (namelen != 2)
+			return (ENOTDIR);
+		return sysctl_bounded_arr(unpsqctl_vars, nitems(unpsqctl_vars),
+		    name + 1, namelen - 1, oldp, oldlenp, newp, newlen);
+	case SOCK_DGRAM:
+		if (namelen != 2)
+			return (ENOTDIR);
+		return sysctl_bounded_arr(unpdgctl_vars, nitems(unpdgctl_vars),
+		    name + 1, namelen - 1, oldp, oldlenp, newp, newlen);
+	case NET_UNIX_INFLIGHT:
+		valp = &unp_rights;
+		/* FALLTHOUGH */
+	case NET_UNIX_DEFERRED:
+		if (namelen != 1)
+			return (ENOTDIR);
+		return sysctl_rdint(oldp, oldlenp, newp, *valp);
+	default:
+		return (ENOPROTOOPT);
+	}
+}
+
 void
 unp_detach(struct unpcb *unp)
 {
-	struct vnode *vp;
+	struct socket *so = unp->unp_socket;
+	struct vnode *vp = NULL;
+
+	rw_assert_wrlock(&unp_lock);
 
 	LIST_REMOVE(unp, unp_link);
 	if (unp->unp_vnode) {
+		/*
+		 * `v_socket' is only read in unp_connect and
+		 * unplock prevents concurrent access.
+		 */
+
 		unp->unp_vnode->v_socket = NULL;
 		vp = unp->unp_vnode;
 		unp->unp_vnode = NULL;
-		vrele(vp);
 	}
+
 	if (unp->unp_conn)
 		unp_disconnect(unp);
 	while (!SLIST_EMPTY(&unp->unp_refs))
 		unp_drop(SLIST_FIRST(&unp->unp_refs), ECONNRESET);
-	soisdisconnected(unp->unp_socket);
-	unp->unp_socket->so_pcb = NULL;
+	soisdisconnected(so);
+	so->so_pcb = NULL;
 	m_freem(unp->unp_addr);
 	pool_put(&unpcb_pool, unp);
 	if (unp_rights)
-		task_add(systq, &unp_gc_task);
+		task_add(systqmp, &unp_gc_task);
+
+	if (vp != NULL) {
+		/*
+		 * Enforce `i_lock' -> `unplock' because fifo subsystem
+		 * requires it. The socket can't be closed concurrently
+		 * because the file descriptor reference is
+		 * still hold.
+		 */
+
+		sounlock(so, SL_LOCKED);
+		KERNEL_LOCK();
+		vrele(vp);
+		KERNEL_UNLOCK();
+		solock(so);
+	}
 }
 
 int
@@ -439,10 +523,22 @@ unp_bind(struct unpcb *unp, struct mbuf *nam, struct proc *p)
 	struct nameidata nd;
 	size_t pathlen;
 
+	if (unp->unp_flags & (UNP_BINDING | UNP_CONNECTING))
+		return (EINVAL);
 	if (unp->unp_vnode != NULL)
 		return (EINVAL);
 	if ((error = unp_nam2sun(nam, &soun, &pathlen)))
 		return (error);
+
+	unp->unp_flags |= UNP_BINDING;
+
+	/*
+	 * Enforce `i_lock' -> `unplock' because fifo subsystem
+	 * requires it. The socket can't be closed concurrently
+	 * because the file descriptor reference is still held.
+	 */
+
+	sounlock(unp->unp_socket, SL_LOCKED);
 
 	nam2 = m_getclr(M_WAITOK, MT_SONAME);
 	nam2->m_len = sizeof(struct sockaddr_un);
@@ -458,10 +554,14 @@ unp_bind(struct unpcb *unp, struct mbuf *nam, struct proc *p)
 	NDINIT(&nd, CREATE, NOFOLLOW | LOCKPARENT, UIO_SYSSPACE,
 	    soun->sun_path, p);
 	nd.ni_pledge = PLEDGE_UNIX;
+
+	KERNEL_LOCK();
 /* SHOULD BE ABLE TO ADOPT EXISTING AND wakeup() ALA FIFO's */
-	if ((error = namei(&nd)) != 0) {
+	error = namei(&nd);
+	if (error != 0) {
 		m_freem(nam2);
-		return (error);
+		solock(unp->unp_socket);
+		goto out;
 	}
 	vp = nd.ni_vp;
 	if (vp != NULL) {
@@ -472,7 +572,9 @@ unp_bind(struct unpcb *unp, struct mbuf *nam, struct proc *p)
 			vput(nd.ni_dvp);
 		vrele(vp);
 		m_freem(nam2);
-		return (EADDRINUSE);
+		error = EADDRINUSE;
+		solock(unp->unp_socket);
+		goto out;
 	}
 	VATTR_NULL(&vattr);
 	vattr.va_type = VSOCK;
@@ -481,8 +583,10 @@ unp_bind(struct unpcb *unp, struct mbuf *nam, struct proc *p)
 	vput(nd.ni_dvp);
 	if (error) {
 		m_freem(nam2);
-		return (error);
+		solock(unp->unp_socket);
+		goto out;
 	}
+	solock(unp->unp_socket);
 	unp->unp_addr = nam2;
 	vp = nd.ni_vp;
 	vp->v_socket = unp->unp_socket;
@@ -492,7 +596,11 @@ unp_bind(struct unpcb *unp, struct mbuf *nam, struct proc *p)
 	unp->unp_connid.pid = p->p_p->ps_pid;
 	unp->unp_flags |= UNP_FEIDSBIND;
 	VOP_UNLOCK(vp);
-	return (0);
+out:
+	KERNEL_UNLOCK();
+	unp->unp_flags &= ~UNP_BINDING;
+
+	return (error);
 }
 
 int
@@ -505,36 +613,52 @@ unp_connect(struct socket *so, struct mbuf *nam, struct proc *p)
 	struct nameidata nd;
 	int error;
 
+	unp = sotounpcb(so);
+	if (unp->unp_flags & (UNP_BINDING | UNP_CONNECTING))
+		return (EISCONN);
 	if ((error = unp_nam2sun(nam, &soun, NULL)))
 		return (error);
 
 	NDINIT(&nd, LOOKUP, FOLLOW | LOCKLEAF, UIO_SYSSPACE, soun->sun_path, p);
 	nd.ni_pledge = PLEDGE_UNIX;
-	if ((error = namei(&nd)) != 0)
-		return (error);
+
+	unp->unp_flags |= UNP_CONNECTING;
+
+	/*
+	 * Enforce `i_lock' -> `unplock' because fifo subsystem
+	 * requires it. The socket can't be closed concurrently
+	 * because the file descriptor reference is still held.
+	 */
+
+	sounlock(so, SL_LOCKED);
+
+	KERNEL_LOCK();
+	error = namei(&nd);
+	if (error != 0)
+		goto unlock;
 	vp = nd.ni_vp;
 	if (vp->v_type != VSOCK) {
 		error = ENOTSOCK;
-		goto bad;
+		goto put;
 	}
 	if ((error = VOP_ACCESS(vp, VWRITE, p->p_ucred, p)) != 0)
-		goto bad;
+		goto put;
+	solock(so);
 	so2 = vp->v_socket;
 	if (so2 == NULL) {
 		error = ECONNREFUSED;
-		goto bad;
+		goto put_locked;
 	}
 	if (so->so_type != so2->so_type) {
 		error = EPROTOTYPE;
-		goto bad;
+		goto put_locked;
 	}
 	if (so->so_proto->pr_flags & PR_CONNREQUIRED) {
 		if ((so2->so_options & SO_ACCEPTCONN) == 0 ||
 		    (so3 = sonewconn(so2, 0)) == 0) {
 			error = ECONNREFUSED;
-			goto bad;
+			goto put_locked;
 		}
-		unp = sotounpcb(so);
 		unp2 = sotounpcb(so2);
 		unp3 = sotounpcb(so3);
 		if (unp2->unp_addr)
@@ -551,8 +675,15 @@ unp_connect(struct socket *so, struct mbuf *nam, struct proc *p)
 		}
 	}
 	error = unp_connect2(so, so2);
-bad:
+put_locked:
+	sounlock(so, SL_LOCKED);
+put:
 	vput(vp);
+unlock:
+	KERNEL_UNLOCK();
+	solock(so);
+	unp->unp_flags &= ~UNP_CONNECTING;
+
 	return (error);
 }
 
@@ -561,6 +692,8 @@ unp_connect2(struct socket *so, struct socket *so2)
 {
 	struct unpcb *unp = sotounpcb(so);
 	struct unpcb *unp2;
+
+	rw_assert_wrlock(&unp_lock);
 
 	if (so2->so_type != so->so_type)
 		return (EPROTOTYPE);
@@ -635,15 +768,16 @@ unp_drop(struct unpcb *unp, int errno)
 {
 	struct socket *so = unp->unp_socket;
 
-	KERNEL_ASSERT_LOCKED();
+	rw_assert_wrlock(&unp_lock);
 
 	so->so_error = errno;
 	unp_disconnect(unp);
 	if (so->so_head) {
 		so->so_pcb = NULL;
 		/*
-		 * As long as the KERNEL_LOCK() is the default lock for Unix
-		 * sockets, do not release it.
+		 * As long as `unp_lock' is taken before entering
+		 * uipc_usrreq() releasing it here would lead to a
+		 * double unlock.
 		 */
 		sofree(so, SL_NOUNLOCK);
 		m_freem(unp->unp_addr);
@@ -657,8 +791,6 @@ unp_drain(void)
 
 }
 #endif
-
-extern	struct domain unixdomain;
 
 static struct unpcb *
 fptounp(struct file *fp)
@@ -685,6 +817,8 @@ unp_externalize(struct mbuf *rights, socklen_t controllen, int flags)
 	struct file *fp;
 	int nfds, error = 0;
 
+	rw_assert_wrlock(&unp_lock);
+
 	/*
 	 * This code only works because SCM_RIGHTS is the only supported
 	 * control message type on unix sockets. Enforce this here.
@@ -705,6 +839,10 @@ unp_externalize(struct mbuf *rights, socklen_t controllen, int flags)
 
 	/* Make sure the recipient should be able to see the descriptors.. */
 	rp = (struct fdpass *)CMSG_DATA(cm);
+
+	/* fdp->fd_rdir requires KERNEL_LOCK() */
+	KERNEL_LOCK();
+
 	for (i = 0; i < nfds; i++) {
 		fp = rp->fp;
 		rp++;
@@ -727,6 +865,8 @@ unp_externalize(struct mbuf *rights, socklen_t controllen, int flags)
 			}
 		}
 	}
+
+	KERNEL_UNLOCK();
 
 	fds = mallocarray(nfds, sizeof(int), M_TEMP, M_WAITOK);
 
@@ -824,6 +964,8 @@ unp_internalize(struct mbuf *control, struct proc *p)
 	struct unpcb *unp;
 	int i, error;
 	int nfds, *ip, fd, neededspace;
+
+	rw_assert_wrlock(&unp_lock);
 
 	/*
 	 * Check for two potential msg_controllen values because
@@ -923,8 +1065,6 @@ fail:
 	return (error);
 }
 
-int	unp_defer, unp_gcing;
-
 void
 unp_gc(void *arg __unused)
 {
@@ -934,8 +1074,10 @@ unp_gc(void *arg __unused)
 	struct unpcb *unp;
 	int nunref, i;
 
+	rw_enter_write(&unp_lock);
+
 	if (unp_gcing)
-		return;
+		goto unlock;
 	unp_gcing = 1;
 
 	/* close any fds on the deferred list */
@@ -950,7 +1092,9 @@ unp_gc(void *arg __unused)
 			if ((unp = fptounp(fp)) != NULL)
 				unp->unp_msgcount--;
 			unp_rights--;
+			rw_exit_write(&unp_lock);
 			(void) closef(fp, NULL);
+			rw_enter_write(&unp_lock);
 		}
 		free(defer, M_TEMP, sizeof(*defer) +
 		    sizeof(struct fdpass) * defer->ud_n);
@@ -1021,6 +1165,8 @@ unp_gc(void *arg __unused)
 		}
 	}
 	unp_gcing = 0;
+unlock:
+	rw_exit_write(&unp_lock);
 }
 
 void
@@ -1066,6 +1212,8 @@ unp_mark(struct fdpass *rp, int nfds)
 	struct unpcb *unp;
 	int i;
 
+	rw_assert_wrlock(&unp_lock);
+
 	for (i = 0; i < nfds; i++) {
 		if (rp[i].fp == NULL)
 			continue;
@@ -1088,6 +1236,8 @@ unp_discard(struct fdpass *rp, int nfds)
 {
 	struct unp_deferral *defer;
 
+	rw_assert_wrlock(&unp_lock);
+
 	/* copy the file pointers to a deferral structure */
 	defer = malloc(sizeof(*defer) + sizeof(*rp) * nfds, M_TEMP, M_WAITOK);
 	defer->ud_n = nfds;
@@ -1095,7 +1245,7 @@ unp_discard(struct fdpass *rp, int nfds)
 	memset(rp, 0, sizeof(*rp) * nfds);
 	SLIST_INSERT_HEAD(&unp_deferred, defer, ud_link);
 
-	task_add(systq, &unp_gc_task);
+	task_add(systqmp, &unp_gc_task);
 }
 
 int

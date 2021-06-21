@@ -1,4 +1,4 @@
-/* $OpenBSD: xhci.c,v 1.119 2020/07/31 19:27:57 mglocker Exp $ */
+/* $OpenBSD: xhci.c,v 1.121 2021/02/24 03:08:47 jsg Exp $ */
 
 /*
  * Copyright (c) 2014-2015 Martin Pieuchot
@@ -115,7 +115,6 @@ int	xhci_cmd_configure_ep(struct xhci_softc *, uint8_t, uint64_t);
 int	xhci_cmd_stop_ep(struct xhci_softc *, uint8_t, uint8_t);
 int	xhci_cmd_slot_control(struct xhci_softc *, uint8_t *, int);
 int	xhci_cmd_set_address(struct xhci_softc *, uint8_t,  uint64_t, uint32_t);
-int	xhci_cmd_evaluate_ctx(struct xhci_softc *, uint8_t, uint64_t);
 #ifdef XHCI_DEBUG
 int	xhci_cmd_noop(struct xhci_softc *);
 #endif
@@ -1135,8 +1134,10 @@ xhci_xfer_done(struct usbd_xfer *xfer)
 			i = (xp->ring.ntrb - 1);
 	}
 	xp->free_trbs += xx->ntrb;
+	xp->free_trbs += xx->zerotd;
 	xx->index = -1;
 	xx->ntrb = 0;
+	xx->zerotd = 0;
 
 	timeout_del(&xfer->timeout_handle);
 	usb_rem_task(xfer->device, &xfer->abort_task);
@@ -1842,6 +1843,7 @@ xhci_xfer_get_trb(struct xhci_softc *sc, struct usbd_xfer *xfer,
 	switch (last) {
 	case -1:	/* This will be a zero-length TD. */
 		xp->pending_xfers[xp->ring.index] = NULL;
+		xx->zerotd += 1;
 		break;
 	case 0:		/* This will be in a chain. */
 		xp->pending_xfers[xp->ring.index] = xfer;
@@ -2072,26 +2074,6 @@ xhci_cmd_set_address(struct xhci_softc *sc, uint8_t slot, uint64_t addr,
 	trb.trb_status = 0;
 	trb.trb_flags = htole32(
 	    XHCI_TRB_SET_SLOT(slot) | XHCI_CMD_ADDRESS_DEVICE | bsr
-	);
-
-	rw_enter_write(&sc->sc_cmd_lock);
-	error = xhci_command_submit(sc, &trb, XHCI_CMD_TIMEOUT);
-	rw_exit_write(&sc->sc_cmd_lock);
-	return (error);
-}
-
-int
-xhci_cmd_evaluate_ctx(struct xhci_softc *sc, uint8_t slot, uint64_t addr)
-{
-	struct xhci_trb trb;
-	int error;
-
-	DPRINTF(("%s: %s dev %u\n", DEVNAME(sc), __func__, slot));
-
-	trb.trb_paddr = htole64(addr);
-	trb.trb_status = 0;
-	trb.trb_flags = htole32(
-	    XHCI_TRB_SET_SLOT(slot) | XHCI_CMD_EVAL_CTX
 	);
 
 	rw_enter_write(&sc->sc_cmd_lock);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_var.h,v 1.86 2019/12/08 11:08:22 sashan Exp $	*/
+/*	$OpenBSD: ip6_var.h,v 1.88 2021/03/01 11:05:43 bluhm Exp $	*/
 /*	$KAME: ip6_var.h,v 1.33 2000/06/11 14:59:20 jinmei Exp $	*/
 
 /*
@@ -322,7 +322,7 @@ void	ip6_forward(struct mbuf *, struct rtentry *, int);
 void	ip6_mloopback(struct ifnet *, struct mbuf *, struct sockaddr_in6 *);
 int	ip6_output(struct mbuf *, struct ip6_pktopts *, struct route_in6 *, int,
 	    struct ip6_moptions *, struct inpcb *);
-int	ip6_fragment(struct mbuf *, int, u_char, u_long);
+int	ip6_fragment(struct mbuf *, struct mbuf_list *, int, u_char, u_long);
 int	ip6_ctloutput(int, struct socket *, int, int, struct mbuf *);
 int	ip6_raw_ctloutput(int, struct socket *, int, int, struct mbuf *);
 void	ip6_initpktopts(struct ip6_pktopts *);
@@ -368,7 +368,8 @@ u_int32_t ip6_randomflowlabel(void);
 struct tdb;
 struct tdb *
 	ip6_output_ipsec_lookup(struct mbuf *, int *, struct inpcb *);
-int	ip6_output_ipsec_send(struct tdb *, struct mbuf *, int, int);
+int	ip6_output_ipsec_send(struct tdb *, struct mbuf *, struct route_in6 *,
+	    int, int);
 #endif /* IPSEC */
 
 #endif /* _KERNEL */

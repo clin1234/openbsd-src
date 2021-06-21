@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ix.c,v 1.174 2020/11/09 15:09:09 bluhm Exp $	*/
+/*	$OpenBSD: if_ix.c,v 1.178 2020/12/22 23:25:37 dlg Exp $	*/
 
 /******************************************************************************
 
@@ -605,7 +605,7 @@ ixgbe_rxrinfo(struct ix_softc *sc, struct if_rxrinfo *ifri)
 
 	for (i = 0; i < sc->num_queues; i++) {
 		rxr = &sc->rx_rings[i];
-		ifr[n].ifr_size = sc->rx_mbuf_sz;
+		ifr[n].ifr_size = MCLBYTES;
 		snprintf(ifr[n].ifr_name, sizeof(ifr[n].ifr_name), "%d", i);
 		ifr[n].ifr_info = rxr->rx_ring;
 		n++;
@@ -1621,6 +1621,8 @@ ixgbe_stop(void *arg)
 	/* Should we really clear all structures on stop? */
 	ixgbe_free_transmit_structures(sc);
 	ixgbe_free_receive_structures(sc);
+
+	ixgbe_update_link_status(sc);
 }
 
 
@@ -2664,7 +2666,7 @@ ixgbe_get_buf(struct rx_ring *rxr, int i)
 	}
 
 	/* needed in any case so prealocate since this one will fail for sure */
-	mp = MCLGETI(NULL, M_DONTWAIT, NULL, sc->rx_mbuf_sz);
+	mp = MCLGETL(NULL, M_DONTWAIT, sc->rx_mbuf_sz);
 	if (!mp)
 		return (ENOBUFS);
 
@@ -3856,7 +3858,7 @@ int
 ix_txq_kstats_read(struct kstat *ks)
 {
 	struct ix_txq_kstats *stats = ks->ks_data;
-	struct rx_ring *txr = ks->ks_softc;
+	struct tx_ring *txr = ks->ks_softc;
 	struct ix_softc *sc = txr->sc;
 	struct ixgbe_hw	*hw = &sc->hw;
 	uint32_t i = txr->me;

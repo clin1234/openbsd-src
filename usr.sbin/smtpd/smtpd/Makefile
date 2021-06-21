@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.109 2020/09/23 19:11:50 martijn Exp $
+#	$OpenBSD: Makefile,v 1.113 2021/04/21 07:54:10 eric Exp $
 
 .PATH:		${.CURDIR}/..
 
@@ -7,7 +7,6 @@ PROG=		smtpd
 SRCS=	aliases.c
 SRCS+=	bounce.c
 SRCS+=	ca.c
-SRCS+=	cert.c
 SRCS+=	compress_backend.c
 SRCS+=	config.c
 SRCS+=	control.c
@@ -35,7 +34,7 @@ SRCS+=	mproc.c
 SRCS+=	mta.c
 SRCS+=	mta_session.c
 SRCS+=	parse.y
-SRCS+=	pony.c
+SRCS+=	dispatcher.c
 SRCS+=	proxy.c
 SRCS+=	queue.c
 SRCS+=	queue_backend.c
@@ -51,8 +50,6 @@ SRCS+=	smtp_session.c
 SRCS+=	smtpd.c
 SRCS+=	srs.c
 SRCS+=	ssl.c
-SRCS+=	ssl_smtpd.c
-SRCS+=	ssl_verify.c
 SRCS+=	stat_backend.c
 SRCS+=	table.c
 SRCS+=	to.c
@@ -82,8 +79,8 @@ SRCS+=		stat_ramstat.c
 MAN=		sendmail.8 smtpd.8 smtpd.conf.5 table.5
 BINDIR=		/usr/sbin
 
-LDADD+=		-levent -lutil -lssl -lcrypto -lm -lz
-DPADD+=		${LIBEVENT} ${LIBUTIL} ${LIBSSL} ${LIBCRYPTO} ${LIBM} ${LIBZ}
+LDADD+=		-levent -lutil -ltls -lssl -lcrypto -lz
+DPADD+=		${LIBEVENT} ${LIBUTIL} ${LIBTLS} ${LIBSSL} ${LIBCRYPTO} ${LIBZ}
 
 CFLAGS+=	-fstack-protector-all
 CFLAGS+=	-I${.CURDIR}/..

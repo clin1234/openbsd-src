@@ -1,4 +1,4 @@
-/*	$OpenBSD: extern.h,v 1.34 2020/09/12 15:46:48 claudio Exp $ */
+/*	$OpenBSD: extern.h,v 1.64 2021/05/06 17:03:57 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -17,6 +17,7 @@
 #ifndef EXTERN_H
 #define EXTERN_H
 
+#include <sys/queue.h>
 #include <sys/tree.h>
 #include <sys/time.h>
 
@@ -111,9 +112,11 @@ struct cert {
 	size_t		 ipsz; /* length of "ips" */
 	struct cert_as	*as; /* list of AS numbers and ranges */
 	size_t		 asz; /* length of "asz" */
+	char		*repo; /* CA repository (rsync:// uri) */
 	char		*mft; /* manifest (rsync:// uri) */
 	char		*notify; /* RRDP notify (https:// uri) */
 	char		*crl; /* CRL location (rsync:// or NULL) */
+	char		*aia; /* AIA (or NULL, for trust anchor) */
 	char		*aki; /* AKI (or NULL, for trust anchor) */
 	char		*ski; /* SKI */
 	int		 valid; /* validated resources */
@@ -153,8 +156,10 @@ struct mft {
 	struct mftfile	*files; /* file and hash */
 	size_t		 filesz; /* number of filenames */
 	int		 stale; /* if a stale manifest */
-	char		*ski; /* SKI */
+	char		*seqnum; /* manifestNumber */
+	char		*aia; /* AIA */
 	char		*aki; /* AKI */
+	char		*ski; /* SKI */
 };
 
 /*
@@ -179,9 +184,21 @@ struct roa {
 	struct roa_ip	*ips; /* IP prefixes */
 	size_t		 ipsz; /* number of IP prefixes */
 	int		 valid; /* validated resources */
-	char		*ski; /* SKI */
+	char		*aia; /* AIA */
 	char		*aki; /* AKI */
+	char		*ski; /* SKI */
 	char		*tal; /* basename of TAL for this cert */
+	time_t		 expires; /* do not use after */
+};
+
+/*
+ * A single Ghostbuster record
+ */
+struct gbr {
+	char		*vcard;
+	char		*aia; /* AIA */
+	char		*aki; /* AKI */
+	char		*ski; /* SKI */
 };
 
 /*
@@ -194,6 +211,7 @@ struct vrp {
 	char		*tal; /* basename of TAL for this cert */
 	enum afi	afi;
 	unsigned char	maxlength;
+	time_t		expires; /* transitive expiry moment */
 };
 /*
  * Tree of VRP sorted by afi, addr, maxlength and asid
@@ -237,7 +255,7 @@ struct auth *auth_find(struct auth_tree *, const char *);
 
 /*
  * Resource types specified by the RPKI profiles.
- * There are others (e.g., gbr) that we don't consider.
+ * There might be others we don't consider.
  */
 enum rtype {
 	RTYPE_EOF = 0,
@@ -245,8 +263,66 @@ enum rtype {
 	RTYPE_MFT,
 	RTYPE_ROA,
 	RTYPE_CER,
-	RTYPE_CRL
+	RTYPE_CRL,
+	RTYPE_GBR,
 };
+
+enum http_result {
+	HTTP_FAILED,	/* anything else */
+	HTTP_OK,	/* 200 OK */
+	HTTP_NOT_MOD,	/* 304 Not Modified */
+};
+
+/*
+ * Message types for communication with RRDP process.
+ */
+enum rrdp_msg {
+	RRDP_START,
+	RRDP_SESSION,
+	RRDP_FILE,
+	RRDP_END,
+	RRDP_HTTP_REQ,
+	RRDP_HTTP_INI,
+	RRDP_HTTP_FIN
+};
+
+/*
+ * RRDP session state, needed to pickup at the right spot on next run.
+ */
+struct rrdp_session {
+	char			*last_mod;
+	char			*session_id;
+	long long		 serial;
+};
+
+/*
+ * File types used in RRDP_FILE messages.
+ */
+enum publish_type {
+	PUB_ADD,
+	PUB_UPD,
+	PUB_DEL,
+};
+
+/*
+ * An entity (MFT, ROA, certificate, etc.) that needs to be downloaded
+ * and parsed.
+ */
+struct	entity {
+	enum rtype	 type; /* type of entity (not RTYPE_EOF) */
+	char		*file; /* local path to file */
+	int		 has_pkey; /* whether pkey/sz is specified */
+	unsigned char	*pkey; /* public key (optional) */
+	size_t		 pkeysz; /* public key length (optional) */
+	char		*descr; /* tal description */
+	TAILQ_ENTRY(entity) entries;
+};
+TAILQ_HEAD(entityq, entity);
+
+struct repo;
+struct filepath;
+RB_HEAD(filepath_tree, filepath);
+
 
 /*
  * Statistics collected during run-time.
@@ -263,48 +339,63 @@ struct	stats {
 	size_t	 roas_fail; /* failing syntactic parse */
 	size_t	 roas_invalid; /* invalid resources */
 	size_t	 repos; /* repositories */
+	size_t	 rsync_repos; /* synced rsync repositories */
+	size_t	 rsync_fails; /* failed rsync repositories */
+	size_t	 http_repos; /* synced http repositories */
+	size_t	 http_fails; /* failed http repositories */
+	size_t	 rrdp_repos; /* synced rrdp repositories */
+	size_t	 rrdp_fails; /* failed rrdp repositories */
 	size_t	 crls; /* revocation lists */
+	size_t	 gbrs; /* ghostbuster records */
 	size_t	 vrps; /* total number of vrps */
 	size_t	 uniqs; /* number of unique vrps */
 	size_t	 del_files; /* number of files removed in cleanup */
+	size_t	 del_dirs; /* number of directories removed in cleanup */
 	char	*talnames;
 	struct timeval	elapsed_time;
 	struct timeval	user_time;
 	struct timeval	system_time;
 };
 
+struct ibuf;
+
 /* global variables */
 extern int verbose;
 
 /* Routines for RPKI entities. */
 
-void		 tal_buffer(char **, size_t *, size_t *, const struct tal *);
+int		 base64_decode(const unsigned char *, unsigned char **,
+		    size_t *);
+void		 tal_buffer(struct ibuf *, const struct tal *);
 void		 tal_free(struct tal *);
 struct tal	*tal_parse(const char *, char *);
 char		*tal_read_file(const char *);
 struct tal	*tal_read(int);
 
-void		 cert_buffer(char **, size_t *, size_t *, const struct cert *);
+void		 cert_buffer(struct ibuf *, const struct cert *);
 void		 cert_free(struct cert *);
-struct cert	*cert_parse(X509 **, const char *, const unsigned char *);
+struct cert	*cert_parse(X509 **, const char *);
 struct cert	*ta_parse(X509 **, const char *, const unsigned char *, size_t);
 struct cert	*cert_read(int);
 
-void		 mft_buffer(char **, size_t *, size_t *, const struct mft *);
+void		 mft_buffer(struct ibuf *, const struct mft *);
 void		 mft_free(struct mft *);
 struct mft	*mft_parse(X509 **, const char *);
 int		 mft_check(const char *, struct mft *);
 struct mft	*mft_read(int);
 
-void		 roa_buffer(char **, size_t *, size_t *, const struct roa *);
+void		 roa_buffer(struct ibuf *, const struct roa *);
 void		 roa_free(struct roa *);
-struct roa	*roa_parse(X509 **, const char *, const unsigned char *);
+struct roa	*roa_parse(X509 **, const char *);
 struct roa	*roa_read(int);
 void		 roa_insert_vrps(struct vrp_tree *, struct roa *, size_t *,
 		    size_t *);
 
+void		 gbr_free(struct gbr *);
+struct gbr	*gbr_parse(X509 **, const char *);
+
 /* crl.c */
-X509_CRL	*crl_parse(const char *, const unsigned char *);
+X509_CRL	*crl_parse(const char *);
 void		 free_crl(struct crl *);
 
 /* Validation of our objects. */
@@ -316,11 +407,13 @@ int		 valid_ta(const char *, struct auth_tree *,
 int		 valid_cert(const char *, struct auth_tree *,
 		    const struct cert *);
 int		 valid_roa(const char *, struct auth_tree *, struct roa *);
+int		 valid_filehash(const char *, const char *, size_t);
+int		 valid_uri(const char *, size_t, const char *);
 
 /* Working with CMS files. */
 
 unsigned char	*cms_parse_validate(X509 **, const char *,
-			const char *, const unsigned char *, size_t *);
+			const char *, size_t *);
 
 /* Work with RFC 3779 IP addresses, prefixes, ranges. */
 
@@ -330,9 +423,8 @@ int		 ip_addr_parse(const ASN1_BIT_STRING *,
 			enum afi, const char *, struct ip_addr *);
 void		 ip_addr_print(const struct ip_addr *, enum afi, char *,
 			size_t);
-void		 ip_addr_buffer(char **, size_t *, size_t *,
-			const struct ip_addr *);
-void		 ip_addr_range_buffer(char **, size_t *, size_t *,
+void		 ip_addr_buffer(struct ibuf *, const struct ip_addr *);
+void		 ip_addr_range_buffer(struct ibuf *,
 			const struct ip_addr_range *);
 void		 ip_addr_read(int, struct ip_addr *);
 void		 ip_addr_range_read(int, struct ip_addr_range *);
@@ -352,12 +444,44 @@ int		 as_check_overlap(const struct cert_as *, const char *,
 int		 as_check_covered(uint32_t, uint32_t,
 			const struct cert_as *, size_t);
 
+/* Parser-specific */
+void		 entity_free(struct entity *);
+void		 entity_read_req(int fd, struct entity *);
+void		 entityq_flush(struct entityq *, struct repo *);
+void		 proc_parser(int) __attribute__((noreturn));
+
 /* Rsync-specific. */
 
-int		 rsync_uri_parse(const char **, size_t *,
-			const char **, size_t *, const char **, size_t *,
-			enum rtype *, const char *);
+char		*rsync_base_uri(const char *);
 void		 proc_rsync(char *, char *, int) __attribute__((noreturn));
+
+/* HTTP and RRDP processes. */
+
+void		 proc_http(char *, int);
+void		 proc_rrdp(int);
+
+/* Repository handling */
+int		 filepath_add(struct filepath_tree *, char *);
+void		 rrdp_save_state(size_t, struct rrdp_session *);
+int		 rrdp_handle_file(size_t, enum publish_type, char *,
+		    char *, size_t, char *, size_t);
+char		*repo_filename(const struct repo *, const char *);
+struct repo	*ta_lookup(struct tal *);
+struct repo	*repo_lookup(const char *, const char *);
+int		 repo_queued(struct repo *, struct entity *);
+void		 repo_cleanup(struct filepath_tree *);
+void		 repo_free(void);
+
+void		 rsync_finish(size_t, int);
+void		 http_finish(size_t, enum http_result, const char *);
+void		 rrdp_finish(size_t, int);
+
+void		 rsync_fetch(size_t, const char *, const char *);
+void		 http_fetch(size_t, const char *, const char *, int);
+void		 rrdp_fetch(size_t, const char *, const char *,
+		    struct rrdp_session *);
+void		 rrdp_http_done(size_t, enum http_result, const char *);
+
 
 /* Logging (though really used for OpenSSL errors). */
 
@@ -367,29 +491,33 @@ void		 cryptoerrx(const char *, ...)
 			__attribute__((format(printf, 1, 2)))
 			__attribute__((noreturn));
 
+/* Encoding functions for hex and base64. */
+
+int		 base64_decode(const unsigned char *, unsigned char **,
+		    size_t *);
+char		*hex_encode(const unsigned char *, size_t);
+
+
 /* Functions for moving data between processes. */
 
 void		 io_socket_blocking(int);
 void		 io_socket_nonblocking(int);
-void		 io_simple_buffer(char **, size_t *, size_t *, const void *,
-			size_t);
+void		 io_simple_buffer(struct ibuf *, const void *, size_t);
+void		 io_buf_buffer(struct ibuf *, const void *, size_t);
+void		 io_str_buffer(struct ibuf *, const char *);
 void		 io_simple_read(int, void *, size_t);
-void		 io_simple_write(int, const void *, size_t);
-void		 io_buf_buffer(char **, size_t *, size_t *, const void *,
-			size_t);
 void		 io_buf_read_alloc(int, void **, size_t *);
-void		 io_buf_write(int, const void *, size_t);
-void		 io_str_buffer(char **, size_t *, size_t *, const char *);
 void		 io_str_read(int, char **);
-void		 io_str_write(int, const char *);
+int		 io_recvfd(int, void *, size_t);
 
 /* X509 helpers. */
 
-char		*x509_get_aki_ext(X509_EXTENSION *, const char *);
-char		*x509_get_ski_ext(X509_EXTENSION *, const char *);
-int		 x509_get_ski_aki(X509 *, const char *, char **, char **);
+char		*hex_encode(const unsigned char *, size_t);
+char		*x509_get_aia(X509 *, const char *);
+char		*x509_get_aki(X509 *, int, const char *);
+char		*x509_get_ski(X509 *, const char *);
 char		*x509_get_crl(X509 *, const char *);
-char		*x509_crl_get_aki(X509_CRL *);
+char		*x509_crl_get_aki(X509_CRL *, const char *);
 
 /* Output! */
 
@@ -398,7 +526,6 @@ extern int	 outformats;
 #define FORMAT_BIRD	0x02
 #define FORMAT_CSV	0x04
 #define FORMAT_JSON	0x08
-extern char*	 outputdir;
 
 int		 outputfiles(struct vrp_tree *v, struct stats *);
 int		 outputheader(FILE *, struct stats *);
@@ -411,6 +538,8 @@ int		 output_json(FILE *, struct vrp_tree *, struct stats *);
 
 void	logx(const char *fmt, ...)
 		    __attribute__((format(printf, 1, 2)));
+
+int	mkpath(const char *);
 
 #define		RPKI_PATH_OUT_DIR	"/var/db/rpki-client"
 #define		RPKI_PATH_BASE_DIR	"/var/cache/rpki-client"

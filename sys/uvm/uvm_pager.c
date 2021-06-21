@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_pager.c,v 1.73 2020/10/21 09:08:14 mpi Exp $	*/
+/*	$OpenBSD: uvm_pager.c,v 1.76 2021/03/26 13:40:05 mpi Exp $	*/
 /*	$NetBSD: uvm_pager.c,v 1.36 2000/11/27 18:26:41 chs Exp $	*/
 
 /*
@@ -326,7 +326,7 @@ uvm_mk_pcluster(struct uvm_object *uobj, struct vm_page **pps, int *npages,
 	if ((hi - lo) >> PAGE_SHIFT > *npages) { /* pps too small, bail out! */
 		pps[0] = center;
 		*npages = 1;
-		return(pps);
+		return pps;
 	}
 
 	/* now determine the center and attempt to cluster around the edges */
@@ -410,7 +410,7 @@ uvm_mk_pcluster(struct uvm_object *uobj, struct vm_page **pps, int *npages,
 	/*
 	 * done!  return the cluster array to the caller!!!
 	 */
-	return(ppsp);
+	return ppsp;
 }
 
 /*
@@ -526,7 +526,7 @@ ReTry:
 	}
 
 	/*
-	 * a pager error occured (even after dropping the cluster, if there
+	 * a pager error occurred (even after dropping the cluster, if there
 	 * was one).  give up! the caller only has one page ("pg")
 	 * to worry about.
 	 */
@@ -586,7 +586,7 @@ ReTry:
 	 * to worry about.
 	 */
 	
-	return(result);
+	return result;
 }
 
 /*
@@ -649,7 +649,8 @@ uvm_pager_dropcluster(struct uvm_object *uobj, struct vm_page *pg,
 				UVM_PAGE_OWN(ppsp[lcv], NULL);
 
 				/* kills anon and frees pg */
-				uvm_anfree(ppsp[lcv]->uanon);
+				rw_enter(ppsp[lcv]->uanon->an_lock, RW_WRITE);
+				uvm_anon_release(ppsp[lcv]->uanon);
 
 				continue;
 		} else {

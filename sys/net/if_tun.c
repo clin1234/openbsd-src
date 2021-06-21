@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_tun.c,v 1.227 2020/10/04 06:59:16 anton Exp $	*/
+/*	$OpenBSD: if_tun.c,v 1.231 2021/03/09 20:05:14 anton Exp $	*/
 /*	$NetBSD: if_tun.c,v 1.24 1996/05/07 02:40:48 thorpej Exp $	*/
 
 /*
@@ -239,6 +239,9 @@ tun_create(struct if_clone *ifc, int unit, int flags)
 	if_counters_alloc(ifp);
 
 	if ((flags & TUN_LAYER2) == 0) {
+#if NBPFILTER > 0
+		ifp->if_bpf_mtap = bpf_mtap;
+#endif
 		ifp->if_input = tun_input;
 		ifp->if_output = tun_output;
 		ifp->if_mtu = ETHERMTU;
@@ -378,7 +381,7 @@ tun_dev_open(dev_t dev, const struct if_clone *ifc, int mode, struct proc *p)
 	rdomain = rtable_l2(p->p_p->ps_rtableid);
 
 	/* let's find or make an interface to work with */
-	while ((ifp = ifunit(name)) == NULL) {
+	while ((ifp = if_unit(name)) == NULL) {
 		error = if_clone_create(name, rdomain);
 		switch (error) {
 		case 0: /* it's probably ours */
@@ -397,12 +400,14 @@ tun_dev_open(dev_t dev, const struct if_clone *ifc, int mode, struct proc *p)
 		error = tsleep_nsec(sc, PCATCH, "tuninit", INFSLP);
 		if (error != 0) {
 			/* XXX if_clone_destroy if stayup? */
+			if_put(ifp);
 			return (error);
 		}
 	}
 
 	if (sc->sc_dev != 0) {
 		/* aww, we lost */
+		if_put(ifp);
 		return (EBUSY);
 	}
 	/* it's ours now */
@@ -411,6 +416,7 @@ tun_dev_open(dev_t dev, const struct if_clone *ifc, int mode, struct proc *p)
 
 	/* automatically mark the interface running on open */
 	SET(ifp->if_flags, IFF_UP | IFF_RUNNING);
+	if_put(ifp);
 	tun_link_state(sc, LINK_STATE_FULL_DUPLEX);
 
 	return (0);
@@ -710,7 +716,8 @@ tun_dev_ioctl(dev_t dev, u_long cmd, void *data)
 		break;
 	case FIOSETOWN:
 	case TIOCSPGRP:
-		return (sigio_setown(&sc->sc_sigio, cmd, data));
+		error = sigio_setown(&sc->sc_sigio, cmd, data);
+		break;
 	case FIOGETOWN:
 	case TIOCGPGRP:
 		sigio_getown(&sc->sc_sigio, cmd, data);
@@ -995,7 +1002,7 @@ tun_dev_kqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = (caddr_t)sc; /* XXX give the sc_ref to the hook? */
 
 	s = splhigh();
-	klist_insert(klist, kn);
+	klist_insert_locked(klist, kn);
 	splx(s);
 
 put:
@@ -1010,7 +1017,7 @@ filt_tunrdetach(struct knote *kn)
 	struct tun_softc	*sc = kn->kn_hook;
 
 	s = splhigh();
-	klist_remove(&sc->sc_rsel.si_note, kn);
+	klist_remove_locked(&sc->sc_rsel.si_note, kn);
 	splx(s);
 }
 
@@ -1032,7 +1039,7 @@ filt_tunwdetach(struct knote *kn)
 	struct tun_softc	*sc = kn->kn_hook;
 
 	s = splhigh();
-	klist_remove(&sc->sc_wsel.si_note, kn);
+	klist_remove_locked(&sc->sc_wsel.si_note, kn);
 	splx(s);
 }
 

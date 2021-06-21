@@ -1,4 +1,4 @@
-/*	$OpenBSD: queue_backend.c,v 1.66 2020/04/22 11:35:34 eric Exp $	*/
+/*	$OpenBSD: queue_backend.c,v 1.68 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2011 Gilles Chehade <gilles@poolp.org>
@@ -16,26 +16,13 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-
-#include <ctype.h>
-#include <err.h>
 #include <errno.h>
-#include <event.h>
 #include <fcntl.h>
 #include <grp.h>
-#include <imsg.h>
-#include <limits.h>
 #include <inttypes.h>
 #include <pwd.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "smtpd.h"
@@ -119,11 +106,11 @@ queue_init(const char *name, int server)
 
 	pwq = getpwnam(SMTPD_QUEUE_USER);
 	if (pwq == NULL)
-		errx(1, "unknown user %s", SMTPD_QUEUE_USER);
+		fatalx("unknown user %s", SMTPD_QUEUE_USER);
 
 	gr = getgrnam(SMTPD_QUEUE_GROUP);
 	if (gr == NULL)
-		errx(1, "unknown group %s", SMTPD_QUEUE_GROUP);
+		fatalx("unknown group %s", SMTPD_QUEUE_GROUP);
 
 	tree_init(&evpcache_tree);
 	TAILQ_INIT(&evpcache_list);
@@ -139,16 +126,16 @@ queue_init(const char *name, int server)
 
 	if (server) {
 		if (ckdir(PATH_SPOOL, 0711, 0, 0, 1) == 0)
-			errx(1, "error in spool directory setup");
+			fatalx("error in spool directory setup");
 		if (ckdir(PATH_SPOOL PATH_OFFLINE, 0770, 0, gr->gr_gid, 1) == 0)
-			errx(1, "error in offline directory setup");
+			fatalx("error in offline directory setup");
 		if (ckdir(PATH_SPOOL PATH_PURGE, 0700, pwq->pw_uid, 0, 1) == 0)
-			errx(1, "error in purge directory setup");
+			fatalx("error in purge directory setup");
 
 		mvpurge(PATH_SPOOL PATH_TEMPORARY, PATH_SPOOL PATH_PURGE);
 
 		if (ckdir(PATH_SPOOL PATH_TEMPORARY, 0700, pwq->pw_uid, 0, 1) == 0)
-			errx(1, "error in purge directory setup");
+			fatalx("error in purge directory setup");
 	}
 
 	r = backend->init(pwq, server, name);

@@ -15,18 +15,15 @@
  */
 
 #include <sys/types.h>
-#include <sys/stat.h>
 
-#include <ctype.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
-#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sysexits.h>
+#include <time.h>
 #include <unistd.h>
 
 static void	mboxfile_engine(const char *sender, const char *filename);
@@ -67,7 +64,6 @@ mboxfile_engine(const char *sender, const char *filename)
 	FILE    *fp;
 	char	*line = NULL;
 	size_t	linesize = 0;
-	ssize_t	linelen;
 	time_t	now;
 
 	time(&now);
@@ -80,7 +76,7 @@ mboxfile_engine(const char *sender, const char *filename)
 		err(EX_TEMPFAIL, NULL);
 
 	fprintf(fp, "From %s %s", sender, ctime(&now));
-	while ((linelen = getline(&line, &linesize, stdin)) != -1) {
+	while (getline(&line, &linesize, stdin) != -1) {
 		line[strcspn(line, "\n")] = '\0';
 		if (strncmp(line, "From ", 5) == 0)
 			fprintf(fp, ">%s\n", line);

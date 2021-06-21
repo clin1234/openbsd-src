@@ -1,4 +1,4 @@
-/* $OpenBSD: options-table.c,v 1.134 2020/08/25 11:35:32 nicm Exp $ */
+/* $OpenBSD: options-table.c,v 1.144 2021/06/16 11:57:04 nicm Exp $ */
 
 /*
  * Copyright (c) 2011 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -46,7 +46,7 @@ static const char *options_table_status_keys_list[] = {
 	"emacs", "vi", NULL
 };
 static const char *options_table_status_justify_list[] = {
-	"left", "centre", "right", NULL
+	"left", "centre", "right", "absolute-centre", NULL
 };
 static const char *options_table_status_position_list[] = {
 	"top", "bottom", NULL
@@ -68,6 +68,15 @@ static const char *options_table_set_clipboard_list[] = {
 };
 static const char *options_table_window_size_list[] = {
 	"largest", "smallest", "manual", "latest", NULL
+};
+static const char *options_table_remain_on_exit_list[] = {
+	"off", "on", "failed", NULL
+};
+static const char *options_table_detach_on_destroy_list[] = {
+	"off", "on", "no-detached", NULL
+};
+static const char *options_table_extended_keys_list[] = {
+	"off", "on", "always", NULL
 };
 
 /* Status line format. */
@@ -261,8 +270,9 @@ const struct options_table_entry options_table[] = {
 	},
 
 	{ .name = "extended-keys",
-	  .type = OPTIONS_TABLE_FLAG,
+	  .type = OPTIONS_TABLE_CHOICE,
 	  .scope = OPTIONS_TABLE_SERVER,
+	  .choices = options_table_extended_keys_list,
 	  .default_num = 0,
 	  .text = "Whether to request extended key sequences from terminals "
 	          "that support it."
@@ -290,6 +300,15 @@ const struct options_table_entry options_table[] = {
 	  .maximum = INT_MAX,
 	  .default_num = 1000,
 	  .text = "Maximum number of server messages to keep."
+	},
+
+	{ .name = "prompt-history-limit",
+	  .type = OPTIONS_TABLE_NUMBER,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .minimum = 0,
+	  .maximum = INT_MAX,
+	  .default_num = 100,
+	  .text = "Maximum number of commands to keep in history."
 	},
 
 	{ .name = "set-clipboard",
@@ -349,7 +368,7 @@ const struct options_table_entry options_table[] = {
 	  .maximum = INT_MAX,
 	  .default_num = 1,
 	  .unit = "milliseconds",
-	  .text = "Maximum time between input to assume it pasting rather "
+	  .text = "Maximum time between input to assume it is pasting rather "
 		  "than typing."
 	},
 
@@ -402,8 +421,9 @@ const struct options_table_entry options_table[] = {
 	},
 
 	{ .name = "detach-on-destroy",
-	  .type = OPTIONS_TABLE_FLAG,
+	  .type = OPTIONS_TABLE_CHOICE,
 	  .scope = OPTIONS_TABLE_SESSION,
+	  .choices = options_table_detach_on_destroy_list,
 	  .default_num = 1,
 	  .text = "Whether to detach when a session is destroyed, or switch "
 		  "the client to another session if any exist."
@@ -595,7 +615,7 @@ const struct options_table_entry options_table[] = {
 	  .text = "Formats for the status lines. "
 		  "Each array member is the format for one status line. "
 		  "The default status line is made up of several components "
-		  "which may be configured individually with other option such "
+		  "which may be configured individually with other options such "
 		  "as 'status-left'."
 	},
 
@@ -735,7 +755,11 @@ const struct options_table_entry options_table[] = {
 	{ .name = "word-separators",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_SESSION,
-	  .default_str = " ",
+	  /*
+	   * The set of non-alphanumeric printable ASCII characters minus the
+	   * underscore.
+	   */
+	  .default_str = "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~",
 	  .text = "Characters considered to separate words."
 	},
 
@@ -928,7 +952,8 @@ const struct options_table_entry options_table[] = {
 	  .scope = OPTIONS_TABLE_WINDOW,
 	  .choices = options_table_pane_lines_list,
 	  .default_num = PANE_LINES_SINGLE,
-	  .text = "Type of the pane type lines."
+	  .text = "Type of characters used to draw pane border lines. Some of "
+	          "these are only supported on terminals with UTF-8 support."
 	},
 
 	{ .name = "pane-border-status",
@@ -949,16 +974,17 @@ const struct options_table_entry options_table[] = {
 	},
 
 	{ .name = "remain-on-exit",
-	  .type = OPTIONS_TABLE_FLAG,
+	  .type = OPTIONS_TABLE_CHOICE,
 	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
+	  .choices = options_table_remain_on_exit_list,
 	  .default_num = 0,
 	  .text = "Whether panes should remain ('on') or be automatically "
-		  "killed ('off') when the program inside exits."
+		  "killed ('off' or 'failed') when the program inside exits."
 	},
 
 	{ .name = "synchronize-panes",
 	  .type = OPTIONS_TABLE_FLAG,
-	  .scope = OPTIONS_TABLE_WINDOW,
+	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
 	  .default_num = 0,
 	  .text = "Whether typing should be sent to all panes simultaneously."
 	},

@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.132 2020/06/23 13:57:05 fcambus Exp $
+#	$OpenBSD: GENERIC,v 1.138 2021/05/28 15:52:11 visa Exp $
 #
 # For further information on compiling OpenBSD kernels, see the config(8)
 # man page.
@@ -211,6 +211,12 @@ iic*		at rkiic?
 rktemp*		at fdt?
 dwdog*		at fdt?
 
+# Xilinx Zynq-7000
+cad*		at fdt?			# Ethernet controller
+cduart*		at fdt?
+zqclock*	at fdt?
+zqreset*	at fdt?
+
 # I2C devices
 abcrtc*		at iic?			# Abracon x80x RTC
 axppmic*	at iic?			# axp209 pmic
@@ -321,6 +327,8 @@ uslhcom* at uhidev?		# Silicon Labs CP2110 USB HID UART
 ucom*	at uslhcom?
 uhid*	at uhidev?		# USB generic HID support
 fido*	at uhidev?		# FIDO/U2F security key support
+ujoy*	at uhidev?		# USB joystick/gamecontroller support
+uhidpp*	at uhidev?		# Logitech HID++ Devices
 upd*	at uhidev?		# USB Power Devices sensors
 aue*	at uhub?		# ADMtek AN986 Pegasus Ethernet
 atu*	at uhub?		# Atmel AT76c50x based 802.11b

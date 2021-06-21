@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.151 2020/02/24 23:54:28 millert Exp $	*/
+/*	$OpenBSD: util.c,v 1.154 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2000,2001 Markus Friedl.  All rights reserved.
@@ -19,34 +19,20 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/resource.h>
 
 #include <netinet/in.h>
-#include <arpa/inet.h>
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
-#include <event.h>
-#include <fcntl.h>
 #include <fts.h>
-#include <imsg.h>
-#include <inttypes.h>
 #include <libgen.h>
-#include <netdb.h>
-#include <pwd.h>
-#include <limits.h>
 #include <resolv.h>
 #include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "smtpd.h"
@@ -176,7 +162,7 @@ bsnprintf(char *str, size_t size, const char *format, ...)
 	va_start(ap, format);
 	ret = vsnprintf(str, size, format, ap);
 	va_end(ap);
-	if (ret < 0 || ret >= (int)size)
+	if (ret < 0 || (size_t)ret >= size)
 		return 0;
 
 	return 1;
@@ -823,15 +809,13 @@ base64_encode_rfc3548(unsigned char const *src, size_t srclen,
 }
 
 void
-log_trace(int mask, const char *emsg, ...)
+log_trace0(const char *emsg, ...)
 {
 	va_list	 ap;
 
-	if (tracing & mask) {
-		va_start(ap, emsg);
-		vlog(LOG_DEBUG, emsg, ap);
-		va_end(ap);
-	}
+	va_start(ap, emsg);
+	vlog(LOG_DEBUG, emsg, ap);
+	va_end(ap);
 }
 
 void

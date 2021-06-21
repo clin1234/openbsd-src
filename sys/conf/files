@@ -1,4 +1,4 @@
-#	$OpenBSD: files,v 1.691 2020/07/20 00:15:59 deraadt Exp $
+#	$OpenBSD: files,v 1.702 2021/04/16 08:17:35 stsp Exp $
 #	$NetBSD: files,v 1.87 1996/05/19 17:17:50 jonathan Exp $
 
 #	@(#)files.newconf	7.5 (Berkeley) 5/10/93
@@ -13,6 +13,7 @@ define	audio {}
 define	scsi {}
 define	atascsi {}
 define	ifmedia
+define	etherbridge
 define	mii {[phy = -1]}
 define	midibus {}
 define	radiobus {}
@@ -384,7 +385,7 @@ file	dev/ic/ar9003.c			athn
 file	dev/ic/ar9380.c			athn
 
 # Broadcom FullMAC 802.11 driver
-device	bwfm: ether, ifnet, ifmedia, wlan
+device	bwfm: ether, ifnet, ifmedia, wlan, firmload
 file	dev/ic/bwfm.c			bwfm
 
 # ADMtek ADM8211 802.11
@@ -515,6 +516,7 @@ file	dev/softraid_raid0.c		softraid
 file	dev/softraid_raid1.c		softraid
 file	dev/softraid_raid5.c		softraid
 file	dev/softraid_raid6.c		softraid
+file	dev/softraid_raid1c.c		softraid & crypto
 
 # SPD Memory EEPROM
 device	spdmem
@@ -532,6 +534,10 @@ file	dev/ic/dwhdmiphy.c		dwhdmi
 # Synopsys DesignWare I2C controller
 device	dwiic: i2cbus
 file	dev/ic/dwiic.c			dwiic
+
+# Freescale i.MX I2C controller
+device	imxiic: i2cbus
+file	dev/ic/imxiic.c			imxiic
 
 # legitimate pseudo-devices
 pseudo-device vnd: disk
@@ -551,11 +557,12 @@ pseudo-device bpfilter: ifnet
 pseudo-device enc: ifnet
 pseudo-device etherip: ifnet, ether, ifmedia
 pseudo-device bridge: ifnet, ether
+pseudo-device veb: ifnet, ether, etherbridge
 pseudo-device vlan: ifnet, ether
 pseudo-device carp: ifnet, ether
 pseudo-device sppp: ifnet
 pseudo-device gif: ifnet
-pseudo-device gre: ifnet
+pseudo-device gre: ifnet, ether, etherbridge
 pseudo-device crypto: ifnet
 pseudo-device trunk: ifnet, ether, ifmedia
 pseudo-device aggr: ifnet, ether, ifmedia
@@ -563,7 +570,7 @@ pseudo-device tpmr: ifnet, ether, ifmedia
 pseudo-device mpe: ifnet, mpls
 pseudo-device mpw: ifnet, mpls, ether
 pseudo-device mpip: ifnet, mpls
-pseudo-device bpe: ifnet, ether, ifmedia
+pseudo-device bpe: ifnet, ether, ifmedia, etherbridge
 pseudo-device vether: ifnet, ether
 pseudo-device pppx: ifnet
 pseudo-device vxlan: ifnet, ether, ifmedia
@@ -808,6 +815,8 @@ file net/if_tun.c			tun			needs-count
 file net/if_bridge.c			bridge			needs-count
 file net/bridgectl.c			bridge
 file net/bridgestp.c			bridge
+file net/if_etherbridge.c		etherbridge
+file net/if_veb.c			veb
 file net/if_vlan.c			vlan			needs-count
 file net/if_switch.c			switch			needs-count
 file net/switchctl.c			switch
@@ -836,7 +845,7 @@ file net/if_wg.c			wg
 file net/wg_noise.c			wg
 file net/wg_cookie.c			wg
 file net/bfd.c				bfd
-file net/toeplitz.c			stoeplitz		needs-flag
+file net/toeplitz.c			stoeplitz | etherbridge	needs-flag
 file net80211/ieee80211.c		wlan
 file net80211/ieee80211_amrr.c		wlan
 file net80211/ieee80211_crypto.c	wlan
@@ -846,12 +855,13 @@ file net80211/ieee80211_crypto_tkip.c	wlan
 file net80211/ieee80211_crypto_wep.c	wlan
 file net80211/ieee80211_input.c		wlan
 file net80211/ieee80211_ioctl.c		wlan
-file net80211/ieee80211_mira.c		wlan
+#file net80211/ieee80211_mira.c		wlan
 file net80211/ieee80211_node.c		wlan
 file net80211/ieee80211_output.c	wlan
 file net80211/ieee80211_pae_input.c	wlan
 file net80211/ieee80211_pae_output.c	wlan
 file net80211/ieee80211_proto.c		wlan
+file net80211/ieee80211_ra.c		wlan
 file net80211/ieee80211_rssadapt.c	wlan
 file net80211/ieee80211_regdomain.c	wlan
 file netinet/if_ether.c			ether
@@ -868,7 +878,7 @@ file netinet/ip_input.c
 file netinet/ip_mroute.c		mrouting
 file netinet/ip_output.c
 file netinet/raw_ip.c
-file netinet/tcp_debug.c
+file netinet/tcp_debug.c		!small_kernel
 file netinet/tcp_input.c
 file netinet/tcp_output.c
 file netinet/tcp_subr.c
@@ -1061,15 +1071,15 @@ file lib/libkern/arch/${MACHINE_ARCH}/htonl.S | lib/libkern/htonl.c
 file lib/libkern/arch/${MACHINE_ARCH}/htons.S | lib/libkern/htons.c
 file lib/libkern/arch/${MACHINE_ARCH}/strncasecmp.S | lib/libkern/strncasecmp.c
 
-file lib/libz/adler32.c			ppp_deflate | ipsec | crypto | bios
+file lib/libz/adler32.c			ppp_deflate | ipsec | crypto | ddb |
+					    bios
 file lib/libz/crc32.c
-file lib/libz/infback.c			ppp_deflate | ipsec | crypto
-file lib/libz/inffast.c			ppp_deflate | ipsec | crypto
-file lib/libz/inflate.c			ppp_deflate | ipsec | crypto
-file lib/libz/inftrees.c		ppp_deflate | ipsec | crypto
-file lib/libz/deflate.c			ppp_deflate | ipsec | crypto
-file lib/libz/zutil.c			ppp_deflate | ipsec | crypto
-file lib/libz/zopenbsd.c		ppp_deflate | ipsec | crypto
-file lib/libz/trees.c			ppp_deflate | ipsec | crypto
-file lib/libz/compress.c		ppp_deflate | ipsec | crypto
-
+file lib/libz/infback.c			ppp_deflate | ipsec | crypto | ddb
+file lib/libz/inffast.c			ppp_deflate | ipsec | crypto | ddb
+file lib/libz/inflate.c			ppp_deflate | ipsec | crypto | ddb
+file lib/libz/inftrees.c		ppp_deflate | ipsec | crypto | ddb
+file lib/libz/deflate.c			ppp_deflate | ipsec | crypto | ddb
+file lib/libz/zutil.c			ppp_deflate | ipsec | crypto | ddb
+file lib/libz/zopenbsd.c		ppp_deflate | ipsec | crypto | ddb
+file lib/libz/trees.c			ppp_deflate | ipsec | crypto | ddb
+file lib/libz/compress.c		ppp_deflate | ipsec | crypto | ddb

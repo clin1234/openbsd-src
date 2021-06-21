@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_pledge.c,v 1.267 2020/10/29 21:15:27 denis Exp $	*/
+/*	$OpenBSD: kern_pledge.c,v 1.273 2021/06/09 17:52:47 semarie Exp $	*/
 
 /*
  * Copyright (c) 2015 Nicholas Marriott <nicm@openbsd.org>
@@ -548,6 +548,10 @@ pledge_fail(struct proc *p, int error, uint64_t code)
 	    p->p_p->ps_comm, p->p_p->ps_pid, codes, p->p_pledge_syscall);
 	p->p_p->ps_acflag |= APLEDGE;
 
+	/* Stop threads immediately, because this process is suspect */
+	if (P_HASSIBLING(p))
+		single_thread_set(p, SINGLE_SUSPEND, 1);
+
 	/* Send uncatchable SIGABRT for coredump */
 	sigabort(p);
 
@@ -619,8 +623,7 @@ pledge_namei(struct proc *p, struct nameidata *ni, char *origpath)
 		/* when avoiding YP mode, getpw* functions touch this */
 		if (ni->ni_pledge == PLEDGE_RPATH &&
 		    strcmp(path, "/var/run/ypbind.lock") == 0) {
-			if ((p->p_p->ps_pledge & PLEDGE_GETPW) ||
-			    (ni->ni_unveil == UNVEIL_INSPECT)) {
+			if (p->p_p->ps_pledge & PLEDGE_GETPW) {
 				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
 				return (0);
 			} else
@@ -718,14 +721,6 @@ pledge_namei(struct proc *p, struct nameidata *ni, char *origpath)
 			return (0);
 		}
 
-		break;
-	case SYS_readlink:
-		/* Allow /etc/malloc.conf for malloc(3). */
-		if ((ni->ni_pledge == PLEDGE_RPATH) &&
-		    strcmp(path, "/etc/malloc.conf") == 0) {
-			ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-			return (0);
-		}
 		break;
 	case SYS_stat:
 		/* DNS needs /etc/resolv.conf. */
@@ -896,7 +891,7 @@ pledge_sysctl(struct proc *p, int miblen, int *mib, void *new)
 			return (0);
 	}
 
-	if ((p->p_p->ps_pledge & PLEDGE_INET)) {
+	if ((p->p_p->ps_pledge & (PLEDGE_INET | PLEDGE_UNIX))) {
 		if (miblen == 2 &&		/* kern.somaxconn */
 		    mib[0] == CTL_KERN && mib[1] == KERN_SOMAXCONN)
 			return (0);
@@ -1306,6 +1301,8 @@ pledge_ioctl(struct proc *p, long com, struct file *fp)
 
 	if ((pl & PLEDGE_WROUTE)) {
 		switch (com) {
+		case SIOCAIFADDR:
+		case SIOCDIFADDR:
 		case SIOCAIFADDR_IN6:
 		case SIOCDIFADDR_IN6:
 			if (fp->f_type == DTYPE_SOCKET)
@@ -1409,7 +1406,7 @@ pledge_sockopt(struct proc *p, int set, int level, int optname)
 	case SOL_SOCKET:
 		switch (optname) {
 		case SO_RTABLE:
-			return pledge_fail(p, EINVAL, PLEDGE_INET);
+			return pledge_fail(p, EINVAL, PLEDGE_WROUTE);
 		}
 		return (0);
 	}

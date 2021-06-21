@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.69 2020/09/21 08:53:56 schwarze Exp $
+# $OpenBSD: Makefile,v 1.71 2021/05/12 14:17:27 tb Exp $
 
 .include <bsd.own.mk>
 
@@ -58,6 +58,7 @@ MAN =	BIO_f_ssl.3 \
 	SSL_SESSION_get_id.3 \
 	SSL_SESSION_get_protocol_version.3 \
 	SSL_SESSION_get_time.3 \
+	SSL_SESSION_get0_cipher.3 \
 	SSL_SESSION_get0_peer.3 \
 	SSL_SESSION_has_ticket.3 \
 	SSL_SESSION_new.3 \
@@ -84,6 +85,7 @@ MAN =	BIO_f_ssl.3 \
 	SSL_get_ex_data_X509_STORE_CTX_idx.3 \
 	SSL_get_ex_new_index.3 \
 	SSL_get_fd.3 \
+	SSL_get_finished.3 \
 	SSL_get_peer_cert_chain.3 \
 	SSL_get_peer_certificate.3 \
 	SSL_get_rbio.3 \

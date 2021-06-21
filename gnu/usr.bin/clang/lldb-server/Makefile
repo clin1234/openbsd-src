@@ -1,18 +1,23 @@
-# $OpenBSD: Makefile,v 1.2 2020/08/03 14:45:31 patrick Exp $
+# $OpenBSD: Makefile,v 1.5 2021/04/28 12:55:42 patrick Exp $
 
 .include <bsd.own.mk>
 
+.if (${MACHINE} == "arm64") || (${MACHINE} == "amd64")
+PROG=	lldb-server
+.else
 NOPROG=	lldb-server
+.endif
+
 BINDIR=	/usr/bin
 NOMAN=
 
 SRCS=	Acceptor.cpp \
-	LLDBServerUtilities.cpp \
-	SystemInitializerLLGS.cpp \
-	lldb-platform.cpp \
-	lldb-gdbserver.cpp \
-	lldb-server.cpp \
 	lldb.cpp \
+	lldb-gdbserver.cpp \
+	lldb-platform.cpp \
+	lldb-server.cpp \
+	LLDBServerUtilities.cpp \
+	SystemInitializerLLGS.cpp
 
 LDADD+=	-lcurses -ledit -lpanel
 
@@ -23,10 +28,8 @@ LDADD+=	-lcurses -ledit -lpanel
 LLVM_LIBDEPS=	clangAST \
     clangAnalysis \
     clangBasic \
-    clangBasicTargets \
     clangCodeGen \
     clangDriver \
-    clangDriverArch \
     clangEdit \
     clangFrontend \
     clangLex \
@@ -59,7 +62,6 @@ LLVM_LIBDEPS=	clangAST \
     lldbPluginMemoryHistory \
     lldbPluginObjectContainer \
     lldbPluginObjectFile \
-    lldbPluginOperatingSystem \
     lldbPluginPlatform \
     lldbPluginProcess \
     lldbPluginScriptInterpreter \
@@ -67,6 +69,7 @@ LLVM_LIBDEPS=	clangAST \
     lldbPluginSymbolFile \
     lldbPluginSymbolVendor \
     lldbPluginSystemRuntime \
+		lldbPluginTypeSystem \
     lldbPluginUnwindAssembly \
     lldbSymbol \
     lldbTarget \

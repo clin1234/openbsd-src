@@ -1,4 +1,4 @@
-/*	$OpenBSD: queue.c,v 1.190 2020/04/22 11:35:34 eric Exp $	*/
+/*	$OpenBSD: queue.c,v 1.193 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -18,24 +18,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-
-#include <err.h>
-#include <event.h>
-#include <imsg.h>
 #include <inttypes.h>
 #include <pwd.h>
 #include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
-#include <limits.h>
 
 #include "smtpd.h"
 #include "log.h"
@@ -152,15 +140,15 @@ queue_imsg(struct mproc *p, struct imsg *imsg)
 			log_warnx("warn: imsg_queue_submit_envelope: msgid=0, "
 			    "evpid=%016"PRIx64, evp.id);
 		ret = queue_envelope_create(&evp);
-		m_create(p_pony, IMSG_QUEUE_ENVELOPE_SUBMIT, 0, 0, -1);
-		m_add_id(p_pony, reqid);
+		m_create(p_dispatcher, IMSG_QUEUE_ENVELOPE_SUBMIT, 0, 0, -1);
+		m_add_id(p_dispatcher, reqid);
 		if (ret == 0)
-			m_add_int(p_pony, 0);
+			m_add_int(p_dispatcher, 0);
 		else {
-			m_add_int(p_pony, 1);
-			m_add_evpid(p_pony, evp.id);
+			m_add_int(p_dispatcher, 1);
+			m_add_evpid(p_dispatcher, evp.id);
 		}
-		m_close(p_pony);
+		m_close(p_dispatcher);
 		if (ret) {
 			m_create(p_scheduler,
 			    IMSG_QUEUE_ENVELOPE_SUBMIT, 0, 0, -1);
@@ -173,10 +161,10 @@ queue_imsg(struct mproc *p, struct imsg *imsg)
 		m_msg(&m, imsg);
 		m_get_id(&m, &reqid);
 		m_end(&m);
-		m_create(p_pony, IMSG_QUEUE_ENVELOPE_COMMIT, 0, 0, -1);
-		m_add_id(p_pony, reqid);
-		m_add_int(p_pony, 1);
-		m_close(p_pony);
+		m_create(p_dispatcher, IMSG_QUEUE_ENVELOPE_COMMIT, 0, 0, -1);
+		m_add_id(p_dispatcher, reqid);
+		m_add_int(p_dispatcher, 1);
+		m_close(p_dispatcher);
 		return;
 
 	case IMSG_SCHED_ENVELOPE_REMOVE:
@@ -250,9 +238,9 @@ queue_imsg(struct mproc *p, struct imsg *imsg)
 			return;
 		}
 		evp.lasttry = time(NULL);
-		m_create(p_pony, IMSG_QUEUE_DELIVER, 0, 0, -1);
-		m_add_envelope(p_pony, &evp);
-		m_close(p_pony);
+		m_create(p_dispatcher, IMSG_QUEUE_DELIVER, 0, 0, -1);
+		m_add_envelope(p_dispatcher, &evp);
+		m_close(p_dispatcher);
 		return;
 
 	case IMSG_SCHED_ENVELOPE_INJECT:
@@ -275,9 +263,9 @@ queue_imsg(struct mproc *p, struct imsg *imsg)
 			return;
 		}
 		evp.lasttry = time(NULL);
-		m_create(p_pony, IMSG_QUEUE_TRANSFER, 0, 0, -1);
-		m_add_envelope(p_pony, &evp);
-		m_close(p_pony);
+		m_create(p_dispatcher, IMSG_QUEUE_TRANSFER, 0, 0, -1);
+		m_add_envelope(p_dispatcher, &evp);
+		m_close(p_dispatcher);
 		return;
 
 	case IMSG_CTL_LIST_ENVELOPES:
@@ -525,7 +513,7 @@ queue_imsg(struct mproc *p, struct imsg *imsg)
 		return;
 	}
 
-	errx(1, "queue_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
+	fatalx("queue_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
 }
 
 static void
@@ -665,7 +653,7 @@ queue(void)
 	config_peer(PROC_CONTROL);
 	config_peer(PROC_LKA);
 	config_peer(PROC_SCHEDULER);
-	config_peer(PROC_PONY);
+	config_peer(PROC_DISPATCHER);
 
 	/* setup queue loading task */
 	evtimer_set(&ev_qload, queue_timeout, &ev_qload);
@@ -674,7 +662,7 @@ queue(void)
 	evtimer_add(&ev_qload, &tv);
 
 	if (pledge("stdio rpath wpath cpath flock recvfd sendfd", NULL) == -1)
-		err(1, "pledge");
+		fatal("pledge");
 
 	event_dispatch();
 	fatalx("exited event loop");

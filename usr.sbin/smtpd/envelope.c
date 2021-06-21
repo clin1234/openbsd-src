@@ -1,4 +1,4 @@
-/*	$OpenBSD: envelope.c,v 1.47 2019/11/25 14:18:32 gilles Exp $	*/
+/*	$OpenBSD: envelope.c,v 1.49 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2013 Eric Faurot <eric@openbsd.org>
@@ -17,29 +17,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-
-#include <netinet/in.h>
 #include <arpa/inet.h>
 
 #include <ctype.h>
-#include <err.h>
-#include <errno.h>
-#include <event.h>
-#include <fcntl.h>
-#include <imsg.h>
-#include <inttypes.h>
-#include <pwd.h>
-#include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
 
 #include "smtpd.h"
 #include "log.h"
@@ -60,7 +42,7 @@ envelope_set_errormsg(struct envelope *e, char *fmt, ...)
 
 	/* this should not happen */
 	if (ret < 0)
-		err(1, "vsnprintf");
+		fatal("vsnprintf");
 
 	if ((size_t)ret >= sizeof(e->errorline))
 		(void)strlcpy(e->errorline + (sizeof(e->errorline) - 4),

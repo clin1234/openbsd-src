@@ -1,4 +1,4 @@
-/*	$OpenBSD: arm32_machdep.c,v 1.60 2020/05/17 15:36:50 kettenis Exp $	*/
+/*	$OpenBSD: arm32_machdep.c,v 1.62 2021/05/16 03:39:27 jsg Exp $	*/
 /*	$NetBSD: arm32_machdep.c,v 1.42 2003/12/30 12:33:15 pk Exp $	*/
 
 /*
@@ -47,13 +47,11 @@
 #include <sys/reboot.h>
 #include <sys/proc.h>
 #include <sys/user.h>
-#include <sys/kernel.h>
-#include <sys/mbuf.h>
+#include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/buf.h>
 #include <sys/msg.h>
 #include <sys/msgbuf.h>
-#include <sys/device.h>
 #include <sys/sysctl.h>
 
 #include <uvm/uvm_extern.h>
@@ -62,14 +60,12 @@
 #include <dev/ofw/openfirm.h>
 
 #include <arm/machdep.h>
-#include <machine/conf.h>
 
 #ifdef CONF_HAVE_APM
 #include "apm.h"
 #else
 #define NAPM	0
 #endif
-#include "rd.h"
 
 struct vm_map *exec_map = NULL;
 struct vm_map *phys_map = NULL;
@@ -176,7 +172,7 @@ arm32_vector_init(vaddr_t va, int which)
  */
 
 void
-halt()
+halt(void)
 {
 	while (1)
 		cpu_sleep(0);
@@ -223,7 +219,7 @@ bootsync(int howto)
  *
  */
 void
-cpu_startup()
+cpu_startup(void)
 {
 	u_int loop;
 	paddr_t minaddr;

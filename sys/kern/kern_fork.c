@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_fork.c,v 1.226 2020/10/25 01:55:18 cheloha Exp $	*/
+/*	$OpenBSD: kern_fork.c,v 1.236 2021/06/19 02:05:33 cheloha Exp $	*/
 /*	$NetBSD: kern_fork.c,v 1.29 1996/02/09 18:59:34 christos Exp $	*/
 
 /*
@@ -95,12 +95,15 @@ fork_return(void *arg)
 int
 sys_fork(struct proc *p, void *v, register_t *retval)
 {
+	void (*func)(void *) = child_return;
 	int flags;
 
 	flags = FORK_FORK;
-	if (p->p_p->ps_ptmask & PTRACE_FORK)
+	if (p->p_p->ps_ptmask & PTRACE_FORK) {
 		flags |= FORK_PTRACE;
-	return fork1(p, flags, fork_return, NULL, retval, NULL);
+		func = fork_return;
+	}
+	return fork1(p, flags, func, NULL, retval, NULL);
 }
 
 int
@@ -198,8 +201,8 @@ process_initialize(struct process *pr, struct proc *p)
 	rw_init(&pr->ps_lock, "pslock");
 	mtx_init(&pr->ps_mtx, IPL_MPFLOOR);
 
-	timeout_set_kclock(&pr->ps_realit_to, realitexpire, pr, 0,
-	    KCLOCK_UPTIME);
+	timeout_set_kclock(&pr->ps_realit_to, realitexpire, pr,
+	    KCLOCK_UPTIME, 0);
 	timeout_set(&pr->ps_rucheck_to, rucheck, pr);
 }
 
@@ -230,6 +233,7 @@ process_new(struct proc *p, struct process *parent, int flags)
 
 	/* post-copy fixups */
 	pr->ps_pptr = parent;
+	pr->ps_ppid = parent->ps_pid;
 
 	/* bump references to the text vnode (for sysctl) */
 	pr->ps_textvp = parent->ps_textvp;
@@ -298,7 +302,7 @@ fork_check_maxthread(uid_t uid)
 		static struct timeval lasttfm;
 
 		if (ratecheck(&lasttfm, &fork_tfmrate))
-			tablefull("proc");
+			tablefull("thread");
 		return EAGAIN;
 	}
 	nthreads++;
@@ -516,7 +520,7 @@ thread_fork(struct proc *curp, void *stack, void *tcb, pid_t *tidptr,
 	struct proc *p;
 	pid_t tid;
 	vaddr_t uaddr;
-	int error;
+	int s, error;
 
 	if (stack == NULL)
 		return EINVAL;
@@ -557,8 +561,9 @@ thread_fork(struct proc *curp, void *stack, void *tcb, pid_t *tidptr,
 
 	LIST_INSERT_HEAD(&allproc, p, p_list);
 	LIST_INSERT_HEAD(TIDHASH(p->p_tid), p, p_hash);
-	TAILQ_INSERT_TAIL(&pr->ps_threads, p, p_thr_link);
 
+	SCHED_LOCK(s);
+	TAILQ_INSERT_TAIL(&pr->ps_threads, p, p_thr_link);
 	/*
 	 * if somebody else wants to take us to single threaded mode,
 	 * count ourselves in.
@@ -567,6 +572,7 @@ thread_fork(struct proc *curp, void *stack, void *tcb, pid_t *tidptr,
 		atomic_inc_int(&pr->ps_singlecount);
 		atomic_setbits_int(&p->p_flag, P_SUSPSINGLE);
 	}
+	SCHED_UNLOCK(s);
 
 	/*
 	 * Return tid to parent thread and copy it out to userspace

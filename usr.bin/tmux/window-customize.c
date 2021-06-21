@@ -1,4 +1,4 @@
-/* $OpenBSD: window-customize.c,v 1.7 2020/09/18 11:20:59 nicm Exp $ */
+/* $OpenBSD: window-customize.c,v 1.11 2021/06/10 07:50:04 nicm Exp $ */
 
 /*
  * Copyright (c) 2020 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -190,13 +190,6 @@ window_customize_scope_text(enum window_customize_scope scope,
 	u_int	 idx;
 
 	switch (scope) {
-	case WINDOW_CUSTOMIZE_NONE:
-	case WINDOW_CUSTOMIZE_KEY:
-	case WINDOW_CUSTOMIZE_SERVER:
-	case WINDOW_CUSTOMIZE_GLOBAL_SESSION:
-	case WINDOW_CUSTOMIZE_GLOBAL_WINDOW:
-		s = xstrdup("");
-		break;
 	case WINDOW_CUSTOMIZE_PANE:
 		window_pane_index(fs->wp, &idx);
 		xasprintf(&s, "pane %u", idx);
@@ -206,6 +199,9 @@ window_customize_scope_text(enum window_customize_scope scope,
 		break;
 	case WINDOW_CUSTOMIZE_WINDOW:
 		xasprintf(&s, "window %u", fs->wl->idx);
+		break;
+	default:
+		s = xstrdup("");
 		break;
 	}
 	return (s);
@@ -894,8 +890,8 @@ window_customize_init(struct window_mode_entry *wme, struct cmd_find_state *fs,
 
 	data->data = mode_tree_start(wp, args, window_customize_build,
 	    window_customize_draw, NULL, window_customize_menu,
-	    window_customize_height, data, window_customize_menu_items, NULL, 0,
-	    &s);
+	    window_customize_height, NULL, data, window_customize_menu_items,
+	    NULL, 0, &s);
 	mode_tree_zoom(data->data, args);
 
 	mode_tree_build(data->data);
@@ -1003,7 +999,7 @@ window_customize_set_option_callback(struct client *c, void *itemdata,
 
 fail:
 	*cause = toupper((u_char)*cause);
-	status_message_set(c, -1, 1, "%s", cause);
+	status_message_set(c, -1, 1, 0, "%s", cause);
 	free(cause);
 	return (0);
 }
@@ -1127,7 +1123,7 @@ window_customize_set_option(struct client *c,
 		status_prompt_set(c, NULL, prompt, value,
 		    window_customize_set_option_callback,
 		    window_customize_free_item_callback, new_item,
-		    PROMPT_NOFORMAT);
+		    PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 
 		free(prompt);
 		free(value);
@@ -1209,7 +1205,7 @@ window_customize_set_command_callback(struct client *c, void *itemdata,
 
 fail:
 	*error = toupper((u_char)*error);
-	status_message_set(c, -1, 1, "%s", error);
+	status_message_set(c, -1, 1, 0, "%s", error);
 	free(error);
 	return (0);
 }
@@ -1268,7 +1264,7 @@ window_customize_set_key(struct client *c,
 		status_prompt_set(c, NULL, prompt, value,
 		    window_customize_set_command_callback,
 		    window_customize_free_item_callback, new_item,
-		    PROMPT_NOFORMAT);
+		    PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 		free(value);
 	} else if (strcmp(s, "Note") == 0) {
@@ -1285,7 +1281,7 @@ window_customize_set_key(struct client *c,
 		    (bd->note == NULL ? "" : bd->note),
 		    window_customize_set_note_callback,
 		    window_customize_free_item_callback, new_item,
-		    PROMPT_NOFORMAT);
+		    PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 	}
 }
@@ -1462,7 +1458,7 @@ window_customize_key(struct window_mode_entry *wme, struct client *c,
 		status_prompt_set(c, NULL, prompt, "",
 		    window_customize_change_current_callback,
 		    window_customize_free_callback, data,
-		    PROMPT_SINGLE|PROMPT_NOFORMAT);
+		    PROMPT_SINGLE|PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 		break;
 	case 'D':
@@ -1475,7 +1471,7 @@ window_customize_key(struct window_mode_entry *wme, struct client *c,
 		status_prompt_set(c, NULL, prompt, "",
 		    window_customize_change_tagged_callback,
 		    window_customize_free_callback, data,
-		    PROMPT_SINGLE|PROMPT_NOFORMAT);
+		    PROMPT_SINGLE|PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 		break;
 	case 'u':
@@ -1491,7 +1487,7 @@ window_customize_key(struct window_mode_entry *wme, struct client *c,
 		status_prompt_set(c, NULL, prompt, "",
 		    window_customize_change_current_callback,
 		    window_customize_free_callback, data,
-		    PROMPT_SINGLE|PROMPT_NOFORMAT);
+		    PROMPT_SINGLE|PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 		break;
 	case 'U':
@@ -1504,7 +1500,7 @@ window_customize_key(struct window_mode_entry *wme, struct client *c,
 		status_prompt_set(c, NULL, prompt, "",
 		    window_customize_change_tagged_callback,
 		    window_customize_free_callback, data,
-		    PROMPT_SINGLE|PROMPT_NOFORMAT);
+		    PROMPT_SINGLE|PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 		break;
 	case 'H':

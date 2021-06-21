@@ -1,4 +1,4 @@
-/*	$OpenBSD: pci_machdep.h,v 1.7 2020/07/14 15:42:19 patrick Exp $ */
+/*	$OpenBSD: pci_machdep.h,v 1.11 2021/06/11 12:23:52 kettenis Exp $ */
 
 /*
  * Copyright (c) 2003-2004 Opsycon AB  (www.opsycon.se / www.opsycon.com)
@@ -26,8 +26,11 @@
  *
  */
 
-typedef struct arm64_pci_chipset *pci_chipset_tag_t;
-typedef u_long pcitag_t;
+typedef struct machine_pci_chipset *pci_chipset_tag_t;
+typedef uint64_t pcitag_t;
+
+#define PCITAG_NODE(x)		((x) >> 32)
+#define PCITAG_OFFSET(x)	((x) & 0xffffffff)
 
 /* Supported interrupt types. */
 #define PCI_NONE		0
@@ -40,15 +43,16 @@ typedef struct {
 	pcitag_t		ih_tag;
 	int			ih_intrpin;
 	int			ih_type;
+	bus_dma_tag_t		ih_dmat;
 } pci_intr_handle_t;
 
 struct pci_attach_args;
 
 /*
- * arm64-specific PCI structure and type definitions.
+ * Machine-specific PCI structure and type definitions.
  * NOT TO BE USED DIRECTLY BY MACHINE INDEPENDENT CODE.
  */
-struct arm64_pci_chipset {
+struct machine_pci_chipset {
 	void		*pc_conf_v;
 	void		(*pc_attach_hook)(struct device *,
 			    struct device *, struct pcibus_attach_args *);
@@ -59,6 +63,7 @@ struct arm64_pci_chipset {
 	int		(*pc_conf_size)(void *, pcitag_t);
 	pcireg_t	(*pc_conf_read)(void *, pcitag_t, int);
 	void		(*pc_conf_write)(void *, pcitag_t, int, pcireg_t);
+	int		(*pc_probe_device_hook)(void *, struct pci_attach_args *);
 
 	void		*pc_intr_v;
 	int		(*pc_intr_map)(struct pci_attach_args *,
@@ -91,6 +96,8 @@ struct arm64_pci_chipset {
     (*(c)->pc_conf_read)((c)->pc_conf_v, (t), (r))
 #define	pci_conf_write(c, t, r, v)					\
     (*(c)->pc_conf_write)((c)->pc_conf_v, (t), (r), (v))
+#define	pci_probe_device_hook(c, a)					\
+    (*(c)->pc_probe_device_hook)((c)->pc_conf_v, (a))
 #define	pci_intr_map(c, ihp)						\
     (*(c)->pa_pc->pc_intr_map)((c), (ihp))
 #define	pci_intr_map_msi(c, ihp)					\
@@ -107,7 +114,6 @@ struct arm64_pci_chipset {
 	(nm))
 #define	pci_intr_disestablish(c, iv)					\
     (*(c)->pc_intr_disestablish)((c)->pc_intr_v, (iv))
-#define	pci_probe_device_hook(c, a)	(0)
 
 #define	pci_min_powerstate(c, t)	(PCI_PMCSR_STATE_D3)
 #define	pci_set_powerstate_md(c, t, s, p)

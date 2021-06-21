@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_timeout.c,v 1.82 2020/10/20 22:37:12 cheloha Exp $	*/
+/*	$OpenBSD: kern_timeout.c,v 1.85 2021/06/19 02:05:33 cheloha Exp $	*/
 /*
  * Copyright (c) 2001 Thomas Nordin <nordin@openbsd.org>
  * Copyright (c) 2000-2001 Artur Grabowski <art@openbsd.org>
@@ -172,10 +172,10 @@ void softclock_create_thread(void *);
 void softclock_process_kclock_timeout(struct timeout *, int);
 void softclock_process_tick_timeout(struct timeout *, int);
 void softclock_thread(void *);
+void timeout_barrier_timeout(void *);
 uint32_t timeout_bucket(const struct timeout *);
 uint32_t timeout_maskwheel(uint32_t, const struct timespec *);
 void timeout_run(struct timeout *);
-void timeout_proc_barrier(void *);
 
 /*
  * The first thing in a struct timeout is its struct circq, so we
@@ -253,38 +253,38 @@ timeout_proc_init(void)
 }
 
 static inline void
-_timeout_set(struct timeout *to, void (*fn)(void *), void *arg, int flags,
-    int kclock)
+_timeout_set(struct timeout *to, void (*fn)(void *), void *arg, int kclock,
+    int flags)
 {
 	to->to_func = fn;
 	to->to_arg = arg;
-	to->to_flags = flags | TIMEOUT_INITIALIZED;
 	to->to_kclock = kclock;
+	to->to_flags = flags | TIMEOUT_INITIALIZED;
 }
 
 void
 timeout_set(struct timeout *new, void (*fn)(void *), void *arg)
 {
-	_timeout_set(new, fn, arg, 0, KCLOCK_NONE);
+	_timeout_set(new, fn, arg, KCLOCK_NONE, 0);
 }
 
 void
 timeout_set_flags(struct timeout *to, void (*fn)(void *), void *arg, int flags)
 {
-	_timeout_set(to, fn, arg, flags, KCLOCK_NONE);
+	_timeout_set(to, fn, arg, KCLOCK_NONE, flags);
 }
 
 void
 timeout_set_proc(struct timeout *new, void (*fn)(void *), void *arg)
 {
-	_timeout_set(new, fn, arg, TIMEOUT_PROC, KCLOCK_NONE);
+	_timeout_set(new, fn, arg, KCLOCK_NONE, TIMEOUT_PROC);
 }
 
 void
 timeout_set_kclock(struct timeout *to, void (*fn)(void *), void *arg,
-    int flags, int kclock)
+    int kclock, int flags)
 {
-	_timeout_set(to, fn, arg, flags | TIMEOUT_KCLOCK, kclock);
+	_timeout_set(to, fn, arg, kclock, flags | TIMEOUT_KCLOCK);
 }
 
 int
@@ -490,34 +490,38 @@ timeout_del_barrier(struct timeout *to)
 void
 timeout_barrier(struct timeout *to)
 {
-	int needsproc = ISSET(to->to_flags, TIMEOUT_PROC);
+	struct timeout barrier;
+	struct cond c;
+	int procflag;
 
-	timeout_sync_order(needsproc);
+	procflag = (to->to_flags & TIMEOUT_PROC);
+	timeout_sync_order(procflag);
 
-	if (!needsproc) {
-		KERNEL_LOCK();
-		splx(splsoftclock());
-		KERNEL_UNLOCK();
-	} else {
-		struct cond c = COND_INITIALIZER();
-		struct timeout barrier;
+	timeout_set_flags(&barrier, timeout_barrier_timeout, &c, procflag);
+	barrier.to_process = curproc->p_p;
+	cond_init(&c);
 
-		timeout_set_proc(&barrier, timeout_proc_barrier, &c);
-		barrier.to_process = curproc->p_p;
+	mtx_enter(&timeout_mutex);
 
-		mtx_enter(&timeout_mutex);
-		SET(barrier.to_flags, TIMEOUT_ONQUEUE);
+	barrier.to_time = ticks;
+	SET(barrier.to_flags, TIMEOUT_ONQUEUE);
+	if (procflag)
 		CIRCQ_INSERT_TAIL(&timeout_proc, &barrier.to_list);
-		mtx_leave(&timeout_mutex);
+	else
+		CIRCQ_INSERT_TAIL(&timeout_todo, &barrier.to_list);
 
+	mtx_leave(&timeout_mutex);
+
+	if (procflag)
 		wakeup_one(&timeout_proc);
+	else
+		softintr_schedule(softclock_si);
 
-		cond_wait(&c, "tmobar");
-	}
+	cond_wait(&c, "tmobar");
 }
 
 void
-timeout_proc_barrier(void *arg)
+timeout_barrier_timeout(void *arg)
 {
 	struct cond *c = arg;
 
@@ -787,7 +791,7 @@ softclock_thread(void *arg)
 
 	s = splsoftclock();
 	for (;;) {
-		sleep_setup(&sls, &timeout_proc, PSWP, "bored");
+		sleep_setup(&sls, &timeout_proc, PSWP, "bored", 0);
 		sleep_finish(&sls, CIRCQ_EMPTY(&timeout_proc));
 
 		mtx_enter(&timeout_mutex);

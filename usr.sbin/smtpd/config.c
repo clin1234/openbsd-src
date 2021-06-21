@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.51 2019/12/18 10:00:39 gilles Exp $	*/
+/*	$OpenBSD: config.c,v 1.57 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2008 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -16,23 +16,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
 #include <sys/resource.h>
 
-#include <event.h>
 #include <ifaddrs.h>
-#include <imsg.h>
-#include <netdb.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <limits.h>
 #include <string.h>
-#include <unistd.h>
-
-#include <openssl/ssl.h>
 
 #include "smtpd.h"
 #include "log.h"
@@ -214,6 +202,17 @@ set_localaddrs(struct smtpd *conf, struct table *localnames)
 			sin6 = (struct sockaddr_in6 *)&ss;
 			*sin6 = *(struct sockaddr_in6 *)p->ifa_addr;
 			sin6->sin6_len = sizeof(struct sockaddr_in6);
+#ifdef __KAME__
+			if ((IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) ||
+			    IN6_IS_ADDR_MC_LINKLOCAL(&sin6->sin6_addr) ||
+			    IN6_IS_ADDR_MC_INTFACELOCAL(&sin6->sin6_addr)) &&
+			    sin6->sin6_scope_id == 0) {
+				sin6->sin6_scope_id = ntohs(
+				    *(u_int16_t *)&sin6->sin6_addr.s6_addr[2]);
+				sin6->sin6_addr.s6_addr[2] = 0;
+				sin6->sin6_addr.s6_addr[3] = 0;
+			}
+#endif
 			table_add(t, ss_to_text(&ss), NULL);
 			table_add(localnames, ss_to_text(&ss), NULL);
 			(void)snprintf(buf, sizeof buf, "[%s]", ss_to_text(&ss));
@@ -241,6 +240,9 @@ purge_config(uint8_t what)
 	if (what & PURGE_LISTENERS) {
 		while ((l = TAILQ_FIRST(env->sc_listeners)) != NULL) {
 			TAILQ_REMOVE(env->sc_listeners, l, entry);
+			free(l->tls_ciphers);
+			free(l->tls_protocols);
+			free(l->pki);
 			free(l);
 		}
 		free(env->sc_listeners);
@@ -271,7 +273,6 @@ purge_config(uint8_t what)
 		while (dict_poproot(env->sc_pki_dict, (void **)&p)) {
 			freezero(p->pki_cert, p->pki_cert_len);
 			freezero(p->pki_key, p->pki_key_len);
-			EVP_PKEY_free(p->pki_pkey);
 			free(p);
 		}
 		free(env->sc_pki_dict);
@@ -284,8 +285,6 @@ purge_config(uint8_t what)
 			p->pki_cert = NULL;
 			freezero(p->pki_key, p->pki_key_len);
 			p->pki_key = NULL;
-			EVP_PKEY_free(p->pki_pkey);
-			p->pki_pkey = NULL;
 		}
 	}
 }
@@ -325,8 +324,8 @@ config_peer(enum smtp_proc_type proc)
 		p = p_queue;
 	else if (proc == PROC_SCHEDULER)
 		p = p_scheduler;
-	else if (proc == PROC_PONY)
-		p = p_pony;
+	else if (proc == PROC_DISPATCHER)
+		p = p_dispatcher;
 	else if (proc == PROC_CA)
 		p = p_ca;
 	else

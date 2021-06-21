@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6.c,v 1.233 2020/06/24 22:03:44 cheloha Exp $	*/
+/*	$OpenBSD: nd6.c,v 1.235 2021/03/08 16:49:07 florian Exp $	*/
 /*	$KAME: nd6.c,v 1.280 2002/06/08 19:52:07 itojun Exp $	*/
 
 /*
@@ -141,7 +141,6 @@ nd6_ifattach(struct ifnet *ifp)
 	nd->basereachable = REACHABLE_TIME;
 	nd->reachable = ND_COMPUTE_RTIME(nd->basereachable);
 	nd->retrans = RETRANS_TIMER;
-	/* per-interface IFXF_AUTOCONF6 needs to be set too to accept RAs */
 
 	return nd;
 }
@@ -690,8 +689,10 @@ void
 nd6_invalidate(struct rtentry *rt)
 {
 	struct llinfo_nd6 *ln = (struct llinfo_nd6 *)rt->rt_llinfo;
+	struct sockaddr_dl *sdl = satosdl(rt->rt_gateway);
 
 	m_freem(ln->ln_hold);
+	sdl->sdl_alen = 0;
 	ln->ln_hold = NULL;
 	ln->ln_state = ND6_LLINFO_INCOMPLETE;
 	ln->ln_asked = 0;

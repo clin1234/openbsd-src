@@ -1,4 +1,4 @@
-/*	$OpenBSD: dmtimer.c,v 1.8 2019/05/06 03:45:58 mlarkin Exp $	*/
+/*	$OpenBSD: dmtimer.c,v 1.13 2021/05/16 15:10:19 deraadt Exp $	*/
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2013 Raphael Graf <r@undefined.ch>
@@ -25,17 +25,14 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/time.h>
 #include <sys/evcount.h>
 #include <sys/device.h>
 #include <sys/timetc.h>
-#include <dev/clock_subr.h>
 #include <machine/bus.h>
 #include <armv7/armv7/armv7var.h>
 #include <armv7/omap/prcmvar.h>
 
 #include <machine/intr.h>
-#include <arm/cpufunc.h>
 
 /* registers */
 #define	DM_TIDR		0x000
@@ -111,7 +108,13 @@ void dmtimer_setstatclockrate(int newhz);
 u_int dmtimer_get_timecount(struct timecounter *);
 
 static struct timecounter dmtimer_timecounter = {
-	dmtimer_get_timecount, NULL, 0xffffffff, 0, "dmtimer", 0, NULL
+	.tc_get_timecount = dmtimer_get_timecount,
+	.tc_poll_pps = NULL,
+	.tc_counter_mask = 0xffffffff,
+	.tc_frequency = 0,
+	.tc_name = "dmtimer",
+	.tc_quality = 0,
+	.tc_priv = NULL,
 };
 
 bus_space_handle_t dmtimer_ioh0;
@@ -152,7 +155,7 @@ dmtimer_attach(struct device *parent, struct device *self, void *args)
 
 	if (bus_space_map(sc->sc_iot, aa->aa_dev->mem[0].addr,
 	    aa->aa_dev->mem[0].size, 0, &ioh))
-		panic("%s: bus_space_map failed!\n", __func__);
+		panic("%s: bus_space_map failed!", __func__);
 
 
 	prcm_setclock(1, PRCM_CLK_SPEED_32);
@@ -286,12 +289,12 @@ dmtimer_intr(void *frame)
 
 /*
  * would be interesting to play with trigger mode while having one timer
- * in 32KHz mode, and the other timer running in sysclk mode and use
+ * in 32kHz mode, and the other timer running in sysclk mode and use
  * the high resolution speeds (matters more for delay than tick timer
  */
 
 void
-dmtimer_cpu_initclocks()
+dmtimer_cpu_initclocks(void)
 {
 	struct dmtimer_softc	*sc = dmtimer_cd.cd_devs[1];
 

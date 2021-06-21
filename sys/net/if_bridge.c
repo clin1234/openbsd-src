@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bridge.c,v 1.345 2020/08/06 19:47:44 bluhm Exp $	*/
+/*	$OpenBSD: if_bridge.c,v 1.355 2021/06/02 00:40:51 dlg Exp $	*/
 
 /*
  * Copyright (c) 1999, 2000 Jason L. Wright (jason@thought.net)
@@ -110,7 +110,7 @@ void	bridge_spandetach(void *);
 int	bridge_ifremove(struct bridge_iflist *);
 void	bridge_spanremove(struct bridge_iflist *);
 struct mbuf *
-	bridge_input(struct ifnet *, struct mbuf *, void *);
+	bridge_input(struct ifnet *, struct mbuf *, uint64_t, void *);
 void	bridge_process(struct ifnet *, struct mbuf *);
 void	bridgeintr_frame(struct ifnet *, struct ifnet *, struct mbuf *);
 void	bridge_bifgetstp(struct bridge_softc *, struct bridge_iflist *,
@@ -237,9 +237,6 @@ bridge_clone_destroy(struct ifnet *ifp)
 
 	bstp_destroy(sc->sc_stp);
 
-	/* Undo pseudo-driver changes. */
-	if_deactivate(ifp);
-
 	if_detach(ifp);
 
 	free(sc, M_DEVBUF, sizeof *sc);
@@ -272,12 +269,13 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		if ((error = suser(curproc)) != 0)
 			break;
 
-		ifs = ifunit(req->ifbr_ifsname);
+		ifs = if_unit(req->ifbr_ifsname);
 		if (ifs == NULL) {			/* no such interface */
 			error = ENOENT;
 			break;
 		}
 		if (ifs->if_type != IFT_ETHER) {
+			if_put(ifs);
 			error = EINVAL;
 			break;
 		}
@@ -286,12 +284,15 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 				error = EEXIST;
 			else
 				error = EBUSY;
+			if_put(ifs);
 			break;
 		}
 
 		error = ether_brport_isset(ifs);
-		if (error != 0)
+		if (error != 0) {
+			if_put(ifs);
 			break;
+		}
 
 		/* If it's in the span list, it can't be a member. */
 		SMR_SLIST_FOREACH_LOCKED(bif, &sc->sc_spanlist, bif_next) {
@@ -299,12 +300,14 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 				break;
 		}
 		if (bif != NULL) {
+			if_put(ifs);
 			error = EBUSY;
 			break;
 		}
 
 		bif = malloc(sizeof(*bif), M_DEVBUF, M_NOWAIT|M_ZERO);
 		if (bif == NULL) {
+			if_put(ifs);
 			error = ENOMEM;
 			break;
 		}
@@ -313,6 +316,7 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		error = ifpromisc(ifs, 1);
 		NET_UNLOCK();
 		if (error != 0) {
+			if_put(ifs);
 			free(bif, M_DEVBUF, sizeof(*bif));
 			break;
 		}
@@ -321,8 +325,7 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		 * XXX If the NET_LOCK() or ifpromisc() calls above
 		 * had to sleep, then something else could have come
 		 * along and taken over ifs while the kernel lock was
-		 * released. Or worse, ifs could have been destroyed
-		 * cos ifunit() is... optimistic.
+		 * released.
 		 */
 
 		bif->bridge_sc = sc;
@@ -339,16 +342,9 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	case SIOCBRDGDEL:
 		if ((error = suser(curproc)) != 0)
 			break;
-		ifs = ifunit(req->ifbr_ifsname);
-		if (ifs == NULL) {
-			error = ENOENT;
+		error = bridge_findbif(sc, req->ifbr_ifsname, &bif);
+		if (error != 0)
 			break;
-		}
-		if (ifs->if_bridgeidx != ifp->if_index) {
-			error = ESRCH;
-			break;
-		}
-		bif = bridge_getbif(ifs);
 		bridge_ifremove(bif);
 		break;
 	case SIOCBRDGIFS:
@@ -357,12 +353,13 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	case SIOCBRDGADDS:
 		if ((error = suser(curproc)) != 0)
 			break;
-		ifs = ifunit(req->ifbr_ifsname);
+		ifs = if_unit(req->ifbr_ifsname);
 		if (ifs == NULL) {			/* no such interface */
 			error = ENOENT;
 			break;
 		}
 		if (ifs->if_type != IFT_ETHER) {
+			if_put(ifs);
 			error = EINVAL;
 			break;
 		}
@@ -371,6 +368,7 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 				error = EEXIST;
 			else
 				error = EBUSY;
+			if_put(ifs);
 			break;
 		}
 		SMR_SLIST_FOREACH_LOCKED(bif, &sc->sc_spanlist, bif_next) {
@@ -378,11 +376,13 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 				break;
 		}
 		if (bif != NULL) {
+			if_put(ifs);
 			error = EEXIST;
 			break;
 		}
 		bif = malloc(sizeof(*bif), M_DEVBUF, M_NOWAIT|M_ZERO);
 		if (bif == NULL) {
+			if_put(ifs);
 			error = ENOMEM;
 			break;
 		}
@@ -398,7 +398,7 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	case SIOCBRDGDELS:
 		if ((error = suser(curproc)) != 0)
 			break;
-		ifs = ifunit(req->ifbr_ifsname);
+		ifs = if_unit(req->ifbr_ifsname);
 		if (ifs == NULL) {
 			error = ENOENT;
 			break;
@@ -407,6 +407,7 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			if (bif->ifp == ifs)
 				break;
 		}
+		if_put(ifs);
 		if (bif == NULL) {
 			error = ESRCH;
 			break;
@@ -414,16 +415,9 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		bridge_spanremove(bif);
 		break;
 	case SIOCBRDGGIFFLGS:
-		ifs = ifunit(req->ifbr_ifsname);
-		if (ifs == NULL) {
-			error = ENOENT;
+		error = bridge_findbif(sc, req->ifbr_ifsname, &bif);
+		if (error != 0)
 			break;
-		}
-		if (ifs->if_bridgeidx != ifp->if_index) {
-			error = ESRCH;
-			break;
-		}
-		bif = bridge_getbif(ifs);
 		req->ifbr_ifsflags = bif->bif_flags;
 		req->ifbr_portno = bif->ifp->if_index & 0xfff;
 		req->ifbr_protected = bif->bif_protected;
@@ -431,22 +425,15 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			bridge_bifgetstp(sc, bif, req);
 		break;
 	case SIOCBRDGSIFFLGS:
-		if ((error = suser(curproc)) != 0)
-			break;
-		ifs = ifunit(req->ifbr_ifsname);
-		if (ifs == NULL) {
-			error = ENOENT;
-			break;
-		}
-		if (ifs->if_bridgeidx != ifp->if_index) {
-			error = ESRCH;
-			break;
-		}
 		if (req->ifbr_ifsflags & IFBIF_RO_MASK) {
 			error = EINVAL;
 			break;
 		}
-		bif = bridge_getbif(ifs);
+		if ((error = suser(curproc)) != 0)
+			break;
+		error = bridge_findbif(sc, req->ifbr_ifsname, &bif);
+		if (error != 0)
+			break;
 		if (req->ifbr_ifsflags & IFBIF_STP) {
 			if ((bif->bif_flags & IFBIF_STP) == 0) {
 				/* Enable STP */
@@ -492,16 +479,9 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		brop->ifbop_last_tc_time.tv_usec = bs->bs_last_tc_time.tv_usec;
 		break;
 	case SIOCBRDGSIFPROT:
-		ifs = ifunit(req->ifbr_ifsname);
-		if (ifs == NULL) {
-			error = ENOENT;
+		error = bridge_findbif(sc, req->ifbr_ifsname, &bif);
+		if (error != 0)
 			break;
-		}
-		if (ifs->if_bridgeidx != ifp->if_index) {
-			error = ESRCH;
-			break;
-		}
-		bif = bridge_getbif(ifs);
 		bif->bif_protected = req->ifbr_protected;
 		break;
 	case SIOCBRDGRTS:
@@ -571,6 +551,7 @@ bridge_ifremove(struct bridge_iflist *bif)
 	bridge_rtdelete(sc, bif->ifp, 0);
 	bridge_flushrule(bif);
 
+	if_put(bif->ifp);
 	bif->ifp = NULL;
 	free(bif, M_DEVBUF, sizeof(*bif));
 
@@ -587,6 +568,7 @@ bridge_spanremove(struct bridge_iflist *bif)
 
 	smr_barrier();
 
+	if_put(bif->ifp);
 	bif->ifp = NULL;
 	free(bif, M_DEVBUF, sizeof(*bif));
 }
@@ -703,6 +685,41 @@ bridge_bifconf(struct bridge_softc *sc, struct ifbifconf *bifc)
 done:
 	free(breqs, M_TEMP, total * sizeof(*breq));
 	bifc->ifbic_len = i * sizeof(*breq);
+	return (error);
+}
+
+int
+bridge_findbif(struct bridge_softc *sc, const char *name,
+    struct bridge_iflist **rbif)
+{
+	struct ifnet *ifp;
+	struct bridge_iflist *bif;
+	int error = 0;
+
+	KERNEL_ASSERT_LOCKED();
+
+	if ((ifp = if_unit(name)) == NULL)
+		return (ENOENT);
+
+	if (ifp->if_bridgeidx != sc->sc_if.if_index) {
+		error = ESRCH;
+		goto put;
+	}
+
+	SMR_SLIST_FOREACH_LOCKED(bif, &sc->sc_iflist, bif_next) {
+		if (bif->ifp == ifp)
+			break;
+	}
+
+	if (bif == NULL) {
+		error = ENOENT;
+		goto put;
+	}
+
+	*rbif = bif;
+put:
+	if_put(ifp);
+
 	return (error);
 }
 
@@ -941,7 +958,7 @@ bridgeintr_frame(struct ifnet *brifp, struct ifnet *src_if, struct mbuf *m)
 	bif = bridge_getbif(src_if);
 	KASSERT(bif != NULL);
 
-	m_copydata(m, 0, ETHER_HDR_LEN, (caddr_t)&eh);
+	m_copydata(m, 0, ETHER_HDR_LEN, &eh);
 	dst = (struct ether_addr *)&eh.ether_dhost[0];
 	src = (struct ether_addr *)&eh.ether_shost[0];
 
@@ -1102,7 +1119,7 @@ bridge_ourether(struct ifnet *ifp, uint8_t *ena)
  * not for us, and schedule an interrupt.
  */
 struct mbuf *
-bridge_input(struct ifnet *ifp, struct mbuf *m, void *null)
+bridge_input(struct ifnet *ifp, struct mbuf *m, uint64_t dst, void *null)
 {
 	KASSERT(m->m_flags & M_PKTHDR);
 
@@ -1159,7 +1176,8 @@ bridge_process(struct ifnet *ifp, struct mbuf *m)
 
 	sc = brifp->if_softc;
 	SMR_SLIST_FOREACH_LOCKED(bif, &sc->sc_iflist, bif_next) {
-		if (bridge_ourether(bif->ifp, eh->ether_shost))
+		struct arpcom *ac = (struct arpcom *)bif->ifp;
+		if (memcmp(ac->ac_enaddr, eh->ether_shost, ETHER_ADDR_LEN) == 0)
 			goto bad;
 		if (bif->ifp == ifp)
 			bif0 = bif;
@@ -1439,8 +1457,7 @@ bridge_blocknonip(struct ether_header *eh, struct mbuf *m)
 	    (ETHER_HDR_LEN + LLC_SNAPFRAMELEN))
 		return (1);
 
-	m_copydata(m, ETHER_HDR_LEN, LLC_SNAPFRAMELEN,
-	    (caddr_t)&llc);
+	m_copydata(m, ETHER_HDR_LEN, LLC_SNAPFRAMELEN, &llc);
 
 	etype = ntohs(llc.llc_snap.ether_type);
 	if (llc.llc_dsap == LLC_SNAP_LSAP &&
@@ -1494,8 +1511,7 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 			dst.sa.sa_family = AF_INET;
 			dst.sin.sin_len = sizeof(struct sockaddr_in);
 			m_copydata(m, offsetof(struct ip, ip_dst),
-			    sizeof(struct in_addr),
-			    (caddr_t)&dst.sin.sin_addr);
+			    sizeof(struct in_addr), &dst.sin.sin_addr);
 
 			break;
 #ifdef INET6
@@ -1516,9 +1532,8 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 			bzero(&dst, sizeof(union sockaddr_union));
 			dst.sa.sa_family = AF_INET6;
 			dst.sin6.sin6_len = sizeof(struct sockaddr_in6);
-			m_copydata(m, offsetof(struct ip6_hdr, ip6_nxt),
-			    sizeof(struct in6_addr),
-			    (caddr_t)&dst.sin6.sin6_addr);
+			m_copydata(m, offsetof(struct ip6_hdr, ip6_dst),
+			    sizeof(struct in6_addr), &dst.sin6.sin6_addr);
 
 			break;
 #endif /* INET6 */
@@ -1528,16 +1543,16 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 
 		switch (proto) {
 		case IPPROTO_ESP:
-			m_copydata(m, hlen, sizeof(u_int32_t), (caddr_t)&spi);
+			m_copydata(m, hlen, sizeof(u_int32_t), &spi);
 			break;
 		case IPPROTO_AH:
 			m_copydata(m, hlen + sizeof(u_int32_t),
-			    sizeof(u_int32_t), (caddr_t)&spi);
+			    sizeof(u_int32_t), &spi);
 			break;
 		case IPPROTO_IPCOMP:
 			m_copydata(m, hlen + sizeof(u_int16_t),
-			    sizeof(u_int16_t), (caddr_t)&cpi);
-			spi = ntohl(htons(cpi));
+			    sizeof(u_int16_t), &cpi);
+			spi = htonl(ntohs(cpi));
 			break;
 		}
 
@@ -1636,8 +1651,7 @@ bridge_ip(struct ifnet *brifp, int dir, struct ifnet *ifp,
 		    ETHER_HDR_LEN))
 			return (m);
 
-		m_copydata(m, ETHER_HDR_LEN,
-		    LLC_SNAPFRAMELEN, (caddr_t)&llc);
+		m_copydata(m, ETHER_HDR_LEN, LLC_SNAPFRAMELEN, &llc);
 
 		if (llc.llc_dsap != LLC_SNAP_LSAP ||
 		    llc.llc_ssap != LLC_SNAP_LSAP ||
@@ -1660,61 +1674,12 @@ bridge_ip(struct ifnet *brifp, int dir, struct ifnet *ifp,
 	switch (etype) {
 
 	case ETHERTYPE_IP:
-		if (m->m_pkthdr.len < sizeof(struct ip))
-			goto dropit;
-
-		/* Copy minimal header, and drop invalids */
-		if (m->m_len < sizeof(struct ip) &&
-		    (m = m_pullup(m, sizeof(struct ip))) == NULL) {
-			ipstat_inc(ips_toosmall);
+		m = ipv4_check(ifp, m);
+		if (m == NULL)
 			return (NULL);
-		}
+
 		ip = mtod(m, struct ip *);
-
-		if (ip->ip_v != IPVERSION) {
-			ipstat_inc(ips_badvers);
-			goto dropit;
-		}
-
-		hlen = ip->ip_hl << 2;	/* get whole header length */
-		if (hlen < sizeof(struct ip)) {
-			ipstat_inc(ips_badhlen);
-			goto dropit;
-		}
-
-		if (hlen > m->m_len) {
-			if ((m = m_pullup(m, hlen)) == NULL) {
-				ipstat_inc(ips_badhlen);
-				return (NULL);
-			}
-			ip = mtod(m, struct ip *);
-		}
-
-		if ((m->m_pkthdr.csum_flags & M_IPV4_CSUM_IN_OK) == 0) {
-			if (m->m_pkthdr.csum_flags & M_IPV4_CSUM_IN_BAD) {
-				ipstat_inc(ips_badsum);
-				goto dropit;
-			}
-
-			ipstat_inc(ips_inswcsum);
-			if (in_cksum(m, hlen) != 0) {
-				ipstat_inc(ips_badsum);
-				goto dropit;
-			}
-		}
-
-		if (ntohs(ip->ip_len) < hlen)
-			goto dropit;
-
-		if (m->m_pkthdr.len < ntohs(ip->ip_len))
-			goto dropit;
-		if (m->m_pkthdr.len > ntohs(ip->ip_len)) {
-			if (m->m_len == m->m_pkthdr.len) {
-				m->m_len = ntohs(ip->ip_len);
-				m->m_pkthdr.len = ntohs(ip->ip_len);
-			} else
-				m_adj(m, ntohs(ip->ip_len) - m->m_pkthdr.len);
-		}
+		hlen = ip->ip_hl << 2;
 
 #ifdef IPSEC
 		if ((brifp->if_flags & IFF_LINK2) == IFF_LINK2 &&
@@ -1758,23 +1723,10 @@ bridge_ip(struct ifnet *brifp, int dir, struct ifnet *ifp,
 		break;
 
 #ifdef INET6
-	case ETHERTYPE_IPV6: {
-		struct ip6_hdr *ip6;
-
-		if (m->m_len < sizeof(struct ip6_hdr)) {
-			if ((m = m_pullup(m, sizeof(struct ip6_hdr)))
-			    == NULL) {
-				ip6stat_inc(ip6s_toosmall);
-				return (NULL);
-			}
-		}
-
-		ip6 = mtod(m, struct ip6_hdr *);
-
-		if ((ip6->ip6_vfc & IPV6_VERSION_MASK) != IPV6_VERSION) {
-			ip6stat_inc(ip6s_badvers);
-			goto dropit;
-		}
+	case ETHERTYPE_IPV6:
+		m = ipv6_check(ifp, m);
+		if (m == NULL)
+			return (NULL);
 
 #ifdef IPSEC
 		hlen = sizeof(struct ip6_hdr);
@@ -1805,7 +1757,6 @@ bridge_ip(struct ifnet *brifp, int dir, struct ifnet *ifp,
 #endif /* NPF > 0 */
 
 		break;
-	}
 #endif /* INET6 */
 
 	default:
@@ -1839,7 +1790,7 @@ bridge_fragment(struct ifnet *brifp, struct ifnet *ifp, struct ether_header *eh,
     struct mbuf *m)
 {
 	struct llc llc;
-	struct mbuf *m0;
+	struct mbuf_list fml;
 	int error = 0;
 	int hassnap = 0;
 	u_int16_t etype;
@@ -1867,8 +1818,7 @@ bridge_fragment(struct ifnet *brifp, struct ifnet *ifp, struct ether_header *eh,
 		    ETHER_HDR_LEN))
 			goto dropit;
 
-		m_copydata(m, ETHER_HDR_LEN,
-		    LLC_SNAPFRAMELEN, (caddr_t)&llc);
+		m_copydata(m, ETHER_HDR_LEN, LLC_SNAPFRAMELEN, &llc);
 
 		if (llc.llc_dsap != LLC_SNAP_LSAP ||
 		    llc.llc_ssap != LLC_SNAP_LSAP ||
@@ -1898,40 +1848,32 @@ bridge_fragment(struct ifnet *brifp, struct ifnet *ifp, struct ether_header *eh,
 		return;
 	}
 
-	error = ip_fragment(m, ifp, ifp->if_mtu);
-	if (error) {
-		m = NULL;
-		goto dropit;
-	}
+	error = ip_fragment(m, &fml, ifp, ifp->if_mtu);
+	if (error)
+		return;
 
-	for (; m; m = m0) {
-		m0 = m->m_nextpkt;
-		m->m_nextpkt = NULL;
-		if (error == 0) {
-			if (hassnap) {
-				M_PREPEND(m, LLC_SNAPFRAMELEN, M_DONTWAIT);
-				if (m == NULL) {
-					error = ENOBUFS;
-					continue;
-				}
-				bcopy(&llc, mtod(m, caddr_t),
-				    LLC_SNAPFRAMELEN);
-			}
-			M_PREPEND(m, sizeof(*eh), M_DONTWAIT);
+	while ((m = ml_dequeue(&fml)) != NULL) {
+		if (hassnap) {
+			M_PREPEND(m, LLC_SNAPFRAMELEN, M_DONTWAIT);
 			if (m == NULL) {
 				error = ENOBUFS;
-				continue;
+				break;
 			}
-			bcopy(eh, mtod(m, caddr_t), sizeof(*eh));
-			error = bridge_ifenqueue(brifp, ifp, m);
-			if (error) {
-				continue;
-			}
-		} else
-			m_freem(m);
+			bcopy(&llc, mtod(m, caddr_t), LLC_SNAPFRAMELEN);
+		}
+		M_PREPEND(m, sizeof(*eh), M_DONTWAIT);
+		if (m == NULL) {
+			error = ENOBUFS;
+			break;
+		}
+		bcopy(eh, mtod(m, caddr_t), sizeof(*eh));
+		error = bridge_ifenqueue(brifp, ifp, m);
+		if (error)
+			break;
 	}
-
-	if (error == 0)
+	if (error)
+		ml_purge(&fml);
+	else
 		ipstat_inc(ips_fragmented);
 
 	return;

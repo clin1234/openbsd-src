@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bge.c,v 1.392 2020/07/26 17:44:15 kettenis Exp $	*/
+/*	$OpenBSD: if_bge.c,v 1.396 2021/06/18 06:53:42 jsg Exp $	*/
 
 /*
  * Copyright (c) 2001 Wind River Systems
@@ -96,8 +96,7 @@
 #include <net/bpf.h>
 #endif
 
-#ifdef __sparc64__
-#include <sparc64/autoconf.h>
+#if defined(__sparc64__) || defined(__HAVE_FDT)
 #include <dev/ofw/openfirm.h>
 #endif
 
@@ -393,6 +392,7 @@ static const struct bge_revision {
 	{ BGE_CHIPID_BCM5761_A0, "BCM5761 A0" },
 	{ BGE_CHIPID_BCM5761_A1, "BCM5761 A1" },
 	{ BGE_CHIPID_BCM5762_A0, "BCM5762 A0" },
+	{ BGE_CHIPID_BCM5762_B0, "BCM5762 B0" },
 	{ BGE_CHIPID_BCM5784_A0, "BCM5784 A0" },
 	{ BGE_CHIPID_BCM5784_A1, "BCM5784 A1" },
 	/* the 5754 and 5787 share the same ASIC ID */
@@ -403,6 +403,8 @@ static const struct bge_revision {
 	{ BGE_CHIPID_BCM5906_A2, "BCM5906 A2" },
 	{ BGE_CHIPID_BCM57765_A0, "BCM57765 A0" },
 	{ BGE_CHIPID_BCM57765_B0, "BCM57765 B0" },
+	{ BGE_CHIPID_BCM57766_A0, "BCM57766 A0" },
+	{ BGE_CHIPID_BCM57766_A1, "BCM57766 A1" },
 	{ BGE_CHIPID_BCM57780_A0, "BCM57780 A0" },
 	{ BGE_CHIPID_BCM57780_A1, "BCM57780 A1" },
 
@@ -1113,7 +1115,7 @@ bge_newbuf(struct bge_softc *sc, int i)
 	struct mbuf		*m;
 	int			error;
 
-	m = MCLGETI(NULL, M_DONTWAIT, NULL, sc->bge_rx_std_len);
+	m = MCLGETL(NULL, M_DONTWAIT, sc->bge_rx_std_len);
 	if (!m)
 		return (ENOBUFS);
 	m->m_len = m->m_pkthdr.len = sc->bge_rx_std_len;
@@ -1162,7 +1164,7 @@ bge_newbuf_jumbo(struct bge_softc *sc, int i)
 	struct mbuf		*m;
 	int			error;
 
-	m = MCLGETI(NULL, M_DONTWAIT, NULL, BGE_JLEN);
+	m = MCLGETL(NULL, M_DONTWAIT, BGE_JLEN);
 	if (!m)
 		return (ENOBUFS);
 	m->m_len = m->m_pkthdr.len = BGE_JUMBO_FRAMELEN;
@@ -2888,8 +2890,8 @@ bge_attach(struct device *parent, struct device *self, void *aux)
 
 	bge_chipinit(sc);
 
-#ifdef __sparc64__
-	if (!gotenaddr) {
+#if defined(__sparc64__) || defined(__HAVE_FDT)
+	if (!gotenaddr && PCITAG_NODE(pa->pa_tag)) {
 		if (OF_getprop(PCITAG_NODE(pa->pa_tag), "local-mac-address",
 		    sc->arpcom.ac_enaddr, ETHER_ADDR_LEN) == ETHER_ADDR_LEN)
 			gotenaddr = 1;

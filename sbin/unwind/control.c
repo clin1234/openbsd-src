@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.15 2019/12/18 09:18:27 florian Exp $	*/
+/*	$OpenBSD: control.c,v 1.17 2021/02/24 18:34:14 florian Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -38,6 +38,19 @@
 #include "resolver.h"
 
 #define	CONTROL_BACKLOG	5
+
+struct {
+	struct event	ev;
+	struct event	evt;
+	int		fd;
+} control_state = {.fd = -1};
+
+struct ctl_conn {
+	TAILQ_ENTRY(ctl_conn)	entry;
+	struct imsgev		iev;
+};
+
+TAILQ_HEAD(ctl_conns, ctl_conn)	ctl_conns = TAILQ_HEAD_INITIALIZER(ctl_conns);
 
 struct ctl_conn	*control_connbyfd(int);
 struct ctl_conn	*control_connbypid(pid_t);
@@ -88,8 +101,12 @@ control_init(char *path)
 }
 
 int
-control_listen(void)
+control_listen(int fd)
 {
+	if (control_state.fd != -1)
+		fatalx("%s: received unexpected controlsock", __func__);
+
+	control_state.fd = fd;
 	if (listen(control_state.fd, CONTROL_BACKLOG) == -1) {
 		log_warn("%s: listen", __func__);
 		return (-1);
@@ -255,9 +272,11 @@ control_dispatch_imsg(int fd, short event, void *bula)
 			break;
 		}
 
+		c->iev.ibuf.pid = imsg.hdr.pid;
 		switch (imsg.hdr.type) {
 		case IMSG_CTL_RELOAD:
-			frontend_imsg_compose_main(imsg.hdr.type, 0, NULL, 0);
+			frontend_imsg_compose_main(imsg.hdr.type, imsg.hdr.pid,
+			    NULL, 0);
 			break;
 		case IMSG_CTL_LOG_VERBOSE:
 			if (IMSG_DATA_SIZE(imsg) != sizeof(verbose))
@@ -277,8 +296,8 @@ control_dispatch_imsg(int fd, short event, void *bula)
 		case IMSG_CTL_MEM:
 			if (IMSG_DATA_SIZE(imsg) != 0)
 				break;
-			frontend_imsg_compose_resolver(imsg.hdr.type, 0, NULL,
-			    0);
+			frontend_imsg_compose_resolver(imsg.hdr.type,
+			    imsg.hdr.pid, NULL, 0);
 			break;
 		default:
 			log_debug("%s: error handling imsg %d", __func__,

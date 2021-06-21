@@ -1,4 +1,4 @@
-/* $OpenBSD: sk-usbhid.c,v 1.28 2020/10/18 11:32:02 djm Exp $ */
+/* $OpenBSD: sk-usbhid.c,v 1.30 2021/05/31 06:48:42 djm Exp $ */
 /*
  * Copyright (c) 2019 Markus Friedl
  * Copyright (c) 2020 Pedro Martelletto
@@ -89,7 +89,7 @@ int sk_enroll(uint32_t alg, const uint8_t *challenge, size_t challenge_len,
     struct sk_option **options, struct sk_enroll_response **enroll_response);
 
 /* Sign a challenge */
-int sk_sign(uint32_t alg, const uint8_t *message, size_t message_len,
+int sk_sign(uint32_t alg, const uint8_t *data, size_t data_len,
     const char *application, const uint8_t *key_handle, size_t key_handle_len,
     uint8_t flags, const char *pin, struct sk_option **options,
     struct sk_sign_response **sign_response);
@@ -635,7 +635,7 @@ sk_enroll(uint32_t alg, const uint8_t *challenge, size_t challenge_len,
 {
 	fido_cred_t *cred = NULL;
 	const uint8_t *ptr;
-	uint8_t user_id[32];
+	uint8_t user_id[32], chall_hash[32];
 	struct sk_usbhid *sk = NULL;
 	struct sk_enroll_response *response = NULL;
 	size_t len;
@@ -687,8 +687,13 @@ sk_enroll(uint32_t alg, const uint8_t *challenge, size_t challenge_len,
 		skdebug(__func__, "fido_cred_set_type: %s", fido_strerr(r));
 		goto out;
 	}
-	if ((r = fido_cred_set_clientdata_hash(cred, challenge,
-	    challenge_len)) != FIDO_OK) {
+	if (sha256_mem(challenge, challenge_len,
+	    chall_hash, sizeof(chall_hash)) != 0) {
+		skdebug(__func__, "hash challenge failed");
+		goto out;
+	}
+	if ((r = fido_cred_set_clientdata_hash(cred, chall_hash,
+	    sizeof(chall_hash))) != FIDO_OK) {
 		skdebug(__func__, "fido_cred_set_clientdata_hash: %s",
 		    fido_strerr(r));
 		goto out;

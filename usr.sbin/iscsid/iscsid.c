@@ -1,4 +1,4 @@
-/*	$OpenBSD: iscsid.c,v 1.20 2017/01/23 08:40:07 benno Exp $ */
+/*	$OpenBSD: iscsid.c,v 1.22 2021/04/16 14:37:06 claudio Exp $ */
 
 /*
  * Copyright (c) 2009 Claudio Jeker <claudio@openbsd.org>
@@ -38,7 +38,7 @@ void		main_sig_handler(int, short, void *);
 __dead void	usage(void);
 void		shutdown_cb(int, short, void *);
 
-struct initiator *initiator;
+extern struct initiator *initiator;
 struct event exit_ev;
 int exit_rounds;
 #define ISCSI_EXIT_WAIT 5
@@ -211,6 +211,7 @@ iscsid_ctrl_dispatch(void *ch, struct pdu *pdu)
 	struct initiator_config *ic;
 	struct session_config *sc;
 	struct session *s;
+	struct session_poll p = { 0 };
 	int *valp;
 
 	cmh = pdu_getbuf(pdu, NULL, 0);
@@ -303,6 +304,12 @@ iscsid_ctrl_dispatch(void *ch, struct pdu *pdu)
 		}
 
 		control_compose(ch, CTRL_SUCCESS, NULL, 0);
+		break;
+	case CTRL_SESS_POLL:
+		TAILQ_FOREACH(s, &initiator->sessions, entry)
+			poll_session(&p, s);
+		poll_finalize(&p);
+		control_compose(ch, CTRL_SESS_POLL, &p, sizeof(p));
 		break;
 	default:
 		log_warnx("unknown control message type %d", cmh->type);

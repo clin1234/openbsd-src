@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-select-pane.c,v 1.64 2020/07/24 07:05:37 nicm Exp $ */
+/* $OpenBSD: cmd-select-pane.c,v 1.66 2021/03/11 06:31:05 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -108,12 +108,16 @@ cmd_select_pane_exec(struct cmd *self, struct cmdq_item *item)
 			cmdq_error(item, "no last pane");
 			return (CMD_RETURN_ERROR);
 		}
-		if (args_has(args, 'e'))
+		if (args_has(args, 'e')) {
 			lastwp->flags &= ~PANE_INPUTOFF;
-		else if (args_has(args, 'd'))
+			server_redraw_window_borders(lastwp->window);
+			server_status_window(lastwp->window);
+		} else if (args_has(args, 'd')) {
 			lastwp->flags |= PANE_INPUTOFF;
-		else {
-			if (window_push_zoom(w, args_has(args, 'Z')))
+			server_redraw_window_borders(lastwp->window);
+			server_status_window(lastwp->window);
+		} else {
+			if (window_push_zoom(w, 0, args_has(args, 'Z')))
 				server_redraw_window(w);
 			window_redraw_active_switch(w, lastwp);
 			if (window_set_active_pane(w, lastwp, 1)) {
@@ -167,19 +171,19 @@ cmd_select_pane_exec(struct cmd *self, struct cmdq_item *item)
 	}
 
 	if (args_has(args, 'L')) {
-		window_push_zoom(w, 1);
+		window_push_zoom(w, 0, 1);
 		wp = window_pane_find_left(wp);
 		window_pop_zoom(w);
 	} else if (args_has(args, 'R')) {
-		window_push_zoom(w, 1);
+		window_push_zoom(w, 0, 1);
 		wp = window_pane_find_right(wp);
 		window_pop_zoom(w);
 	} else if (args_has(args, 'U')) {
-		window_push_zoom(w, 1);
+		window_push_zoom(w, 0, 1);
 		wp = window_pane_find_up(wp);
 		window_pop_zoom(w);
 	} else if (args_has(args, 'D')) {
-		window_push_zoom(w, 1);
+		window_push_zoom(w, 0, 1);
 		wp = window_pane_find_down(wp);
 		window_pop_zoom(w);
 	}
@@ -188,10 +192,14 @@ cmd_select_pane_exec(struct cmd *self, struct cmdq_item *item)
 
 	if (args_has(args, 'e')) {
 		wp->flags &= ~PANE_INPUTOFF;
+		server_redraw_window_borders(wp->window);
+		server_status_window(wp->window);
 		return (CMD_RETURN_NORMAL);
 	}
 	if (args_has(args, 'd')) {
 		wp->flags |= PANE_INPUTOFF;
+		server_redraw_window_borders(wp->window);
+		server_status_window(wp->window);
 		return (CMD_RETURN_NORMAL);
 	}
 
@@ -212,7 +220,7 @@ cmd_select_pane_exec(struct cmd *self, struct cmdq_item *item)
 		activewp = w->active;
 	if (wp == activewp)
 		return (CMD_RETURN_NORMAL);
-	if (window_push_zoom(w, args_has(args, 'Z')))
+	if (window_push_zoom(w, 0, args_has(args, 'Z')))
 		server_redraw_window(w);
 	window_redraw_active_switch(w, wp);
 	if (c != NULL && c->session != NULL && (c->flags & CLIENT_ACTIVEPANE))

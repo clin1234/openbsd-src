@@ -1,4 +1,4 @@
-#	$OpenBSD: RAMDISK_CD,v 1.189 2020/05/14 13:07:11 kettenis Exp $
+#	$OpenBSD: RAMDISK_CD,v 1.191 2021/06/10 06:54:42 fcambus Exp $
 
 machine		amd64
 maxusers	4
@@ -20,6 +20,10 @@ option		MSDOSFS
 option		INET6
 option		CRYPTO
 
+option		FONT_SPLEEN8x16
+option		FONT_SPLEEN12x24
+option		FONT_SPLEEN16x32
+
 option		RAMDISK_HOOKS
 option		MINIROOTSIZE=7360
 
@@ -30,7 +34,7 @@ bios0		at mainbus?
 
 acpi0		at bios?
 #acpitimer*	at acpi?
-#acpihpet*	at acpi?
+acpihpet*	at acpi?
 #acpiac*	at acpi?
 #acpibat*	at acpi?
 #acpibtn*	at acpi?

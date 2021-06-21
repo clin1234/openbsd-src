@@ -1,4 +1,4 @@
-/*	$OpenBSD: to.c,v 1.44 2019/11/12 20:21:46 gilles Exp $	*/
+/*	$OpenBSD: to.c,v 1.48 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2009 Jacek Masiulaniec <jacekm@dobremiasto.net>
@@ -18,37 +18,18 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/resource.h>
-
-#include <netinet/in.h>
 #include <arpa/inet.h>
-
 #include <ctype.h>
-#include <err.h>
 #include <errno.h>
-#include <event.h>
-#include <fcntl.h>
-#include <imsg.h>
-#include <limits.h>
-#include <inttypes.h>
-#include <netdb.h>
-#include <pwd.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
+#if IO_TLS
+#include <tls.h>
+#endif
 
 #include "smtpd.h"
 #include "log.h"
 
-static const char *in6addr_to_text(const struct in6_addr *);
 static int alias_is_filter(struct expandnode *, const char *, size_t);
 static int alias_is_username(struct expandnode *, const char *, size_t);
 static int alias_is_address(struct expandnode *, const char *, size_t);
@@ -57,7 +38,7 @@ static int alias_is_include(struct expandnode *, const char *, size_t);
 static int alias_is_error(struct expandnode *, const char *, size_t);
 
 const char *
-sockaddr_to_text(struct sockaddr *sa)
+sockaddr_to_text(const struct sockaddr *sa)
 {
 	static char	buf[NI_MAXHOST];
 
@@ -66,29 +47,6 @@ sockaddr_to_text(struct sockaddr *sa)
 		return ("(unknown)");
 	else
 		return (buf);
-}
-
-static const char *
-in6addr_to_text(const struct in6_addr *addr)
-{
-	struct sockaddr_in6	sa_in6;
-	uint16_t		tmp16;
-
-	memset(&sa_in6, 0, sizeof(sa_in6));
-	sa_in6.sin6_len = sizeof(sa_in6);
-	sa_in6.sin6_family = AF_INET6;
-	memcpy(&sa_in6.sin6_addr, addr, sizeof(sa_in6.sin6_addr));
-
-	/* XXX thanks, KAME, for this ugliness... adopted from route/show.c */
-	if (IN6_IS_ADDR_LINKLOCAL(&sa_in6.sin6_addr) ||
-	    IN6_IS_ADDR_MC_LINKLOCAL(&sa_in6.sin6_addr)) {
-		memcpy(&tmp16, &sa_in6.sin6_addr.s6_addr[2], sizeof(tmp16));
-		sa_in6.sin6_scope_id = ntohs(tmp16);
-		sa_in6.sin6_addr.s6_addr[2] = 0;
-		sa_in6.sin6_addr.s6_addr[3] = 0;
-	}
-
-	return (sockaddr_to_text((struct sockaddr *)&sa_in6));
 }
 
 int
@@ -165,13 +123,7 @@ sa_to_text(const struct sockaddr *sa)
 		    (addr >> 8) & 0xff, addr & 0xff);
 	}
 	else if (sa->sa_family == AF_INET6) {
-		const struct sockaddr_in6 *in6;
-		const struct in6_addr	*in6_addr;
-
-		in6 = (const struct sockaddr_in6 *)sa;
-		p = buf;
-		in6_addr = &in6->sin6_addr;
-		(void)bsnprintf(p, NI_MAXHOST, "[%s]", in6addr_to_text(in6_addr));
+		(void)bsnprintf(p, NI_MAXHOST, "[%s]", sockaddr_to_text(sa));
 	}
 
 	return (buf);
@@ -825,3 +777,18 @@ alias_is_error(struct expandnode *alias, const char *line, size_t len)
 	alias->type = EXPAND_ERROR;
 	return 1;
 }
+
+#if IO_TLS
+const char *
+tls_to_text(struct tls *tls)
+{
+	static char buf[256];
+
+	(void)snprintf(buf, sizeof buf, "%s:%s:%d",
+	    tls_conn_version(tls),
+	    tls_conn_cipher(tls),
+	    tls_conn_cipher_strength(tls));
+
+	return (buf);
+}
+#endif

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_aggr.c,v 1.34 2020/08/21 22:59:27 kn Exp $ */
+/*	$OpenBSD: if_aggr.c,v 1.38 2021/02/28 03:59:25 dlg Exp $ */
 
 /*
  * Copyright (c) 2019 The University of Queensland
@@ -108,6 +108,7 @@ struct ether_slowproto_hdr {
 
 #define LACP_ADDR_C_BRIDGE		{ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x00 }
 #define LACP_ADDR_SLOW			{ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x02 }
+#define LACP_ADDR_SLOW_E64		0x0180c2000002ULL
 #define LACP_ADDR_NON_TPMR_BRIDGE	{ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x03 }
 
 struct lacp_tlv_hdr {
@@ -505,8 +506,6 @@ static void	aggr_unselected(struct aggr_port *);
 
 static void	aggr_selection_logic(struct aggr_softc *, struct aggr_port *);
 
-#define ETHER_IS_SLOWADDR(_a)	ETHER_IS_EQ((_a), lacp_address_slow)
-
 static struct if_clone aggr_cloner =
     IF_CLONE_INITIALIZER("aggr", aggr_clone_create, aggr_clone_destroy);
 
@@ -719,8 +718,13 @@ aggr_start(struct ifqueue *ifq)
 static inline int
 aggr_eh_is_slow(const struct ether_header *eh)
 {
-	return (ETHER_IS_SLOWADDR(eh->ether_dhost) &&
-	    eh->ether_type == htons(ETHERTYPE_SLOW));
+	uint64_t dst;
+
+	if (eh->ether_type != htons(ETHERTYPE_SLOW))
+		return (0);
+
+	dst = ether_addr_to_e64((struct ether_addr *)eh->ether_dhost);
+	return (dst == LACP_ADDR_SLOW_E64);
 }
 
 static void
@@ -1065,31 +1069,36 @@ aggr_add_port(struct aggr_softc *sc, const struct trunk_reqport *rp)
 	if (sc->sc_nports > AGGR_MAX_PORTS)
 		return (ENOSPC);
 
-	ifp0 = ifunit(rp->rp_portname);
-	if (ifp0 == NULL || ifp0->if_index == ifp->if_index)
+	ifp0 = if_unit(rp->rp_portname);
+	if (ifp0 == NULL)
 		return (EINVAL);
 
-	if (ifp0->if_type != IFT_ETHER)
-		return (EPROTONOSUPPORT);
+	if (ifp0->if_index == ifp->if_index) {
+		error = EINVAL;
+		goto put;
+	}
+
+	if (ifp0->if_type != IFT_ETHER) {
+		error = EPROTONOSUPPORT;
+		goto put;
+	}
 
 	error = ether_brport_isset(ifp0);
 	if (error != 0)
-		return (error);
+		goto put;
 
-	if (ifp0->if_hardmtu < ifp->if_mtu)
-		return (ENOBUFS);
+	if (ifp0->if_hardmtu < ifp->if_mtu) {
+		error = ENOBUFS;
+		goto put;
+	}
 
 	ac0 = (struct arpcom *)ifp0;
-	if (ac0->ac_trunkport != NULL)
-		return (EBUSY);
+	if (ac0->ac_trunkport != NULL) {
+		error = EBUSY;
+		goto put;
+	}
 
 	/* let's try */
-
-	ifp0 = if_get(ifp0->if_index); /* get an actual reference */
-	if (ifp0 == NULL) {
-		/* XXX this should never happen */
-		return (EINVAL);
-	}
 
 	p = malloc(sizeof(*p), M_DEVBUF, M_WAITOK|M_ZERO|M_CANFAIL);
 	if (p == NULL) {
@@ -2664,7 +2673,7 @@ aggr_ntt_transmit(struct aggr_port *p)
 		return;
 
 	if (len > MHLEN) {
-		MCLGETI(m, M_DONTWAIT, NULL, len);
+		MCLGETL(m, M_DONTWAIT, len);
 		if (!ISSET(m->m_flags, M_EXT)) {
 			m_freem(m);
 			return;

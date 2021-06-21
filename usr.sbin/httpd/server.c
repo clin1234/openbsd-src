@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.121 2020/10/11 03:21:44 tb Exp $	*/
+/*	$OpenBSD: server.c,v 1.125 2021/04/10 10:10:07 claudio Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -127,7 +127,7 @@ server_privinit(struct server *srv)
 }
 
 int
-server_tls_cmp(struct server *s1, struct server *s2, int match_keypair)
+server_tls_cmp(struct server *s1, struct server *s2)
 {
 	struct server_config	*sc1, *sc2;
 
@@ -146,13 +146,6 @@ server_tls_cmp(struct server *s1, struct server *s2, int match_keypair)
 		return (-1);
 	if (strcmp(sc1->tls_ecdhe_curves, sc2->tls_ecdhe_curves) != 0)
 		return (-1);
-
-	if (match_keypair) {
-		if (strcmp(sc1->tls_cert_file, sc2->tls_cert_file) != 0)
-			return (-1);
-		if (strcmp(sc1->tls_key_file, sc2->tls_key_file) != 0)
-			return (-1);
-	}
 
 	return (0);
 }
@@ -1251,12 +1244,14 @@ server_sendlog(struct server_config *srv_conf, int cmd, const char *emsg, ...)
 	iov[0].iov_base = &srv_conf->id;
 	iov[0].iov_len = sizeof(srv_conf->id);
 	iov[1].iov_base = msg;
-	iov[1].iov_len = strlen(msg) + 1;
+	iov[1].iov_len = ret + 1;
 
 	if (proc_composev(httpd_env->sc_ps, PROC_LOGGER, cmd, iov, 2) != 0) {
 		log_warn("%s: failed to compose imsg", __func__);
+		free(msg);
 		return;
 	}
+	free(msg);
 }
 
 void
@@ -1314,6 +1309,11 @@ server_close(struct client *clt, const char *msg)
 	/* free the HTTP descriptors incl. headers */
 	server_close_http(clt);
 
+	/* tls_close must be called before the underlying socket is closed. */
+	if (clt->clt_tls_ctx != NULL)
+		tls_close(clt->clt_tls_ctx); /* XXX - error handling */
+	tls_free(clt->clt_tls_ctx);
+
 	event_del(&clt->clt_ev);
 	if (clt->clt_bev != NULL)
 		bufferevent_disable(clt->clt_bev, EV_READ|EV_WRITE);
@@ -1331,14 +1331,11 @@ server_close(struct client *clt, const char *msg)
 
 	if (clt->clt_srvbev != NULL)
 		bufferevent_free(clt->clt_srvbev);
+
 	if (clt->clt_fd != -1)
 		close(clt->clt_fd);
 	if (clt->clt_s != -1)
 		close(clt->clt_s);
-
-	if (clt->clt_tls_ctx != NULL)
-		tls_close(clt->clt_tls_ctx);
-	tls_free(clt->clt_tls_ctx);
 
 	server_inflight_dec(clt, __func__);
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_vlan.c,v 1.204 2020/07/22 01:30:54 dlg Exp $	*/
+/*	$OpenBSD: if_vlan.c,v 1.207 2021/06/09 03:24:54 dlg Exp $	*/
 
 /*
  * Copyright 1998 Massachusetts Institute of Technology
@@ -340,7 +340,7 @@ vlan_inject(struct mbuf *m, uint16_t type, uint16_t tag)
 {
 	struct ether_vlan_header evh;
 
-	m_copydata(m, 0, ETHER_HDR_LEN, (caddr_t)&evh);
+	m_copydata(m, 0, ETHER_HDR_LEN, &evh);
 	evh.evl_proto = evh.evl_encap_proto;
 	evh.evl_encap_proto = htons(type);
 	evh.evl_tag = htons(tag);
@@ -355,7 +355,7 @@ vlan_inject(struct mbuf *m, uint16_t type, uint16_t tag)
 	CLR(m->m_flags, M_VLANTAG);
 
 	return (m);
- }
+}
 
 struct mbuf *
 vlan_input(struct ifnet *ifp0, struct mbuf *m)
@@ -887,31 +887,37 @@ vlan_set_parent(struct vlan_softc *sc, const char *parent)
 	struct ifnet *ifp0;
 	int error = 0;
 
-	ifp0 = ifunit(parent); /* doesn't need an if_put */
+	ifp0 = if_unit(parent);
 	if (ifp0 == NULL)
 		return (EINVAL);
 
-	if (ifp0->if_type != IFT_ETHER)
-		return (EPROTONOSUPPORT);
+	if (ifp0->if_type != IFT_ETHER) {
+		error = EPROTONOSUPPORT;
+		goto put;
+	}
 
 	if (sc->sc_ifidx0 == ifp0->if_index) {
 		/* nop */
-		return (0);
+		goto put;
 	}
 
-	if (ISSET(ifp->if_flags, IFF_RUNNING))
-		return (EBUSY);
+	if (ISSET(ifp->if_flags, IFF_RUNNING)) {
+		error = EBUSY;
+		goto put;
+	}
 
 	error = vlan_inuse(sc->sc_type, ifp0->if_index, sc->sc_tag);
 	if (error != 0)
-		return (error);
+		goto put;
 
 	/* commit */
 	sc->sc_ifidx0 = ifp0->if_index;
 	if (!ISSET(sc->sc_flags, IFVF_LLADDR))
 		if_setlladdr(ifp, LLADDR(ifp0->if_sadl));
 
-	return (0);
+put:
+	if_put(ifp0);
+	return (error);
 }
 
 int

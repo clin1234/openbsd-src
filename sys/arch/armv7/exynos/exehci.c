@@ -1,4 +1,4 @@
-/*	$OpenBSD: exehci.c,v 1.8 2017/12/23 10:23:34 kettenis Exp $ */
+/*	$OpenBSD: exehci.c,v 1.10 2021/03/25 04:12:01 jsg Exp $ */
 /*
  * Copyright (c) 2012-2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -18,7 +18,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/device.h>
-#include <sys/kernel.h>
 
 #include <machine/intr.h>
 #include <machine/bus.h>
@@ -27,14 +26,11 @@
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
 #include <dev/usb/usbdivar.h>
-#include <dev/usb/usb_mem.h>
 
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_clock.h>
 #include <dev/ofw/ofw_gpio.h>
 #include <dev/ofw/ofw_misc.h>
-#include <dev/ofw/ofw_pinctrl.h>
-#include <dev/ofw/ofw_regulator.h>
 #include <dev/ofw/fdt.h>
 
 #include <dev/usb/ehcireg.h>
@@ -127,7 +123,7 @@ exehci_attach(struct device *parent, struct device *self, void *aux)
 
 	node = OF_child(faa->fa_node);
 	if (node == 0)
-		return;
+		node = faa->fa_node;
 
 	if (OF_getpropintarray(node, "phys", phys,
 	    sizeof(phys)) != sizeof(phys))
@@ -159,6 +155,8 @@ exehci_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	printf("\n");
+
+	clock_enable_all(faa->fa_node);
 
 	exehci_setup(sc);
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: sdhc_acpi.c,v 1.15 2020/05/08 11:18:01 kettenis Exp $	*/
+/*	$OpenBSD: sdhc_acpi.c,v 1.18 2021/03/08 13:48:56 kettenis Exp $	*/
 /*
  * Copyright (c) 2016 Mark Kettenis
  *
@@ -56,8 +56,10 @@ struct cfattach sdhc_acpi_ca = {
 
 const char *sdhc_hids[] = {
 	"PNP0D40",
-	"INT33BB",
 	"80860F14",
+	"BCM2847",	/* Raspberry Pi3/4 "arasan" controller */
+	"BRCME88C",	/* Raspberry Pi4 "emmc2" controller */
+	"INT33BB",
 	"PNP0FFF",
 	NULL
 };
@@ -84,6 +86,7 @@ sdhc_acpi_attach(struct device *parent, struct device *self, void *aux)
 	struct sdhc_acpi_softc *sc = (struct sdhc_acpi_softc *)self;
 	struct acpi_attach_args *aaa = aux;
 	struct aml_value res;
+	uint32_t cap, capmask;
 
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_node = aaa->aaa_node;
@@ -140,10 +143,24 @@ sdhc_acpi_attach(struct device *parent, struct device *self, void *aux)
 	sdhc_acpi_power_on(sc, sc->sc_node);
 	sdhc_acpi_explore(sc);
 
+	cap = acpi_getpropint(sc->sc_node, "sdhci-caps", 0);
+	capmask = acpi_getpropint(sc->sc_node, "sdhci-caps-mask", 0);
+	if (capmask != 0) {
+		cap = bus_space_read_4(sc->sc_memt, sc->sc_memh,
+		    SDHC_CAPABILITIES);
+		cap &= ~capmask;
+	}
+
+	/* Raspberry Pi4 "emmc2" controller. */
+	if (strcmp(aaa->aaa_dev, "BRCME88C") == 0)
+		sc->sc.sc_flags |= SDHC_F_NOPWR0;
+
 	sc->sc.sc_host = &sc->sc_host;
 	sc->sc.sc_dmat = aaa->aaa_dmat;
+	sc->sc.sc_clkbase = acpi_getpropint(sc->sc_node,
+	    "clock-frequency", 0) / 1000;
 	sdhc_host_found(&sc->sc, sc->sc_memt, sc->sc_memh,
-	    aaa->aaa_size[0], 1, 0);
+	    aaa->aaa_size[0], 1, cap);
 }
 
 int

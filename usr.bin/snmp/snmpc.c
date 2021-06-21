@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpc.c,v 1.30 2020/09/14 15:12:27 martijn Exp $	*/
+/*	$OpenBSD: snmpc.c,v 1.34 2021/06/20 20:02:14 martijn Exp $	*/
 
 /*
  * Copyright (c) 2019 Martijn van Duren <martijn@openbsd.org>
@@ -456,8 +456,6 @@ main(int argc, char *argv[])
 			if (boots < 0 || strtolp == optarg || strtolp[0] != ',')
 				usage();
 			strtolp++;
-			while (strtolp[0] == ' ' && strtolp[0] == '\t')
-				strtolp++;
 			time = strtoll(strtolp, &strtolp, 10);
 			if (boots < 0 || strtolp == optarg)
 				usage();
@@ -478,7 +476,7 @@ main(int argc, char *argv[])
 			err(1, "usm_init");
 		if (seclevel & SNMP_MSGFLAG_AUTH) {
 			if (md == NULL)
-				md = EVP_md5();
+				md = EVP_sha256();
 			if (authkey == NULL)
 				errx(1, "No authKey or authPassword specified");
 			if (usm_setauth(sec, md, authkey, authkeylen,
@@ -487,7 +485,7 @@ main(int argc, char *argv[])
 		}
 		if (seclevel & SNMP_MSGFLAG_PRIV) {
 			if (cipher == NULL)
-				cipher = EVP_des_cbc();
+				cipher = EVP_aes_128_cfb128();
 			if (privkey == NULL)
 				errx(1, "No privKey or privPassword specified");
 			if (usm_setpriv(sec, cipher, privkey, privkeylen,
@@ -788,6 +786,9 @@ snmpc_trap(int argc, char *argv[])
 	if (version == SNMP_V1)
 		errx(1, "trap is not supported for snmp v1");
 
+	if (argc < 3)
+		usage();
+
 	if ((agent = snmpc_connect(argv[0], "162")) == NULL)
 		err(1, "%s", snmp_app->name);
 
@@ -798,7 +799,7 @@ snmpc_trap(int argc, char *argv[])
 		if (clock_gettime(CLOCK_UPTIME, &ts) == -1)
 			err(1, "clock_gettime");
 	} else {
-		lval = strtonum(argv[1], 0, LLONG_MAX, &errstr);
+		lval = strtonum(argv[1], 0, UINT32_MAX, &errstr);
 		if (errstr != NULL)
 			errx(1, "Bad value notation (%s)", argv[1]);
 		ts.tv_sec = lval / 100;
@@ -1436,7 +1437,7 @@ snmpc_varbindparse(int argc, char *argv[])
 			 */
 			goto pastestring;
 		case 'c':
-			lval = strtonum(argv[i + 2], INT32_MIN, INT32_MAX,
+			lval = strtonum(argv[i + 2], 0, UINT32_MAX,
 			    &errstr);
 			if (errstr != NULL)
 				errx(1, "%s: Bad value notation (%s)", argv[i],
@@ -1469,9 +1470,8 @@ snmpc_varbindparse(int argc, char *argv[])
 				tmpstr = endstr + 1;
 			} while (endstr[0] != '\0');
 			goto pastestring;
-		case 'u':
 		case 'i':
-			lval = strtonum(argv[i + 2], LLONG_MIN, LLONG_MAX,
+			lval = strtonum(argv[i + 2], INT32_MIN, INT32_MAX,
 			    &errstr);
 			if (errstr != NULL)
 				errx(1, "%s: Bad value notation (%s)", argv[i],
@@ -1505,7 +1505,7 @@ pastestring:
 			free(str);
 			break;
 		case 't':
-			lval = strtonum(argv[i + 2], LLONG_MIN, LLONG_MAX,
+			lval = strtonum(argv[i + 2], 0, UINT32_MAX,
 			    &errstr);
 			if (errstr != NULL)
 				errx(1, "%s: Bad value notation (%s)", argv[i],
@@ -1513,6 +1513,17 @@ pastestring:
 			if ((varbind = ober_printf_elements(varbind, "{Oit}",
 			    &oid, lval, BER_CLASS_APPLICATION,
 			    SNMP_T_TIMETICKS)) == NULL)
+				err(1, "ober_printf_elements");
+			break;
+		case 'u':
+			lval = strtonum(argv[i + 2], 0, UINT32_MAX,
+			    &errstr);
+			if (errstr != NULL)
+				errx(1, "%s: Bad value notation (%s)", argv[i],
+				    argv[i + 2]);
+			if ((varbind = ober_printf_elements(varbind, "{Oit}",
+			    &oid, lval, BER_CLASS_APPLICATION,
+			    SNMP_T_GAUGE32)) == NULL)
 				err(1, "ober_printf_elements");
 			break;
 		case 'x':

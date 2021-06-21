@@ -1,4 +1,4 @@
-/*	$OpenBSD: tsc.c,v 1.21 2020/09/06 20:50:00 cheloha Exp $	*/
+/*	$OpenBSD: tsc.c,v 1.23 2021/02/23 04:44:30 cheloha Exp $	*/
 /*
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
  * Copyright (c) 2016,2017 Reyk Floeter <reyk@openbsd.org>
@@ -52,7 +52,14 @@ extern u_int32_t lapic_per_second;
 #endif
 
 struct timecounter tsc_timecounter = {
-	tsc_get_timecount, NULL, ~0u, 0, "tsc", -1000, NULL, TC_TSC
+	.tc_get_timecount = tsc_get_timecount,
+	.tc_poll_pps = NULL,
+	.tc_counter_mask = ~0u,
+	.tc_frequency = 0,
+	.tc_name = "tsc",
+	.tc_quality = -1000,
+	.tc_priv = NULL,
+	.tc_user = TC_TSC,
 };
 
 uint64_t
@@ -72,6 +79,8 @@ tsc_freq_cpuid(struct cpu_info *ci)
 			case 0x5e: /* Skylake desktop */
 			case 0x8e: /* Kabylake mobile */
 			case 0x9e: /* Kabylake desktop */
+			case 0xa5: /* CML-H CML-S62 CML-S102 */
+			case 0xa6: /* CML-U62 */
 				khz = 24000; /* 24.0 MHz */
 				break;
 			case 0x5f: /* Atom Denverton */

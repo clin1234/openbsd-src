@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.273 2020/09/30 14:51:17 jsg Exp $
+#	$OpenBSD: GENERIC,v 1.277 2021/04/28 11:32:59 bluhm Exp $
 #
 #	Machine-independent option; used by all architectures for their
 #	GENERIC kernel
@@ -82,11 +82,11 @@ pseudo-device	msts	1	# MSTS line discipline
 pseudo-device	endrun	1	# EndRun line discipline
 pseudo-device	vnd	4	# vnode disk devices
 pseudo-device	ksyms	1	# kernel symbols device
-#pseudo-device	dt		# Dynamic Tracer
 
 # clonable devices
 pseudo-device	bpfilter	# packet filter
 pseudo-device	bridge		# network bridging support
+pseudo-device	veb		# virtual Ethernet bridge
 pseudo-device	carp		# CARP protocol support
 pseudo-device	etherip		# EtherIP (RFC 3378)
 pseudo-device	gif		# IPv[46] over IPv[46] tunnel (RFC1933)

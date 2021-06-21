@@ -1,4 +1,4 @@
-/*	$OpenBSD: clock.c,v 1.42 2020/06/30 14:56:10 visa Exp $ */
+/*	$OpenBSD: clock.c,v 1.44 2021/05/01 16:11:11 visa Exp $ */
 
 /*
  * Copyright (c) 2001-2004 Opsycon AB  (www.opsycon.se / www.opsycon.com)
@@ -37,6 +37,7 @@
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
+#include <sys/atomic.h>
 #include <sys/device.h>
 #include <sys/evcount.h>
 
@@ -66,9 +67,6 @@ clockmatch(struct device *parent, void *vcf, void *aux)
 {
 	struct mainbus_attach_args *maa = aux;
 
-#ifdef CPU_R8000
-	return 0;	/* shouldn't be in the kernel configuration anyway */
-#endif
 	return strcmp(maa->maa_name, clock_cd.cd_name) == 0;
 }
 
@@ -149,7 +147,8 @@ cp0_int5(uint32_t mask, struct trapframe *tf)
 		ENABLEIPI();
 #endif
 		while (ci->ci_pendingticks) {
-			cp0_clock_count.ec_count++;
+			atomic_inc_long(
+			    (unsigned long *)&cp0_clock_count.ec_count);
 			hardclock(tf);
 			ci->ci_pendingticks--;
 		}

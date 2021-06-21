@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.209 2020/09/24 11:36:50 deraadt Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.214 2021/06/16 09:02:21 mpi Exp $	*/
 /*	$NetBSD: pmap.c,v 1.91 2000/06/02 17:46:37 thorpej Exp $	*/
 
 /*
@@ -377,7 +377,7 @@ int nkptp_max = 1024 - (KERNBASE / NBPD) - 1;
 
 /*
  * pg_g_kern:  if CPU is affected by Meltdown pg_g_kern is 0,
- * otherwise it is is set to PG_G.  pmap_pg_g will be dervied
+ * otherwise it is is set to PG_G.  pmap_pg_g will be derived
  * from pg_g_kern, see pmap_bootstrap().
  */
 extern int pg_g_kern;
@@ -961,7 +961,9 @@ pmap_bootstrap(vaddr_t kva_start)
 	 */
 
 	kpm = pmap_kernel();
-	uvm_objinit(&kpm->pm_obj, NULL, 1);
+	mtx_init(&kpm->pm_mtx, -1); /* must not be used */
+	mtx_init(&kpm->pm_apte_mtx, IPL_VM);
+	uvm_obj_init(&kpm->pm_obj, NULL, 1);
 	bzero(&kpm->pm_list, sizeof(kpm->pm_list));  /* pm_list not used */
 	kpm->pm_pdir = (vaddr_t)(proc0.p_addr->u_pcb.pcb_cr3 + KERNBASE);
 	kpm->pm_pdirpa = proc0.p_addr->u_pcb.pcb_cr3;
@@ -1346,7 +1348,7 @@ pmap_create(void)
 	mtx_init(&pmap->pm_apte_mtx, IPL_VM);
 
 	/* init uvm_object */
-	uvm_objinit(&pmap->pm_obj, NULL, 1);
+	uvm_obj_init(&pmap->pm_obj, NULL, 1);
 	pmap->pm_stats.wired_count = 0;
 	pmap->pm_stats.resident_count = 1;	/* count the PDP allocd below */
 	pmap->pm_ptphint = NULL;
@@ -1363,7 +1365,7 @@ void
 pmap_pinit_pd_86(struct pmap *pmap)
 {
 	/* allocate PDP */
-	pmap->pm_pdir = uvm_km_alloc(kernel_map, NBPG);
+	pmap->pm_pdir = (vaddr_t)km_alloc(NBPG, &kv_any, &kp_dirty, &kd_waitok);
 	if (pmap->pm_pdir == 0)
 		panic("pmap_pinit_pd_86: kernel_map out of virtual space!");
 	pmap_extract(pmap_kernel(), (vaddr_t)pmap->pm_pdir,
@@ -1395,13 +1397,14 @@ pmap_pinit_pd_86(struct pmap *pmap)
 	 * execution, one that lacks all kernel mappings.
 	 */
 	if (cpu_meltdown) {
-		pmap->pm_pdir_intel = uvm_km_zalloc(kernel_map, NBPG);
+		pmap->pm_pdir_intel = (vaddr_t)km_alloc(NBPG, &kv_any, &kp_zero,
+		    &kd_waitok);
 		if (pmap->pm_pdir_intel == 0)
 			panic("%s: kernel_map out of virtual space!", __func__);
 
 		if (!pmap_extract(pmap_kernel(), (vaddr_t)pmap->pm_pdir_intel,
 		    &pmap->pm_pdirpa_intel))
-			panic("%s: unknown PA mapping for meltdown PD\n",
+			panic("%s: unknown PA mapping for meltdown PD",
 			    __func__);
 
 		/* Copy PDEs from pmap_kernel's U-K view */
@@ -1447,11 +1450,12 @@ pmap_destroy(struct pmap *pmap)
 		uvm_pagefree(pg);
 	}
 
-	uvm_km_free(kernel_map, pmap->pm_pdir, pmap->pm_pdirsize);
+	km_free((void *)pmap->pm_pdir, pmap->pm_pdirsize, &kv_any, &kp_dirty);
 	pmap->pm_pdir = 0;
 
 	if (pmap->pm_pdir_intel) {
-		uvm_km_free(kernel_map, pmap->pm_pdir_intel, pmap->pm_pdirsize);
+		km_free((void *)pmap->pm_pdir_intel, pmap->pm_pdirsize,
+		    &kv_any, &kp_dirty);
 		pmap->pm_pdir_intel = 0;
 	}
 
@@ -2520,12 +2524,13 @@ pmap_enter_special_86(vaddr_t va, paddr_t pa, vm_prot_t prot, u_int32_t flags)
 		    __func__, va);
 
 	if (!pmap->pm_pdir_intel) {
-		if ((pmap->pm_pdir_intel = uvm_km_zalloc(kernel_map, NBPG))
-		    == 0)
+		pmap->pm_pdir_intel = (vaddr_t)km_alloc(NBPG, &kv_any, &kp_zero,
+		    &kd_waitok);
+		if (pmap->pm_pdir_intel == 0)
 			panic("%s: kernel_map out of virtual space!", __func__);
 		if (!pmap_extract(pmap, pmap->pm_pdir_intel,
 		    &pmap->pm_pdirpa_intel))
-			panic("%s: can't locate PD page\n", __func__);
+			panic("%s: can't locate PD page", __func__);
 	}
 
 	DPRINTF("%s: pm_pdir_intel 0x%x pm_pdirpa_intel 0x%x\n", __func__,
@@ -2539,7 +2544,7 @@ pmap_enter_special_86(vaddr_t va, paddr_t pa, vm_prot_t prot, u_int32_t flags)
 	    flags, l2idx, l1idx);
 
 	if ((pd = (pd_entry_t *)pmap->pm_pdir_intel) == NULL)
-		panic("%s: PD not initialized for pmap @ %p\n", __func__, pmap);
+		panic("%s: PD not initialized for pmap @ %p", __func__, pmap);
 
 	/* npa = physaddr of PT page */
 	npa = pd[l2idx] & PMAP_PA_MASK;

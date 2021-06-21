@@ -1,4 +1,4 @@
-/*	$OpenBSD: synch.h,v 1.5 2020/07/06 13:33:06 pirofti Exp $ */
+/*	$OpenBSD: synch.h,v 1.7 2021/06/13 21:11:54 kettenis Exp $ */
 /*
  * Copyright (c) 2017 Martin Pieuchot
  *
@@ -29,12 +29,20 @@ static inline int
 _twait(volatile uint32_t *p, int val, clockid_t clockid, const struct timespec *abs)
 {
 	struct timespec rel;
+	int saved_errno = errno;
+	int error;
 
-	if (abs == NULL)
-		return futex(p, FUTEX_WAIT_PRIVATE, val, NULL, NULL);
+	if (abs == NULL) {
+		error = futex(p, FUTEX_WAIT_PRIVATE, val, NULL, NULL);
+		if (error == -1) {
+			error = errno;
+			errno = saved_errno;
+		}
+		return error;
+	}
 
 	if (abs->tv_nsec >= 1000000000 || WRAP(clock_gettime)(clockid, &rel))
-		return (EINVAL);
+		return EINVAL;
 
 	rel.tv_sec = abs->tv_sec - rel.tv_sec;
 	if ((rel.tv_nsec = abs->tv_nsec - rel.tv_nsec) < 0) {
@@ -42,9 +50,14 @@ _twait(volatile uint32_t *p, int val, clockid_t clockid, const struct timespec *
 		rel.tv_nsec += 1000000000;
 	}
 	if (rel.tv_sec < 0)
-		return (ETIMEDOUT);
+		return ETIMEDOUT;
 
-	return futex(p, FUTEX_WAIT_PRIVATE, val, &rel, NULL);
+	error = futex(p, FUTEX_WAIT_PRIVATE, val, &rel, NULL);
+	if (error == -1) {
+		error = errno;
+		errno = saved_errno;
+	}
+	return error;
 }
 
 static inline int

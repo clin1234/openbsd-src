@@ -1,4 +1,4 @@
-/* $OpenBSD: softraidvar.h,v 1.171 2020/07/22 13:16:04 krw Exp $ */
+/* $OpenBSD: softraidvar.h,v 1.173 2021/05/10 08:17:07 stsp Exp $ */
 /*
  * Copyright (c) 2006 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2008 Chris Kuethe <ckuethe@openbsd.org>
@@ -444,6 +444,19 @@ struct sr_raid6 {
 TAILQ_HEAD(sr_crypto_wu_head, sr_crypto_wu);
 #define SR_CRYPTO_NOWU		16
 
+/*
+ * The per-I/O data that we need to preallocate. We cannot afford to allow I/O
+ * to start failing when memory pressure kicks in. We can store this in the WU
+ * because we assert that only one ccb per WU will ever be active during crypto.
+ */
+struct sr_crypto_wu {
+	struct sr_workunit		 cr_wu;		/* Must be first. */
+	struct uio			 cr_uio;
+	struct iovec			 cr_iov;
+	struct cryptop	 		*cr_crp;
+	void				*cr_dmabuf;
+};
+
 struct sr_crypto {
 	struct sr_meta_crypto	*scr_meta;
 	struct sr_chunk		*key_disk;
@@ -459,6 +472,13 @@ struct sr_crypto {
 
 #define SR_CONCAT_NOWU		16
 struct sr_concat {
+};
+
+/* RAID 1C */
+#define SR_RAID1C_NOWU		16
+struct sr_raid1c {
+	struct sr_crypto	sr1c_crypto;
+	struct sr_raid1		sr1c_raid1;
 };
 
 struct sr_chunk {
@@ -505,6 +525,7 @@ struct sr_discipline {
 	/* SR_MD_RAID4 was 7. */
 #define	SR_MD_RAID6		8
 #define	SR_MD_CONCAT		9
+#define	SR_MD_RAID1C		10
 	char			sd_name[10];	/* human readable dis name */
 	u_int16_t		sd_target;	/* scsibus target discipline uses */
 
@@ -523,6 +544,7 @@ struct sr_discipline {
 	    struct sr_concat	mdd_concat;
 #ifdef CRYPTO
 	    struct sr_crypto	mdd_crypto;
+	    struct sr_raid1c	mdd_raid1c;
 #endif /* CRYPTO */
 	}			sd_dis_specific;/* dis specific members */
 #define mds			sd_dis_specific
@@ -707,13 +729,17 @@ void			sr_raid5_discipline_init(struct sr_discipline *);
 void			sr_raid6_discipline_init(struct sr_discipline *);
 void			sr_crypto_discipline_init(struct sr_discipline *);
 void			sr_concat_discipline_init(struct sr_discipline *);
+void			sr_raid1c_discipline_init(struct sr_discipline *);
 
 /* Crypto discipline hooks. */
 int			sr_crypto_get_kdf(struct bioc_createraid *,
-			    struct sr_discipline *);
-int			sr_crypto_create_keys(struct sr_discipline *);
-struct sr_chunk *	sr_crypto_create_key_disk(struct sr_discipline *, dev_t);
-struct sr_chunk *	sr_crypto_read_key_disk(struct sr_discipline *, dev_t);
+			    struct sr_discipline *, struct sr_crypto *);
+int			sr_crypto_create_keys(struct sr_discipline *,
+			    struct sr_crypto *);
+struct sr_chunk *	sr_crypto_create_key_disk(struct sr_discipline *,
+			    struct sr_crypto *, dev_t);
+struct sr_chunk *	sr_crypto_read_key_disk(struct sr_discipline *,
+			    struct sr_crypto *, dev_t);
 
 /* Hibernate I/O function */
 int			sr_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr,

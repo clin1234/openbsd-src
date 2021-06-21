@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.c,v 1.105 2020/06/12 06:22:32 remi Exp $	*/
+/*	$OpenBSD: route.c,v 1.107 2021/03/17 09:03:51 claudio Exp $	*/
 /*	$NetBSD: route.c,v 1.15 1996/05/07 02:55:06 thorpej Exp $	*/
 
 /*
@@ -37,7 +37,9 @@
 
 #include <net/if.h>
 #include <net/if_types.h>
+#define _KERNEL
 #include <net/route.h>
+#undef _KERNEL
 #include <netinet/ip_ipsp.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -368,7 +370,8 @@ rdomainpr(void)
 
 	getifaddrs(&ifap);
 	for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
-		if (ifa->ifa_addr->sa_family != AF_LINK)
+		if (ifa->ifa_addr == NULL ||
+		    ifa->ifa_addr->sa_family != AF_LINK)
 			continue;
 		ifd = ifa->ifa_data;
 		if (rdom_if[ifd->ifi_rdomain] == NULL) {

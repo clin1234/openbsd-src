@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_esp.c,v 1.159 2019/09/30 01:53:05 dlg Exp $ */
+/*	$OpenBSD: ip_esp.c,v 1.163 2021/06/18 15:34:21 bluhm Exp $ */
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr) and
@@ -93,6 +93,7 @@ esp_init(struct tdb *tdbp, struct xformsw *xsp, struct ipsecinit *ii)
 	struct enc_xform *txform = NULL;
 	struct auth_hash *thash = NULL;
 	struct cryptoini cria, crie, crin;
+	int error;
 
 	if (!ii->ii_encalg && !ii->ii_authalg) {
 		DPRINTF(("esp_init(): neither authentication nor encryption "
@@ -294,8 +295,11 @@ esp_init(struct tdb *tdbp, struct xformsw *xsp, struct ipsecinit *ii)
 		cria.cri_key = ii->ii_authkey;
 	}
 
-	return crypto_newsession(&tdbp->tdb_cryptoid,
+	KERNEL_LOCK();
+	error = crypto_newsession(&tdbp->tdb_cryptoid,
 	    (tdbp->tdb_encalgxform ? &crie : &cria), 0);
+	KERNEL_UNLOCK();
+	return error;
 }
 
 /*
@@ -304,7 +308,7 @@ esp_init(struct tdb *tdbp, struct xformsw *xsp, struct ipsecinit *ii)
 int
 esp_zeroize(struct tdb *tdbp)
 {
-	int err;
+	int error;
 
 	if (tdbp->tdb_amxkey) {
 		explicit_bzero(tdbp->tdb_amxkey, tdbp->tdb_amxkeylen);
@@ -318,9 +322,11 @@ esp_zeroize(struct tdb *tdbp)
 		tdbp->tdb_emxkey = NULL;
 	}
 
-	err = crypto_freesession(tdbp->tdb_cryptoid);
+	KERNEL_LOCK();
+	error = crypto_freesession(tdbp->tdb_cryptoid);
+	KERNEL_UNLOCK();
 	tdbp->tdb_cryptoid = 0;
-	return err;
+	return error;
 }
 
 #define MAXBUFSIZ (AH_ALEN_MAX > ESP_MAX_IVS ? AH_ALEN_MAX : ESP_MAX_IVS)
@@ -373,7 +379,7 @@ esp_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 	/* Replay window checking, if appropriate -- no value commitment. */
 	if (tdb->tdb_wnd > 0) {
 		m_copydata(m, skip + sizeof(u_int32_t), sizeof(u_int32_t),
-		    (unsigned char *) &btsx);
+		    &btsx);
 		btsx = ntohl(btsx);
 
 		switch (checkreplaywindow(tdb, btsx, &esn, 0)) {
@@ -484,7 +490,7 @@ esp_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 			crda->crd_len = m->m_pkthdr.len - (skip + alen);
 
 		/* Copy the authenticator */
-		m_copydata(m, m->m_pkthdr.len - alen, alen, (caddr_t)(tc + 1));
+		m_copydata(m, m->m_pkthdr.len - alen, alen, tc + 1);
 	} else
 		crde = &crp->crp_desc[0];
 
@@ -519,7 +525,10 @@ esp_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 			crde->crd_len = m->m_pkthdr.len - (skip + hlen + alen);
 	}
 
-	return crypto_dispatch(crp);
+	KERNEL_LOCK();
+	error = crypto_dispatch(crp);
+	KERNEL_UNLOCK();
+	return error;
 
  drop:
 	m_freem(m);
@@ -576,7 +585,7 @@ esp_input_cb(struct tdb *tdb, struct tdb_crypto *tc, struct mbuf *m, int clen)
 	/* Replay window checking, if appropriate */
 	if (tdb->tdb_wnd > 0) {
 		m_copydata(m, skip + sizeof(u_int32_t), sizeof(u_int32_t),
-		    (unsigned char *) &btsx);
+		    &btsx);
 		btsx = ntohl(btsx);
 
 		switch (checkreplaywindow(tdb, btsx, &esn, 1)) {
@@ -737,6 +746,7 @@ esp_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	struct enc_xform *espx = (struct enc_xform *) tdb->tdb_encalgxform;
 	struct auth_hash *esph = (struct auth_hash *) tdb->tdb_authalgxform;
 	int ilen, hlen, rlen, padding, blks, alen, roff, error;
+	u_int64_t replay64;
 	u_int32_t replay;
 	struct mbuf *mi, *mo = (struct mbuf *) NULL;
 	struct tdb_crypto *tc = NULL;
@@ -881,8 +891,8 @@ esp_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	/* Initialize ESP header. */
 	memcpy(mtod(mo, caddr_t) + roff, (caddr_t) &tdb->tdb_spi,
 	    sizeof(u_int32_t));
-	tdb->tdb_rpl++;
-	replay = htonl((u_int32_t)tdb->tdb_rpl);
+	replay64 = tdb->tdb_rpl++;	/* used for both header and ESN */
+	replay = htonl((u_int32_t)replay64);
 	memcpy(mtod(mo, caddr_t) + roff + sizeof(u_int32_t), (caddr_t) &replay,
 	    sizeof(u_int32_t));
 
@@ -933,7 +943,7 @@ esp_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 
 		/* Encryption descriptor. */
 		crde->crd_skip = skip + hlen;
-		crde->crd_flags = CRD_F_ENCRYPT;
+		crde->crd_flags = CRD_F_ENCRYPT | CRD_F_IV_EXPLICIT;
 		crde->crd_inject = skip + hlen - tdb->tdb_ivlen;
 
 		/* Encryption operation. */
@@ -946,6 +956,14 @@ esp_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 			crde->crd_len = 0;
 		else
 			crde->crd_len = m->m_pkthdr.len - (skip + hlen + alen);
+
+		/* GCM & friends just require a NONCE (non-repeating!) */
+		if (espx->type == CRYPTO_AES_CTR ||
+		    espx->type == CRYPTO_AES_GCM_16 ||
+		    espx->type == CRYPTO_CHACHA20_POLY1305)
+			bcopy(&replay64, crde->crd_iv, sizeof(replay64));
+		else
+			arc4random_buf(crde->crd_iv, espx->ivsize);
 	} else
 		crda = &crp->crp_desc[0];
 
@@ -984,7 +1002,7 @@ esp_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 		if ((tdb->tdb_wnd > 0) && (tdb->tdb_flags & TDBF_ESN)) {
 			u_int32_t esn;
 
-			esn = htonl((u_int32_t)(tdb->tdb_rpl >> 32));
+			esn = htonl((u_int32_t)(replay64 >> 32));
 			memcpy(crda->crd_esn, &esn, 4);
 			crda->crd_flags |= CRD_F_ESN;
 		}
@@ -997,7 +1015,10 @@ esp_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 			crda->crd_len = m->m_pkthdr.len - (skip + alen);
 	}
 
-	return crypto_dispatch(crp);
+	KERNEL_LOCK();
+	error = crypto_dispatch(crp);
+	KERNEL_UNLOCK();
+	return error;
 
  drop:
 	m_freem(m);

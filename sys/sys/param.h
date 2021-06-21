@@ -1,4 +1,4 @@
-/*	$OpenBSD: param.h,v 1.131 2020/08/31 16:08:28 deraadt Exp $	*/
+/*	$OpenBSD: param.h,v 1.133 2021/03/10 10:21:47 jsg Exp $	*/
 
 /*-
  * Copyright (c) 1982, 1986, 1989, 1993
@@ -41,8 +41,8 @@
 #define BSD4_3	1
 #define BSD4_4	1
 
-#define OpenBSD	202010		/* OpenBSD version (year & month). */
-#define OpenBSD6_8 1		/* OpenBSD 6.8 */
+#define OpenBSD	202105		/* OpenBSD version (year & month). */
+#define OpenBSD6_9 1		/* OpenBSD 6.9 */
 
 #include <sys/_null.h>
 
@@ -109,7 +109,7 @@
 
 #define	PRIMASK		0x0ff
 #define	PCATCH		0x100	/* OR'd with pri for tsleep to check signals */
-#define PNORELOCK	0x200	/* OR'd with pri for msleep to not reaquire
+#define PNORELOCK	0x200	/* OR'd with pri for msleep to not reacquire
 				   the mutex */
 #endif /* _KERNEL */
 

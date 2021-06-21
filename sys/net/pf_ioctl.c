@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf_ioctl.c,v 1.360 2020/10/22 12:25:20 sashan Exp $ */
+/*	$OpenBSD: pf_ioctl.c,v 1.364 2021/06/02 07:46:22 dlg Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -107,6 +107,7 @@ int			 pf_kif_setup(char *, struct pfi_kif **);
 void			 pf_addr_copyout(struct pf_addr_wrap *);
 void			 pf_trans_set_commit(void);
 void			 pf_pool_copyin(struct pf_pool *, struct pf_pool *);
+int			 pf_validate_range(u_int8_t, u_int16_t[2]);
 int			 pf_rule_copyin(struct pf_rule *, struct pf_rule *,
 			    struct pf_ruleset *);
 u_int16_t		 pf_qname2qid(char *, int);
@@ -132,7 +133,6 @@ struct {
 TAILQ_HEAD(pf_tags, pf_tagname)	pf_tags = TAILQ_HEAD_INITIALIZER(pf_tags),
 				pf_qids = TAILQ_HEAD_INITIALIZER(pf_qids);
 
-#ifdef WITH_PF_LOCK
 /*
  * pf_lock protects consistency of PF data structures, which don't have
  * their dedicated lock yet. The pf_lock currently protects:
@@ -148,7 +148,6 @@ TAILQ_HEAD(pf_tags, pf_tagname)	pf_tags = TAILQ_HEAD_INITIALIZER(pf_tags),
  */
 struct rwlock		 pf_lock = RWLOCK_INITIALIZER("pf_lock");
 struct rwlock		 pf_state_lock = RWLOCK_INITIALIZER("pf_state_lock");
-#endif /* WITH_PF_LOCK */
 
 #if (PF_QNAME_SIZE != PF_TAG_NAME_SIZE)
 #error PF_QNAME_SIZE must be equal to PF_TAG_NAME_SIZE
@@ -693,10 +692,10 @@ pf_commit_queues(void)
 	struct pf_queuehead	*qswap;
 	int error;
 
-        /* swap */
-        qswap = pf_queues_active;
-        pf_queues_active = pf_queues_inactive;
-        pf_queues_inactive = qswap;
+	/* swap */
+	qswap = pf_queues_active;
+	pf_queues_active = pf_queues_inactive;
+	pf_queues_inactive = qswap;
 
 	error = pf_create_queues();
 	if (error != 0) {
@@ -705,7 +704,7 @@ pf_commit_queues(void)
 		return (error);
 	}
 
-        pf_free_queues(pf_queues_inactive);
+	pf_free_queues(pf_queues_inactive);
 
 	return (0);
 }
@@ -1585,7 +1584,7 @@ pfioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 		u_int16_t		 srcport, dstport;
 		struct pfioc_state_kill	*psk = (struct pfioc_state_kill *)addr;
 		u_int			 i, killed = 0;
-		const int 		 dirs[] = { PF_IN, PF_OUT };
+		const int		 dirs[] = { PF_IN, PF_OUT };
 		int			 sidx, didx;
 
 		if (psk->psk_pfcmp.id) {
@@ -1726,9 +1725,7 @@ pfioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 		}
 		NET_LOCK();
 		PF_LOCK();
-		PF_STATE_ENTER_WRITE();
 		error = pfsync_state_import(sp, PFSYNC_SI_IOCTL);
-		PF_STATE_EXIT_WRITE();
 		PF_UNLOCK();
 		NET_UNLOCK();
 		break;
@@ -2944,6 +2941,19 @@ pf_pool_copyin(struct pf_pool *from, struct pf_pool *to)
 }
 
 int
+pf_validate_range(u_int8_t op, u_int16_t port[2])
+{
+	u_int16_t a = ntohs(port[0]);
+	u_int16_t b = ntohs(port[1]);
+
+	if ((op == PF_OP_RRG && a > b) ||  /* 34:12,  i.e. none */
+	    (op == PF_OP_IRG && a >= b) || /* 34><12, i.e. none */
+	    (op == PF_OP_XRG && a > b))    /* 34<>22, i.e. all */
+		return 1;
+	return 0;
+}
+
+int
 pf_rule_copyin(struct pf_rule *from, struct pf_rule *to,
     struct pf_ruleset *ruleset)
 {
@@ -2953,6 +2963,11 @@ pf_rule_copyin(struct pf_rule *from, struct pf_rule *to,
 	to->src.addr.p.tbl = NULL;
 	to->dst = from->dst;
 	to->dst.addr.p.tbl = NULL;
+
+	if (pf_validate_range(to->src.port_op, to->src.port))
+		return (EINVAL);
+	if (pf_validate_range(to->dst.port_op, to->dst.port))
+		return (EINVAL);
 
 	/* XXX union skip[] */
 
@@ -2970,6 +2985,9 @@ pf_rule_copyin(struct pf_rule *from, struct pf_rule *to,
 	pf_pool_copyin(&from->nat, &to->nat);
 	pf_pool_copyin(&from->rdr, &to->rdr);
 	pf_pool_copyin(&from->route, &to->route);
+
+	if (pf_validate_range(to->rdr.port_op, to->rdr.proxy_port))
+		return (EINVAL);
 
 	if (pf_kif_setup(to->ifname, &to->kif))
 		return (EINVAL);

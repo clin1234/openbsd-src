@@ -1,22 +1,4 @@
-# $OpenBSD: RAMDISK,v 1.133 2020/11/09 16:13:57 patrick Exp $
-#
-# GENERIC machine description file
-#
-# This machine description file is used to generate the default OpenBSD
-# kernel.  The generic kernel does not include all options, subsystems
-# and device drivers, but should be useful for most applications.
-#
-# The machine description file can be customised for your specific
-# machine to reduce the kernel size and improve its performance.
-#
-# For further information on compiling OpenBSD kernels, see the config(8)
-# man page.
-#
-# For further information on hardware support for this architecture, see
-# the intro(4) man page.  For further information about kernel options
-# for this architecture, see the options(4) man page.  For an explanation
-# of each device driver in this file see the section 4 man page for the
-# device.
+# $OpenBSD: RAMDISK,v 1.154 2021/06/10 06:54:42 fcambus Exp $
 
 machine		arm64
 maxusers	4
@@ -27,8 +9,12 @@ option		SMALL_KERNEL
 option		NO_PROPOLICE
 option		BOOT_CONFIG
 
+option		FONT_SPLEEN8x16
+option		FONT_SPLEEN12x24
+option		FONT_SPLEEN16x32
+
 option		RAMDISK_HOOKS
-option		MINIROOTSIZE=16384
+option		MINIROOTSIZE=24576
 
 option		FFS
 option		FFS2
@@ -51,12 +37,15 @@ efi0		at mainbus?
 acpi0		at mainbus?
 acpiec*		at acpi?
 acpimcfg*	at acpi?
+acpiiort*	at acpi?
+#smmu*		at acpiiort?
 acpipci*	at acpi?
 pci*		at acpipci?
 ahci*		at acpi?
 ccp*		at acpi?		# AMD Cryptographic Co-processor
 com*		at acpi?
 pluart*		at acpi?
+sdhc*		at acpi?
 xhci*		at acpi?
 simplebus*	at fdt?
 
@@ -83,6 +72,7 @@ pci*		at pciecam?
 sdhc*		at fdt?
 sdmmc*		at sdhc?
 bwfm*		at sdmmc?	# Broadcom FullMAC
+#smmu*		at fdt?
 xhci*		at fdt?
 ccp*		at fdt?		# AMD Cryptographic Co-processor
 
@@ -109,17 +99,33 @@ vioscsi*	at virtio?
 simplefb*	at fdt?
 wsdisplay*	at simplefb?
 
+# Apple
+apldart*	at fdt?
+apldog*		at fdt? early 1
+apldwusb*	at fdt?
+aplintc*	at fdt? early 1
+aplpcie*	at fdt?
+pci*		at aplpcie?
+aplspmi*	at fdt?
+aplpmu*		at aplspmi?
+exuart*		at fdt?
+aplns*		at fdt?			# Apple NVME Storage controllers
+nvme*		at aplns?
+
 # iMX
 imxccm*		at fdt? early 1
 imxiomuxc*	at fdt? early 1
 imxanatop*	at fdt? early 1
 imxsrc*		at fdt? early 1
+imxdog*		at fdt?
+imxdwusb*	at fdt?
 imxehci*	at fdt?
 usb*		at imxehci?
 imxgpc*		at fdt?
 imxgpio*	at fdt?
 fec*		at fdt?
 imxuart*	at fdt?
+imxiic*		at acpi?
 imxiic*		at fdt?
 iic*		at imxiic?
 bdpmic*		at iic?
@@ -185,6 +191,7 @@ mvppc*		at fdt?
 mvpp*		at mvppc?
 mvrng*		at fdt?
 mvrtc*		at fdt?
+mvsw*		at fdt?
 mvuart*		at fdt?
 sfp*		at fdt?
 
@@ -225,8 +232,10 @@ pci*		at ppb?
 
 # PCI Ethernet
 bnxt*		at pci?			# Broadcom BCM573xx, BCM574xx
+bge*		at pci?			# Broadcom BCM57xx
 em*		at pci?			# Intel Pro/1000 Ethernet
 ix*		at pci?			# Intel 82598EB 10Gb Ethernet
+ixl*		at pci?			# Intel Ethernet 700 Series
 mcx*		at pci?			# Mellanox ConnectX-4/5 Ethernet
 mskc*		at pci?			# Marvell Yukon-2
 msk*		at mskc?		#  each port of above
@@ -234,7 +243,9 @@ re*		at pci?			# Realtek 8169/8169S/8110S
 rge*		at pci?			# Realtek 8125
 
 # PCI WiFi
+athn*		at pci?			# Atheros AR9k (802.11a/g/n)
 bwfm*		at pci?			# Broadcom FullMAC
+iwx*		at pci?			# Intel WiFi Link 22xxx
 
 # PCI SCSI
 ahci*		at pci? flags 0x0000	# AHCI SATA controllers

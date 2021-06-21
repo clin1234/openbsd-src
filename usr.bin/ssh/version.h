@@ -1,3 +1,3 @@
-/* $OpenBSD: version.h,v 1.88 2020/09/27 07:22:05 djm Exp $ */
+/* $OpenBSD: version.h,v 1.90 2021/04/16 03:42:00 djm Exp $ */
 
-#define SSH_VERSION	"OpenSSH_8.4"
+#define SSH_VERSION	"OpenSSH_8.6"

@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty.c,v 1.164 2020/09/09 16:29:14 mpi Exp $	*/
+/*	$OpenBSD: tty.c,v 1.169 2021/05/19 18:10:45 kettenis Exp $	*/
 /*	$NetBSD: tty.c,v 1.68.4.2 1996/06/06 16:04:52 thorpej Exp $	*/
 
 /*-
@@ -1133,7 +1133,7 @@ ttkqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = tp;
 
 	s = spltty();
-	klist_insert(klist, kn);
+	klist_insert_locked(klist, kn);
 	splx(s);
 
 	return (0);
@@ -1146,7 +1146,7 @@ filt_ttyrdetach(struct knote *kn)
 	int s;
 
 	s = spltty();
-	klist_remove(&tp->t_rsel.si_note, kn);
+	klist_remove_locked(&tp->t_rsel.si_note, kn);
 	splx(s);
 }
 
@@ -1175,7 +1175,7 @@ filt_ttywdetach(struct knote *kn)
 	int s;
 
 	s = spltty();
-	klist_remove(&tp->t_wsel.si_note, kn);
+	klist_remove_locked(&tp->t_wsel.si_note, kn);
 	splx(s);
 }
 
@@ -1953,8 +1953,8 @@ ttyrub(int c, struct tty *tp)
 					(void)ttyoutput('\b', tp);
 				break;
 			default:			/* XXX */
-#define	PANICSTR	"ttyrub: would panic c = %d, val = %d\n"
-				(void)printf(PANICSTR, c, CCLASS(c));
+#define	PANICSTR	"ttyrub: would panic c = %d, val = %d"
+				(void)printf(PANICSTR "\n", c, CCLASS(c));
 #ifdef notdef
 				panic(PANICSTR, c, CCLASS(c));
 #endif
@@ -2157,7 +2157,7 @@ empty:		ttyprintf(tp, "empty foreground process group\n");
 		fixpt_t pctcpu, pctcpu2;
 		int run, run2;
 		int calc_pctcpu;
-		long rss;
+		long rss = 0;
 
 		/*
 		 * Pick the most active process:
@@ -2194,8 +2194,9 @@ update_pickpr:
 
 		/* Calculate percentage cpu, resident set size. */
 		calc_pctcpu = (pctcpu * 10000 + FSCALE / 2) >> FSHIFT;
-		rss = (pickpr->ps_flags & (PS_EMBRYO | PS_ZOMBIE)) ? 0 :
-		    vm_resident_count(pickpr->ps_vmspace);
+		if ((pickpr->ps_flags & (PS_EMBRYO | PS_ZOMBIE)) == 0 &&
+		    pickpr->ps_vmspace != NULL)
+			rss = vm_resident_count(pickpr->ps_vmspace);
 
 		calctsru(&pickpr->ps_tu, &utime, &stime, NULL);
 

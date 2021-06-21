@@ -1,4 +1,4 @@
-/* $OpenBSD: fuse_vnops.c,v 1.61 2020/06/11 09:18:43 mpi Exp $ */
+/* $OpenBSD: fuse_vnops.c,v 1.63 2021/03/24 16:11:32 semarie Exp $ */
 /*
  * Copyright (c) 2012-2013 Sylvestre Gallon <ccna.syl@gmail.com>
  *
@@ -88,6 +88,7 @@ const struct vops fusefs_vops = {
 	.vop_ioctl	= fusefs_ioctl,
 	.vop_poll	= fusefs_poll,
 	.vop_kqfilter	= fusefs_kqfilter,
+	.vop_revoke	= NULL,
 	.vop_fsync	= fusefs_fsync,
 	.vop_remove	= fusefs_remove,
 	.vop_link	= fusefs_link,
@@ -108,6 +109,7 @@ const struct vops fusefs_vops = {
 	.vop_islocked	= fusefs_islocked,
 	.vop_pathconf	= spec_pathconf,
 	.vop_advlock	= fusefs_advlock,
+	.vop_bwrite	= NULL,
 };
 
 const struct filterops fusefsread_filtops = {
@@ -154,7 +156,7 @@ fusefs_kqfilter(void *v)
 
 	kn->kn_hook = (caddr_t)vp;
 
-	klist_insert(&vp->v_selectinfo.si_note, kn);
+	klist_insert_locked(&vp->v_selectinfo.si_note, kn);
 
 	return (0);
 }
@@ -164,7 +166,7 @@ filt_fusefsdetach(struct knote *kn)
 {
 	struct vnode *vp = (struct vnode *)kn->kn_hook;
 
-	klist_remove(&vp->v_selectinfo.si_note, kn);
+	klist_remove_locked(&vp->v_selectinfo.si_note, kn);
 }
 
 int

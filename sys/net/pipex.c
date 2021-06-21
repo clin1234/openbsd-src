@@ -1,4 +1,4 @@
-/*	$OpenBSD: pipex.c,v 1.127 2020/08/30 19:48:16 mvs Exp $	*/
+/*	$OpenBSD: pipex.c,v 1.133 2021/05/15 08:07:20 yasuoka Exp $	*/
 
 /*-
  * Copyright (c) 2009 Internet Initiative Japan Inc.
@@ -163,13 +163,6 @@ pipex_ioctl(void *ownersc, u_long cmd, caddr_t data)
 
 	NET_ASSERT_LOCKED();
 	switch (cmd) {
-	case PIPEXSMODE:
-		break;
-
-	case PIPEXGMODE:
-		*(int *)data = 1;
-		break;
-
 	case PIPEXCSESSION:
 		ret = pipex_config_session(
 		    (struct pipex_session_config_req *)data, ownersc);
@@ -209,9 +202,6 @@ pipex_init_session(struct pipex_session **rsession,
 	switch (req->pr_protocol) {
 #ifdef PIPEX_PPPOE
 	case PIPEX_PROTO_PPPOE:
-		over_ifp = ifunit(req->pr_proto.pppoe.over_ifname);
-		if (over_ifp == NULL)
-			return (EINVAL);
 		if (req->pr_peer_address.ss_family != AF_UNSPEC)
 			return (EINVAL);
 		break;
@@ -262,6 +252,14 @@ pipex_init_session(struct pipex_session **rsession,
 	}
 #endif
 
+#ifdef PIPEX_PPPOE
+	if (req->pr_protocol == PIPEX_PROTO_PPPOE) {
+		over_ifp = if_unit(req->pr_proto.pppoe.over_ifname);
+		if (over_ifp == NULL)
+			return (EINVAL);
+	}
+#endif
+
 	/* prepare a new session */
 	session = pool_get(&pipex_session_pool, PR_WAITOK | PR_ZERO);
 	session->state = PIPEX_STATE_INITIAL;
@@ -295,8 +293,10 @@ pipex_init_session(struct pipex_session **rsession,
 		memcpy(&session->local, &req->pr_local_address,
 		    MIN(req->pr_local_address.ss_len, sizeof(session->local)));
 #ifdef PIPEX_PPPOE
-	if (req->pr_protocol == PIPEX_PROTO_PPPOE)
+	if (req->pr_protocol == PIPEX_PROTO_PPPOE) {
 		session->proto.pppoe.over_ifidx = over_ifp->if_index;
+		if_put(over_ifp);
+	}
 #endif
 #ifdef PIPEX_PPTP
 	if (req->pr_protocol == PIPEX_PROTO_PPTP) {
@@ -991,7 +991,7 @@ pipex_common_input(struct pipex_session *session, struct mbuf *m0, int hlen,
 	case PPP_CCP:
 		code = 0;
 		KASSERT(m0->m_pkthdr.len >= hlen + ppphlen + 1);
-		m_copydata(m0, hlen + ppphlen, 1, (caddr_t)&code);
+		m_copydata(m0, hlen + ppphlen, 1, &code);
 		if (code != CCP_RESETREQ && code != CCP_RESETACK)
 			goto not_ours;
 		break;
@@ -1096,7 +1096,7 @@ pipex_pppoe_lookup_session(struct mbuf *m0)
 		return (NULL);
 
 	m_copydata(m0, sizeof(struct ether_header),
-	    sizeof(struct pipex_pppoe_header), (caddr_t)&pppoe);
+	    sizeof(struct pipex_pppoe_header), &pppoe);
 	pppoe.session_id = ntohs(pppoe.session_id);
 	session = pipex_lookup_by_session_id(PIPEX_PROTO_PPPOE,
 	    pppoe.session_id);
@@ -1123,7 +1123,7 @@ pipex_pppoe_input(struct mbuf *m0, struct pipex_session *session)
 	    sizeof(pppoe)));
 
 	m_copydata(m0, sizeof(struct ether_header),
-	    sizeof(struct pipex_pppoe_header), (caddr_t)&pppoe);
+	    sizeof(struct pipex_pppoe_header), &pppoe);
 
 	hlen = sizeof(struct ether_header) + sizeof(struct pipex_pppoe_header);
 	if ((m0 = pipex_common_input(session, m0, hlen, ntohs(pppoe.length)))
@@ -1287,7 +1287,7 @@ pipex_pptp_lookup_session(struct mbuf *m0)
 	}
 
 	/* get ip header info */
-	m_copydata(m0, 0, sizeof(struct ip), (caddr_t)&ip);
+	m_copydata(m0, 0, sizeof(struct ip), &ip);
 	hlen = ip.ip_hl << 2;
 
 	/*
@@ -1296,7 +1296,7 @@ pipex_pptp_lookup_session(struct mbuf *m0)
 	 */
 
 	/* get gre flags */
-	m_copydata(m0, hlen, sizeof(gre), (caddr_t)&gre);
+	m_copydata(m0, hlen, sizeof(gre), &gre);
 	flags = ntohs(gre.flags);
 
 	/* gre version must be '1' */
@@ -1521,7 +1521,7 @@ pipex_pptp_userland_lookup_session(struct mbuf *m0, struct sockaddr *sa)
 	}
 
 	/* get flags */
-	m_copydata(m0, 0, sizeof(struct pipex_gre_header), (caddr_t)&gre);
+	m_copydata(m0, 0, sizeof(struct pipex_gre_header), &gre);
 	flags = ntohs(gre.flags);
 
 	/* gre version must be '1' */
@@ -1571,7 +1571,7 @@ pipex_pptp_userland_output(struct mbuf *m0, struct pipex_session *session)
 	uint32_t val32;
 
 	len = sizeof(struct pipex_gre_header);
-	m_copydata(m0, 0, len, (caddr_t)&gre0);
+	m_copydata(m0, 0, len, &gre0);
 	gre = &gre0;
 	flags = ntohs(gre->flags);
 	if ((flags & PIPEX_GRE_SFLAG) != 0)
@@ -1628,6 +1628,7 @@ pipex_l2tp_output(struct mbuf *m0, struct pipex_session *session)
 #ifdef INET6
 	struct ip6_hdr *ip6;
 #endif
+	struct m_tag *mtag;
 
 	hlen = sizeof(struct pipex_l2tp_header) +
 	    ((pipex_session_is_l2tp_data_sequencing_on(session))
@@ -1704,6 +1705,15 @@ pipex_l2tp_output(struct mbuf *m0, struct pipex_session *session)
 		ip->ip_tos = 0;
 		ip->ip_off = 0;
 
+		if (session->proto.l2tp.ipsecflowinfo > 0) {
+			if ((mtag = m_tag_get(PACKET_TAG_IPSEC_FLOWINFO,
+			    sizeof(u_int32_t), M_NOWAIT)) == NULL)
+				goto drop;
+			*(u_int32_t *)(mtag + 1) =
+			    session->proto.l2tp.ipsecflowinfo;
+			m_tag_prepend(m0, mtag);
+		}
+
 		ip_send(m0);
 		break;
 #ifdef INET6
@@ -1733,6 +1743,7 @@ pipex_l2tp_output(struct mbuf *m0, struct pipex_session *session)
 
 	return;
 drop:
+	m_freem(m0);
 	session->stat.oerrors++;
 }
 
@@ -1801,7 +1812,7 @@ pipex_l2tp_input(struct mbuf *m0, int off0, struct pipex_session *session,
 	l2tp_session->ipsecflowinfo = ipsecflowinfo;
 	nsp = nrp = NULL;
 
-	m_copydata(m0, off0, sizeof(flags), (caddr_t)&flags);
+	m_copydata(m0, off0, sizeof(flags), &flags);
 
 	flags = ntohs(flags) & PIPEX_L2TP_FLAG_MASK;
 	KASSERT((flags & PIPEX_L2TP_FLAG_TYPE) == 0);
@@ -1953,7 +1964,7 @@ pipex_l2tp_userland_lookup_session(struct mbuf *m0, struct sockaddr *sa)
 	}
 
 	/* get flags */
-	m_copydata(m0, 0, sizeof(l2tp), (caddr_t)&l2tp);
+	m_copydata(m0, 0, sizeof(l2tp), &l2tp);
 	flags = ntohs(l2tp.flagsver);
 
 	/* l2tp version must be '2' */
@@ -2332,7 +2343,7 @@ pipex_mppe_output(struct mbuf *m0, struct pipex_session *session,
 
 	/*
 	 * create a deep-copy if the mbuf has a shared mbuf cluster.
-	 * this is required to handle cases of tcp retransmition.
+	 * this is required to handle cases of tcp retransmission.
 	 */
 	for (m = m0; m != NULL; m = m->m_next) {
 		if (M_READONLY(m)) {
@@ -2468,7 +2479,7 @@ pipex_ccp_output(struct pipex_session *session, int code, int id)
 }
 #endif
 /***********************************************************************
- * Miscellaneous fuctions
+ * Miscellaneous functions
  ***********************************************************************/
 /* adapted from FreeBSD:src/usr.sbin/ppp/tcpmss.c */
 /*
@@ -2778,8 +2789,8 @@ pipex_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	case PIPEXCTL_ENABLE:
 		if (namelen != 1)
 			return (ENOTDIR);
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
-		    &pipex_enable));
+		return (sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+		    &pipex_enable, 0, 1));
 	default:
 		return (ENOPROTOOPT);
 	}

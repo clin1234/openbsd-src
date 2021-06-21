@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_etherip.c,v 1.47 2020/08/21 22:59:27 kn Exp $	*/
+/*	$OpenBSD: if_etherip.c,v 1.49 2021/05/16 15:10:20 deraadt Exp $	*/
 /*
  * Copyright (c) 2015 Kazuya GODA <goda@openbsd.org>
  *
@@ -767,7 +767,8 @@ etherip_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	switch (name[0]) {
 	case ETHERIPCTL_ALLOW:
 		NET_LOCK();
-		error = sysctl_int(oldp, oldlenp, newp, newlen, &etherip_allow);
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+		    &etherip_allow, 0, 1);
 		NET_UNLOCK();
 		return (error);
 	case ETHERIPCTL_STATS:
@@ -792,7 +793,7 @@ etherip_ip_cmp(int af, const union etherip_addr *a, const union etherip_addr *b)
 		return (memcmp(&a->in4, &b->in4, sizeof(a->in4)));
 		break;
 	default:
-		panic("%s: unsupported af %d\n", __func__, af);
+		panic("%s: unsupported af %d", __func__, af);
 	}
 
 	return (0);

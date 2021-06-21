@@ -1,4 +1,4 @@
-/*	$Id: extern.h,v 1.33 2020/05/17 19:54:41 deraadt Exp $ */
+/*	$Id: extern.h,v 1.37 2021/05/17 11:54:14 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -42,10 +42,23 @@
 #define	CSUM_LENGTH_PHASE2 (16)
 
 /*
- * Use this for debugging deadlocks.
+ * Rsync error codes.
+ */
+#define ERR_SYNTAX	1
+#define ERR_PROTOCOL	2
+#define ERR_SOCK_IO	10
+#define ERR_FILE_IO	11
+#define ERR_WIREPROTO	12
+#define ERR_IPC		14	/* catchall for any kind of syscall error */
+#define ERR_TERMIMATED	16
+#define ERR_WAITPID	21
+#define ERR_NOMEM	22
+
+/*
+ * Use this for --timeout.
  * All poll events will use it and catch time-outs.
  */
-#define POLL_TIMEOUT	(INFTIM)
+extern int poll_timeout;
 
 /*
  * Operating mode for a client or a server.
@@ -115,6 +128,7 @@ struct	opts {
 	int		 del;			/* --delete */
 	int		 devices;		/* --devices */
 	int		 specials;		/* --specials */
+	int		 no_motd;		/* --no-motd */
 	int		 numeric_ids;		/* --numeric-ids */
 	int		 one_file_system;	/* -x */
 	char		*rsync_path;		/* --rsync-path */
@@ -209,7 +223,7 @@ struct arglist {
 	u_int	num;
 	u_int	nalloc;
 };
-void	addargs(arglist *, char *, ...)
+void	addargs(arglist *, const char *, ...)
 	    __attribute__((format(printf, 2, 3)));
 void	freeargs(arglist *);
 

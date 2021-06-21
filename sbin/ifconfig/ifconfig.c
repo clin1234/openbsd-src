@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifconfig.c,v 1.430 2020/11/06 21:24:47 kn Exp $	*/
+/*	$OpenBSD: ifconfig.c,v 1.442 2021/03/20 17:11:49 florian Exp $	*/
 /*	$NetBSD: ifconfig.c,v 1.40 1997/10/01 02:19:43 enami Exp $	*/
 
 /*
@@ -158,12 +158,12 @@ struct	ifaliasreq	addreq;
 
 int	wconfig = 0;
 int	wcwconfig = 0;
+int	rdomainid;
 #endif /* SMALL */
 
 char	ifname[IFNAMSIZ];
 int	flags, xflags, setaddr, setipdst, doalias;
 u_long	metric, mtu;
-int	rdomainid;
 int	llprio;
 int	clearaddr, sock;
 int	newaddr = 0;
@@ -190,7 +190,6 @@ const	char *lacptimeoutslow = "slow";
 
 void	notealias(const char *, int);
 void	setifaddr(const char *, int);
-void	setifrtlabel(const char *, int);
 void	setiflladdr(const char *, int);
 void	setifdstaddr(const char *, int);
 void	setifflags(const char *, int);
@@ -219,12 +218,6 @@ void	setifnwflag(const char *, int);
 void	unsetifnwflag(const char *, int);
 void	setifnetmask(const char *, int);
 void	setifprefixlen(const char *, int);
-void	settunnel(const char *, const char *);
-void	settunneladdr(const char *, int);
-void	deletetunnel(const char *, int);
-void	settunnelinst(const char *, int);
-void	unsettunnelinst(const char *, int);
-void	settunnelttl(const char *, int);
 void	setvnetid(const char *, int);
 void	delvnetid(const char *, int);
 void	getvnetid(struct ifencap *);
@@ -237,8 +230,6 @@ void	setia6pltime(const char *, int);
 void	setia6vltime(const char *, int);
 void	setia6lifetime(const char *, const char *);
 void	setia6eui64(const char *, int);
-void	setkeepalive(const char *, const char *);
-void	unsetkeepalive(const char *, int);
 void	setmedia(const char *, int);
 void	setmediaopt(const char *, int);
 void	setmediamode(const char *, int);
@@ -247,17 +238,6 @@ void	clone_create(const char *, int);
 void	clone_destroy(const char *, int);
 void	unsetmediaopt(const char *, int);
 void	setmediainst(const char *, int);
-void	setmplslabel(const char *, int);
-void	unsetmplslabel(const char *, int);
-void	setpwe3cw(const char *, int);
-void	unsetpwe3cw(const char *, int);
-void	setpwe3fat(const char *, int);
-void	unsetpwe3fat(const char *, int);
-void	setpwe3neighbor(const char *, const char *);
-void	unsetpwe3neighbor(const char *, int);
-void	mpls_status(void);
-void	setrdomain(const char *, int);
-void	unsetrdomain(const char *, int);
 int	prefix(void *val, int);
 void	getifgroups(void);
 void	setifgroup(const char *, int);
@@ -265,6 +245,8 @@ void	unsetifgroup(const char *, int);
 void	setgroupattribs(char *, int, char *[]);
 int	printgroup(char *, int);
 void	setautoconf(const char *, int);
+void	settemporary(const char *, int);
+void	setprivacy(const char *, int);
 void	settrunkport(const char *, int);
 void	unsettrunkport(const char *, int);
 void	settrunkproto(const char *, int);
@@ -274,6 +256,11 @@ void	trunk_status(void);
 void	list_cloners(void);
 
 #ifndef SMALL
+void	setifrtlabel(const char *, int);
+void	setrdomain(const char *, int);
+void	unsetrdomain(const char *, int);
+void	setkeepalive(const char *, const char *);
+void	unsetkeepalive(const char *, int);
 void	carp_status(void);
 void	setcarp_advbase(const char *,int);
 void	setcarp_advskew(const char *, int);
@@ -299,6 +286,21 @@ void	gettxprio(struct ifencap *);
 void	settxprio(const char *, int);
 void	getrxprio(struct ifencap *);
 void	setrxprio(const char *, int);
+void	setmplslabel(const char *, int);
+void	unsetmplslabel(const char *, int);
+void	setpwe3cw(const char *, int);
+void	unsetpwe3cw(const char *, int);
+void	setpwe3fat(const char *, int);
+void	unsetpwe3fat(const char *, int);
+void	setpwe3neighbor(const char *, const char *);
+void	unsetpwe3neighbor(const char *, int);
+void	mpls_status(void);
+void	settunnel(const char *, const char *);
+void	settunneladdr(const char *, int);
+void	deletetunnel(const char *, int);
+void	settunnelinst(const char *, int);
+void	unsettunnelinst(const char *, int);
+void	settunnelttl(const char *, int);
 void	settunneldf(const char *, int);
 void	settunnelnodf(const char *, int);
 void	settunnelecn(const char *, int);
@@ -464,10 +466,14 @@ const struct	cmd {
 	{ "pltime",	NEXTARG,	0,		setia6pltime },
 	{ "vltime",	NEXTARG,	0,		setia6vltime },
 	{ "eui64",	0,		0,		setia6eui64 },
-	{ "autoconfprivacy",	-IFXF_INET6_NOPRIVACY,	0,	setifxflags },
-	{ "-autoconfprivacy",	IFXF_INET6_NOPRIVACY,	0,	setifxflags },
+	{ "autoconfprivacy",	1,		0,	setprivacy },
+	{ "-autoconfprivacy",	-1,		0,	setprivacy },
+	{ "temporary",	1,		0,		settemporary },
+	{ "-temporary",	-1,		0,		settemporary },
 	{ "soii",	-IFXF_INET6_NOSOII,	0,	setifxflags },
 	{ "-soii",	IFXF_INET6_NOSOII,	0,	setifxflags },
+	{ "monitor",	IFXF_MONITOR,	0,		setifxflags },
+	{ "-monitor",	-IFXF_MONITOR,	0,		setifxflags },
 #ifndef SMALL
 	{ "hwfeatures", NEXTARG0,	0,		printifhwfeatures },
 	{ "metric",	NEXTARG,	0,		setifmetric },
@@ -512,8 +518,6 @@ const struct	cmd {
 	{ "tunnel",	NEXTARG2,	0,		NULL, settunnel },
 	{ "tunneladdr",	NEXTARG,	0,		settunneladdr },
 	{ "-tunnel",	0,		0,		deletetunnel },
-	/* deletetunnel is for backward compat, remove during 6.4-current */
-	{ "deletetunnel",  0,		0,		deletetunnel },
 	{ "tunneldomain", NEXTARG,	0,		settunnelinst },
 	{ "-tunneldomain", 0,		0,		unsettunnelinst },
 	{ "tunnelttl",	NEXTARG,	0,		settunnelttl },
@@ -674,8 +678,8 @@ const struct	cmd {
 	"\024\1UP\2BROADCAST\3DEBUG\4LOOPBACK\5POINTOPOINT\6STATICARP"	\
 	"\7RUNNING\10NOARP\11PROMISC\12ALLMULTI\13OACTIVE\14SIMPLEX"	\
 	"\15LINK0\16LINK1\17LINK2\20MULTICAST"				\
-	"\23INET6_NOPRIVACY\24MPLS\25WOL\26AUTOCONF6\27INET6_NOSOII"	\
-	"\30AUTOCONF4"
+	"\23AUTOCONF6TEMP\24MPLS\25WOL\26AUTOCONF6\27INET6_NOSOII"	\
+	"\30AUTOCONF4" "\31MONITOR"
 
 int	getinfo(struct ifreq *, int);
 void	getsock(int);
@@ -1180,12 +1184,13 @@ printif(char *name, int ifaliases)
 			}
 		}
 		/* quickhack: sizeof(ifr) < sizeof(ifr6) */
-		if (ifa->ifa_addr->sa_family == AF_INET6) {
+		if (ifa->ifa_addr != NULL &&
+		    ifa->ifa_addr->sa_family == AF_INET6) {
 			memset(&ifr6, 0, sizeof(ifr6));
 			memcpy(&ifr6.ifr_addr, ifa->ifa_addr,
 			    MINIMUM(sizeof(ifr6.ifr_addr), ifa->ifa_addr->sa_len));
 			ifrp = (struct ifreq *)&ifr6;
-		} else {
+		} else if (ifa->ifa_addr != NULL) {
 			memset(&ifr, 0, sizeof(ifr));
 			memcpy(&ifr.ifr_addr, ifa->ifa_addr,
 			    MINIMUM(sizeof(ifr.ifr_addr), ifa->ifa_addr->sa_len));
@@ -1194,7 +1199,8 @@ printif(char *name, int ifaliases)
 		strlcpy(ifname, ifa->ifa_name, sizeof(ifname));
 		strlcpy(ifrp->ifr_name, ifa->ifa_name, sizeof(ifrp->ifr_name));
 
-		if (ifa->ifa_addr->sa_family == AF_LINK) {
+		if (ifa->ifa_addr != NULL &&
+		    ifa->ifa_addr->sa_family == AF_LINK) {
 			namep = ifa->ifa_name;
 			if (getinfo(ifrp, 0) < 0)
 				continue;
@@ -1209,8 +1215,9 @@ printif(char *name, int ifaliases)
 		if (!namep || !strcmp(namep, ifa->ifa_name)) {
 			const struct afswtch *p;
 
-			if (ifa->ifa_addr->sa_family == AF_INET &&
-			    ifaliases == 0 && noinet == 0)
+			if (ifa->ifa_addr == NULL ||
+			    (ifa->ifa_addr->sa_family == AF_INET &&
+			    ifaliases == 0 && noinet == 0))
 				continue;
 			if ((p = afp) != NULL) {
 				if (ifa->ifa_addr->sa_family == p->af_af)
@@ -1572,11 +1579,35 @@ setautoconf(const char *cmd, int val)
 		setifxflags("inet", val * IFXF_AUTOCONF4);
 		break;
 	case AF_INET6:
-		setifxflags("inet6", val * IFXF_AUTOCONF6);
+		if (val > 0)
+			setifxflags("inet6", (IFXF_AUTOCONF6 |
+			    IFXF_AUTOCONF6TEMP));
+		else
+			setifxflags("inet6", -IFXF_AUTOCONF6);
 		break;
 	default:
 		errx(1, "autoconf not allowed for this address family");
 	}
+}
+
+void
+settemporary(const char *cmd, int val)
+{
+	switch (afp->af_af) {
+	case AF_INET6:
+		setifxflags("inet6", val * IFXF_AUTOCONF6TEMP);
+		break;
+	default:
+		errx(1, "temporary not allowed for this address family");
+	}
+}
+
+/* XXX remove after 7.0 */
+void
+setprivacy(const char *cmd, int val)
+{
+	warnx("The 'autoconfprivacy' option is deprecated, use 'temporary'");
+	settemporary(cmd, val);
 }
 
 #ifndef SMALL
@@ -1631,16 +1662,20 @@ void
 setifgroup(const char *group_name, int dummy)
 {
 	struct ifgroupreq ifgr;
+	size_t namelen;
 
 	memset(&ifgr, 0, sizeof(ifgr));
 	strlcpy(ifgr.ifgr_name, ifname, IFNAMSIZ);
 
-	if (group_name[0] &&
-	    isdigit((unsigned char)group_name[strlen(group_name) - 1]))
+	namelen = strlen(group_name);
+	if (namelen == 0)
+		errx(1, "setifgroup: group name empty");
+	if (namelen >= IFNAMSIZ)
+		errx(1, "setifgroup: group name too long");
+	if (isdigit((unsigned char)group_name[namelen - 1]))
 		errx(1, "setifgroup: group names may not end in a digit");
 
-	if (strlcpy(ifgr.ifgr_group, group_name, IFNAMSIZ) >= IFNAMSIZ)
-		errx(1, "setifgroup: group name too long");
+	strlcpy(ifgr.ifgr_group, group_name, IFNAMSIZ);
 	if (ioctl(sock, SIOCAIFGROUP, (caddr_t)&ifgr) == -1) {
 		if (errno != EEXIST)
 			err(1," SIOCAIFGROUP");
@@ -1655,10 +1690,6 @@ unsetifgroup(const char *group_name, int dummy)
 
 	memset(&ifgr, 0, sizeof(ifgr));
 	strlcpy(ifgr.ifgr_name, ifname, IFNAMSIZ);
-
-	if (group_name[0] &&
-	    isdigit((unsigned char)group_name[strlen(group_name) - 1]))
-		errx(1, "unsetifgroup: group names may not end in a digit");
 
 	if (strlcpy(ifgr.ifgr_group, group_name, IFNAMSIZ) >= IFNAMSIZ)
 		errx(1, "unsetifgroup: group name too long");
@@ -2638,7 +2669,7 @@ join_status(void)
 				if (wpa->i_protos & IEEE80211_WPA_PROTO_WPA2)
 					printf("%swpa2", sep);
 
-				printf(" wpaakms ", stdout); sep = "";
+				printf(" wpaakms "); sep = "";
 				if (wpa->i_akms & IEEE80211_WPA_AKM_PSK) {
 					printf("psk");
 					sep = ",";
@@ -3323,8 +3354,10 @@ status(int link, struct sockaddr_dl *sdl, int ls)
 
 	printf("%s: ", ifname);
 	printb("flags", flags | (xflags << 16), IFFBITS);
+#ifndef SMALL
 	if (rdomainid)
 		printf(" rdomain %d", rdomainid);
+#endif
 	if (metric)
 		printf(" metric %lu", metric);
 	if (mtu)
@@ -3584,7 +3617,8 @@ void
 in6_fillscopeid(struct sockaddr_in6 *sin6)
 {
 #ifdef __KAME__
-	if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr)) {
+	if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) &&
+	    sin6->sin6_scope_id == 0) {
 		sin6->sin6_scope_id =
 			ntohs(*(u_int16_t *)&sin6->sin6_addr.s6_addr[2]);
 		sin6->sin6_addr.s6_addr[2] = sin6->sin6_addr.s6_addr[3] = 0;
@@ -3670,7 +3704,7 @@ in6_alias(struct in6_ifreq *creq)
 		if (ifr6.ifr_ifru.ifru_flags6 & IN6_IFF_AUTOCONF)
 			printf(" autoconf");
 		if (ifr6.ifr_ifru.ifru_flags6 & IN6_IFF_TEMPORARY)
-			printf(" autoconfprivacy");
+			printf(" temporary");
 	}
 
 	if (scopeid)

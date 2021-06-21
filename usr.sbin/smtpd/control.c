@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.125 2020/09/23 19:11:50 martijn Exp $	*/
+/*	$OpenBSD: control.c,v 1.128 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2012 Gilles Chehade <gilles@poolp.org>
@@ -18,26 +18,15 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
 #include <sys/stat.h>
-#include <sys/socket.h>
 #include <sys/un.h>
 
-#include <err.h>
 #include <errno.h>
-#include <event.h>
-#include <fcntl.h>
-#include <imsg.h>
 #include <pwd.h>
 #include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
-#include <limits.h>
 
 #include "smtpd.h"
 #include "log.h"
@@ -159,7 +148,7 @@ control_imsg(struct mproc *p, struct imsg *imsg)
 		return;
 	}
 
-	errx(1, "control_imsg: unexpected %s imsg",
+	fatalx("control_imsg: unexpected %s imsg",
 	    imsg_to_str(imsg->hdr.type));
 }
 
@@ -248,13 +237,13 @@ control(void)
 	config_peer(PROC_QUEUE);
 	config_peer(PROC_PARENT);
 	config_peer(PROC_LKA);
-	config_peer(PROC_PONY);
+	config_peer(PROC_DISPATCHER);
 	config_peer(PROC_CA);
 
 	control_listen();
 
 	if (pledge("stdio unix recvfd sendfd", NULL) == -1)
-		err(1, "pledge");
+		fatal("pledge");
 
 	event_dispatch();
 	fatalx("exited event loop");
@@ -450,7 +439,7 @@ control_dispatch_ext(struct mproc *p, struct imsg *imsg)
 			m_compose(p, IMSG_CTL_FAIL, 0, 0, -1, NULL, 0);
 			return;
 		}
-		m_compose(p_pony, IMSG_CTL_SMTP_SESSION, c->id, 0, -1,
+		m_compose(p_dispatcher, IMSG_CTL_SMTP_SESSION, c->id, 0, -1,
 		    &c->euid, sizeof(c->euid));
 		return;
 
@@ -597,7 +586,7 @@ control_dispatch_ext(struct mproc *p, struct imsg *imsg)
 		}
 		log_info("info: smtp paused");
 		env->sc_flags |= SMTPD_SMTP_PAUSED;
-		m_compose(p_pony, IMSG_CTL_PAUSE_SMTP, 0, 0, -1, NULL, 0);
+		m_compose(p_dispatcher, IMSG_CTL_PAUSE_SMTP, 0, 0, -1, NULL, 0);
 		m_compose(p, IMSG_CTL_OK, 0, 0, -1, NULL, 0);
 		return;
 
@@ -647,7 +636,7 @@ control_dispatch_ext(struct mproc *p, struct imsg *imsg)
 		}
 		log_info("info: smtp resumed");
 		env->sc_flags &= ~SMTPD_SMTP_PAUSED;
-		m_forward(p_pony, imsg);
+		m_forward(p_dispatcher, imsg);
 		m_compose(p, IMSG_CTL_OK, 0, 0, -1, NULL, 0);
 		return;
 
@@ -655,7 +644,7 @@ control_dispatch_ext(struct mproc *p, struct imsg *imsg)
 		if (c->euid)
 			goto badcred;
 
-		m_forward(p_pony, imsg);
+		m_forward(p_dispatcher, imsg);
 		m_compose(p, IMSG_CTL_OK, 0, 0, -1, NULL, 0);
 		return;
 
@@ -682,7 +671,7 @@ control_dispatch_ext(struct mproc *p, struct imsg *imsg)
 			goto badcred;
 
 		imsg->hdr.peerid = c->id;
-		m_forward(p_pony, imsg);
+		m_forward(p_dispatcher, imsg);
 		return;
 
 	case IMSG_CTL_SHOW_STATUS:
@@ -701,10 +690,10 @@ control_dispatch_ext(struct mproc *p, struct imsg *imsg)
 		if (imsg->hdr.len - IMSG_HEADER_SIZE <= sizeof(ss))
 			goto invalid;
 		memmove(&ss, imsg->data, sizeof(ss));
-		m_create(p_pony, imsg->hdr.type, c->id, 0, -1);
-		m_add_sockaddr(p_pony, (struct sockaddr *)&ss);
-		m_add_string(p_pony, (char *)imsg->data + sizeof(ss));
-		m_close(p_pony);
+		m_create(p_dispatcher, imsg->hdr.type, c->id, 0, -1);
+		m_add_sockaddr(p_dispatcher, (struct sockaddr *)&ss);
+		m_add_string(p_dispatcher, (char *)imsg->data + sizeof(ss));
+		m_close(p_dispatcher);
 		return;
 
 	case IMSG_CTL_SCHEDULE:
@@ -780,9 +769,9 @@ control_broadcast_verbose(int msg, int v)
 	m_add_int(p_lka, v);
 	m_close(p_lka);
 
-	m_create(p_pony, msg, 0, 0, -1);
-	m_add_int(p_pony, v);
-	m_close(p_pony);
+	m_create(p_dispatcher, msg, 0, 0, -1);
+	m_add_int(p_dispatcher, v);
+	m_close(p_dispatcher);
 
 	m_create(p_queue, msg, 0, 0, -1);
 	m_add_int(p_queue, v);

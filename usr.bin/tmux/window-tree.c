@@ -1,4 +1,4 @@
-/* $OpenBSD: window-tree.c,v 1.52 2020/07/15 11:03:17 nicm Exp $ */
+/* $OpenBSD: window-tree.c,v 1.55 2021/06/10 07:50:04 nicm Exp $ */
 
 /*
  * Copyright (c) 2017 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -29,6 +29,7 @@ static struct screen	*window_tree_init(struct window_mode_entry *,
 static void		 window_tree_free(struct window_mode_entry *);
 static void		 window_tree_resize(struct window_mode_entry *, u_int,
 			     u_int);
+static void		 window_tree_update(struct window_mode_entry *);
 static void		 window_tree_key(struct window_mode_entry *,
 			     struct client *, struct session *,
 			     struct winlink *, key_code, struct mouse_event *);
@@ -52,6 +53,17 @@ static void		 window_tree_key(struct window_mode_entry *,
 				"#{session_group_list})," \
 			"}" \
 			"#{?session_attached, (attached),}" \
+		"}" \
+	"}"
+
+#define WINDOW_TREE_DEFAULT_KEY_FORMAT \
+	"#{?#{e|<:#{line},10}," \
+		"#{line}" \
+	"," \
+		"#{?#{e|<:#{line},36},"	\
+	        	"M-#{a:#{e|+:97,#{e|-:#{line},10}}}" \
+		"," \
+	        	"" \
 		"}" \
 	"}"
 
@@ -79,6 +91,7 @@ const struct window_mode window_tree_mode = {
 	.init = window_tree_init,
 	.free = window_tree_free,
 	.resize = window_tree_resize,
+	.update = window_tree_update,
 	.key = window_tree_key,
 };
 
@@ -115,6 +128,7 @@ struct window_tree_modedata {
 
 	struct mode_tree_data		 *data;
 	char				 *format;
+	char				 *key_format;
 	char				 *command;
 	int				  squash_groups;
 
@@ -854,6 +868,35 @@ window_tree_menu(void *modedata, struct client *c, key_code key)
 	window_tree_key(wme, c, NULL, NULL, key, NULL);
 }
 
+static key_code
+window_tree_get_key(void *modedata, void *itemdata, u_int line)
+{
+	struct window_tree_modedata	*data = modedata;
+	struct window_tree_itemdata	*item = itemdata;
+	struct format_tree		*ft;
+	struct session			*s;
+	struct winlink			*wl;
+	struct window_pane		*wp;
+	char				*expanded;
+	key_code			 key;
+
+	ft = format_create(NULL, NULL, FORMAT_NONE, 0);
+	window_tree_pull_item(item, &s, &wl, &wp);
+	if (item->type == WINDOW_TREE_SESSION)
+		format_defaults(ft, NULL, s, NULL, NULL);
+	else if (item->type == WINDOW_TREE_WINDOW)
+		format_defaults(ft, NULL, s, wl, NULL);
+	else
+		format_defaults(ft, NULL, s, wl, wp);
+	format_add(ft, "line", "%u", line);
+
+	expanded = format_expand(ft, data->key_format);
+	key = key_string_lookup_string(expanded);
+	free(expanded);
+	format_free(ft);
+	return key;
+}
+
 static struct screen *
 window_tree_init(struct window_mode_entry *wme, struct cmd_find_state *fs,
     struct args *args)
@@ -878,6 +921,10 @@ window_tree_init(struct window_mode_entry *wme, struct cmd_find_state *fs,
 		data->format = xstrdup(WINDOW_TREE_DEFAULT_FORMAT);
 	else
 		data->format = xstrdup(args_get(args, 'F'));
+	if (args == NULL || !args_has(args, 'K'))
+		data->key_format = xstrdup(WINDOW_TREE_DEFAULT_KEY_FORMAT);
+	else
+		data->key_format = xstrdup(args_get(args, 'K'));
 	if (args == NULL || args->argc == 0)
 		data->command = xstrdup(WINDOW_TREE_DEFAULT_COMMAND);
 	else
@@ -885,9 +932,9 @@ window_tree_init(struct window_mode_entry *wme, struct cmd_find_state *fs,
 	data->squash_groups = !args_has(args, 'G');
 
 	data->data = mode_tree_start(wp, args, window_tree_build,
-	    window_tree_draw, window_tree_search, window_tree_menu, NULL, data,
-	    window_tree_menu_items, window_tree_sort_list,
-	    nitems(window_tree_sort_list), &s);
+	    window_tree_draw, window_tree_search, window_tree_menu, NULL,
+	    window_tree_get_key, data, window_tree_menu_items,
+	    window_tree_sort_list, nitems(window_tree_sort_list), &s);
 	mode_tree_zoom(data->data, args);
 
 	mode_tree_build(data->data);
@@ -911,6 +958,7 @@ window_tree_destroy(struct window_tree_modedata *data)
 	free(data->item_list);
 
 	free(data->format);
+	free(data->key_format);
 	free(data->command);
 
 	free(data);
@@ -935,6 +983,16 @@ window_tree_resize(struct window_mode_entry *wme, u_int sx, u_int sy)
 	struct window_tree_modedata	*data = wme->data;
 
 	mode_tree_resize(data->data, sx, sy);
+}
+
+static void
+window_tree_update(struct window_mode_entry *wme)
+{
+	struct window_tree_modedata	*data = wme->data;
+
+	mode_tree_build(data->data);
+	mode_tree_draw(data->data);
+	data->wp->flags |= PANE_REDRAW;
 }
 
 static char *
@@ -1238,7 +1296,7 @@ window_tree_key(struct window_mode_entry *wme, struct client *c,
 		data->references++;
 		status_prompt_set(c, NULL, prompt, "",
 		    window_tree_kill_current_callback, window_tree_command_free,
-		    data, PROMPT_SINGLE|PROMPT_NOFORMAT);
+		    data, PROMPT_SINGLE|PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 		break;
 	case 'X':
@@ -1249,7 +1307,7 @@ window_tree_key(struct window_mode_entry *wme, struct client *c,
 		data->references++;
 		status_prompt_set(c, NULL, prompt, "",
 		    window_tree_kill_tagged_callback, window_tree_command_free,
-		    data, PROMPT_SINGLE|PROMPT_NOFORMAT);
+		    data, PROMPT_SINGLE|PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 		break;
 	case ':':
@@ -1261,7 +1319,7 @@ window_tree_key(struct window_mode_entry *wme, struct client *c,
 		data->references++;
 		status_prompt_set(c, NULL, prompt, "",
 		    window_tree_command_callback, window_tree_command_free,
-		    data, PROMPT_NOFORMAT);
+		    data, PROMPT_NOFORMAT, PROMPT_TYPE_COMMAND);
 		free(prompt);
 		break;
 	case '\r':

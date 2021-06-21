@@ -1,4 +1,4 @@
-/*	$OpenBSD: ehci.c,v 1.212 2020/10/23 20:25:35 mglocker Exp $ */
+/*	$OpenBSD: ehci.c,v 1.214 2021/01/11 14:41:12 mglocker Exp $ */
 /*	$NetBSD: ehci.c,v 1.66 2004/06/30 03:11:56 mycroft Exp $	*/
 
 /*
@@ -1159,7 +1159,7 @@ ehci_device_clear_toggle(struct usbd_pipe *pipe)
 
 #ifdef DIAGNOSTIC
 	if ((epipe->sqh->qh.qh_qtd.qtd_status & htole32(EHCI_QTD_ACTIVE)) != 0)
-		panic("ehci_device_clear_toggle: queue active");
+		printf("%s: queue active\n", __func__);
 #endif
 	epipe->sqh->qh.qh_qtd.qtd_status &= htole32(~EHCI_QTD_TOGGLE_MASK);
 }
@@ -2393,16 +2393,16 @@ ehci_alloc_sqtd_chain(struct ehci_softc *sc, u_int alen, struct usbd_xfer *xfer,
 			/* must use multiple TDs, fill as much as possible. */
 			curlen = EHCI_QTD_NBUFFERS * EHCI_PAGE_SIZE -
 				 EHCI_PAGE_OFFSET(dataphys);
-#ifdef DIAGNOSTIC
+
 			if (curlen > len) {
-				printf("ehci_alloc_sqtd_chain: curlen=%u "
+				DPRINTFN(1,("ehci_alloc_sqtd_chain: curlen=%u "
 				    "len=%u offs=0x%x\n", curlen, len,
-				    EHCI_PAGE_OFFSET(dataphys));
-				printf("lastpage=0x%x page=0x%x phys=0x%x\n",
-				    dataphyslastpage, dataphyspage, dataphys);
+				    EHCI_PAGE_OFFSET(dataphys)));
+				DPRINTFN(1,("lastpage=0x%x page=0x%x phys=0x%x\n",
+				    dataphyslastpage, dataphyspage, dataphys));
 				curlen = len;
 			}
-#endif
+
 			/* the length must be a multiple of the max size */
 			curlen -= curlen % mps;
 			DPRINTFN(1,("ehci_alloc_sqtd_chain: multiple QTDs, "

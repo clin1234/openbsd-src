@@ -1,4 +1,4 @@
-/*	$OpenBSD: dead_vnops.c,v 1.33 2020/06/15 15:42:11 mpi Exp $	*/
+/*	$OpenBSD: dead_vnops.c,v 1.35 2021/04/28 09:53:53 claudio Exp $	*/
 /*	$NetBSD: dead_vnops.c,v 1.16 1996/02/13 13:12:48 mycroft Exp $	*/
 
 /*
@@ -76,6 +76,7 @@ const struct vops dead_vops = {
 	.vop_ioctl	= dead_ioctl,
 	.vop_poll	= dead_poll,
 	.vop_kqfilter	= dead_kqfilter,
+	.vop_revoke	= NULL,
 	.vop_fsync	= nullop,
 	.vop_remove	= dead_badop,
 	.vop_link	= dead_badop,
@@ -284,10 +285,12 @@ chkvnlock(struct vnode *vp)
 {
 	int locked = 0;
 
-	while (vp->v_flag & VXLOCK) {
-		vp->v_flag |= VXWANT;
-		tsleep_nsec(vp, PINOD, "chkvnlock", INFSLP);
+	mtx_enter(&vnode_mtx);
+	while (vp->v_lflag & VXLOCK) {
+		vp->v_lflag |= VXWANT;
+		msleep_nsec(vp, &vnode_mtx, PINOD, "chkvnlock", INFSLP);
 		locked = 1;
 	}
+	mtx_leave(&vnode_mtx);
 	return (locked);
 }

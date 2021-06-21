@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiacpi.c,v 1.8 2020/05/11 16:12:46 kettenis Exp $	*/
+/*	$OpenBSD: efiacpi.c,v 1.12 2021/06/06 23:56:55 krw Exp $	*/
 
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
@@ -21,7 +21,6 @@
 #include <efi.h>
 #include <efiapi.h>
 
-#include "eficall.h"
 #include "fdt.h"
 #include "libsa.h"
 
@@ -132,7 +131,7 @@ struct acpi_fadt {
 	uint8_t		s4bios_req;	/* value for S4 */
 	uint8_t		pstate_cnt;	/* value for performance (hdr_revision > 2) */
 	uint32_t	pm1a_evt_blk;	/* power management 1a */
-	uint32_t	pm1b_evt_blk;	/* power mangement 1b */
+	uint32_t	pm1b_evt_blk;	/* power management 1b */
 	uint32_t	pm1a_cnt_blk;	/* pm control 1a */
 	uint32_t	pm1b_cnt_blk;	/* pm control 1b */
 	uint32_t	pm2_cnt_blk;	/* pm control 2 */
@@ -340,7 +339,7 @@ struct acpi_spcr {
 	uint32_t	pci_flags;
 	uint8_t		pci_segment;
 	uint32_t	reserved3;
-};
+} __packed;
 
 /* We'll never see ACPI 1.0 tables on ARM. */
 static EFI_GUID acpi_guid = ACPI_20_TABLE_GUID;
@@ -466,8 +465,8 @@ efi_acpi_madt_gic_msi(struct acpi_madt_gic_msi *msi)
 	fdt_node_add_property(child, "msi-controller", NULL, 0);
 	fdt_node_add_property(child, "reg", reg, sizeof(reg));
 	if (msi->flags & ACPI_MADT_GIC_MSI_SPI_SELECT) {
-		uint32_t spi_base = msi->spi_base;
-		uint32_t spi_count = msi->spi_count;
+		uint32_t spi_base = htobe32(msi->spi_base);
+		uint32_t spi_count = htobe32(msi->spi_count);
 
 		fdt_node_add_property(child, "arm,msi-base-spi",
 		    &spi_base, sizeof(spi_base));

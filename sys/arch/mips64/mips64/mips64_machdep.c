@@ -1,4 +1,4 @@
-/*	$OpenBSD: mips64_machdep.c,v 1.33 2020/07/11 15:18:08 visa Exp $ */
+/*	$OpenBSD: mips64_machdep.c,v 1.37 2021/05/01 16:11:11 visa Exp $ */
 
 /*
  * Copyright (c) 2009, 2010, 2012 Miodrag Vallat.
@@ -130,12 +130,7 @@ build_trampoline(vaddr_t addr, vaddr_t dest)
  * Prototype status registers value for userland processes.
  */
 register_t protosr = SR_FR_32 | SR_XX | SR_UX | SR_KSU_USER | SR_EXL |
-#ifdef CPU_R8000
-    SR_SERIALIZE_FPU |
-#else
-    SR_KX |
-#endif
-    SR_INT_ENAB;
+    SR_KX | SR_INT_ENAB;
 
 /*
  * Set registers on exec for native exec format. For o64/64.
@@ -151,7 +146,6 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 	p->p_md.md_regs->pc = pack->ep_entry & ~3;
 	p->p_md.md_regs->t9 = pack->ep_entry & ~3; /* abicall req */
 	p->p_md.md_regs->sr = protosr | (idle_mask & SR_INT_MASK);
-	p->p_md.md_regs->ic = (idle_mask << 8) & IC_INT_MASK;
 	if (CPU_HAS_FPU(ci))
 		p->p_md.md_flags &= ~MDP_FPUSED;
 	if (ci->ci_fpuproc == p)
@@ -200,20 +194,7 @@ exec_md_map(struct proc *p, struct exec_package *pack)
 void
 tlb_init(unsigned int tlbsize)
 {
-#ifdef CPU_R8000
-	register_t sr;
-
-	sr = getsr();
-	sr &= ~(((uint64_t)SR_PGSZ_MASK << SR_KPGSZ_SHIFT) |
-	        ((uint64_t)SR_PGSZ_MASK << SR_UPGSZ_SHIFT));
-	sr |= ((uint64_t)SR_PGSZ_16K << SR_KPGSZ_SHIFT) |
-	    ((uint64_t)SR_PGSZ_16K << SR_UPGSZ_SHIFT);
-	protosr |= ((uint64_t)SR_PGSZ_16K << SR_KPGSZ_SHIFT) |
-	    ((uint64_t)SR_PGSZ_16K << SR_UPGSZ_SHIFT);
-	setsr(sr);
-#else
 	tlb_set_page_mask(TLB_PAGE_MASK);
-#endif
 	tlb_set_wired(0);
 	tlb_flush(tlbsize);
 #if UPAGES > 1
@@ -228,7 +209,7 @@ void
 tlb_asid_wrap(struct cpu_info *ci)
 {
 	tlb_flush(ci->ci_hw.tlbsize);
-#if defined(CPU_OCTEON) || defined(CPU_R8000)
+#if defined(CPU_OCTEON)
 	Mips_InvalidateICache(ci, 0, ci->ci_l1inst.size);
 #endif
 }
@@ -267,14 +248,14 @@ delay(int n)
 u_int cp0_get_timecount(struct timecounter *);
 
 struct timecounter cp0_timecounter = {
-	cp0_get_timecount,	/* get_timecount */
-	0,			/* no poll_pps */
-	0xffffffff,		/* counter_mask */
-	0,			/* frequency */
-	"CP0",			/* name */
-	0,			/* quality */
-	NULL,			/* private bits */
-	0,			/* expose to user */
+	.tc_get_timecount = cp0_get_timecount,
+	.tc_poll_pps = 0,
+	.tc_counter_mask = 0xffffffff,
+	.tc_frequency = 0,
+	.tc_name = "CP0",
+	.tc_quality = 0,
+	.tc_priv = NULL,
+	.tc_user = 0,
 };
 
 u_int
@@ -323,14 +304,13 @@ cp0_calibrate(struct cpu_info *ci)
  * Start the real-time and statistics clocks.
  */
 void
-cpu_initclocks()
+cpu_initclocks(void)
 {
 	struct cpu_info *ci = curcpu();
 
 	profhz = hz;
 
 	tick = 1000000 / hz;	/* number of micro-seconds between interrupts */
-	tickadj = 240000 / (60 * hz);		/* can adjust 240ms in 60s */
 
 	cp0_calibrate(ci);
 

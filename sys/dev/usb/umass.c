@@ -1,4 +1,4 @@
-/*	$OpenBSD: umass.c,v 1.78 2020/09/05 14:21:52 krw Exp $ */
+/*	$OpenBSD: umass.c,v 1.80 2021/01/29 17:12:19 sthen Exp $ */
 /*	$NetBSD: umass.c,v 1.116 2004/06/30 05:53:46 mycroft Exp $	*/
 
 /*
@@ -61,10 +61,10 @@
 
 /*
  * Universal Serial Bus Mass Storage Class specs:
- * http://www.usb.org/developers/devclass_docs/usb_msc_overview_1.2.pdf
- * http://www.usb.org/developers/devclass_docs/usbmassbulk_10.pdf
- * http://www.usb.org/developers/devclass_docs/usb_msc_cbi_1.1.pdf
- * http://www.usb.org/developers/devclass_docs/usbmass-ufi10.pdf
+ * https://www.usb.org/sites/default/files/Mass_Storage_Specification_Overview_v1.4_2-19-2010.pdf
+ * https://www.usb.org/sites/default/files/usbmassbulk_10.pdf
+ * https://www.usb.org/sites/default/files/usb_msc_cbi_1.1.pdf
+ * https://www.usb.org/sites/default/files/usbmass-ufi10.pdf
  */
 
 /*
@@ -1299,8 +1299,17 @@ umass_bbb_state(struct usbd_xfer *xfer, void *priv, usbd_status err)
 			return;
 
 		} else {	/* success */
+			u_int32_t residue = UGETDW(sc->csw.dCSWDataResidue);
 			sc->transfer_state = TSTATE_IDLE;
 			if (sc->transfer_dir == DIR_IN) {
+				if (residue == sc->transfer_datalen) {
+					if (sc->cbw.CBWCDB[0] == INQUIRY)
+						SET(sc->sc_quirks,
+						    UMASS_QUIRK_IGNORE_RESIDUE);
+					if (ISSET(sc->sc_quirks,
+					    UMASS_QUIRK_IGNORE_RESIDUE))
+						USETDW(sc->csw.dCSWDataResidue, 0);
+				}
 				sc->transfer_actlen = sc->transfer_datalen -
 				    UGETDW(sc->csw.dCSWDataResidue);
 				memcpy(sc->transfer_data, sc->data_buffer,

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.3 2019/09/18 11:26:30 eric Exp $
+#	$OpenBSD: Makefile,v 1.5 2021/04/10 10:19:19 eric Exp $
 
 .PATH:	${.CURDIR}/..
 
@@ -12,12 +12,10 @@ SRCS+=	ioev.c
 SRCS+=	log.c
 SRCS+=	smtp_client.c
 SRCS+=	smtpc.c
-SRCS+=	ssl.c
-SRCS+=	ssl_verify.c
 
 CPPFLAGS+= -DIO_TLS
 
-LDADD+=	-levent -lutil -lssl -lcrypto -lm -lz
-DPADD+=	${LIBEVENT} ${LIBUTIL} ${LIBSSL} ${LIBCRYPTO} ${LIBM} ${LIBZ}
+LDADD+=	-levent -lutil -ltls -lssl -lcrypto
+DPADD+=	${LIBEVENT} ${LIBUTIL} ${LIBTLS} ${LIBSSL} ${LIBCRYPTO}
 
 .include <bsd.prog.mk>

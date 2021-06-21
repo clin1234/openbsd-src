@@ -1,4 +1,4 @@
-/* $OpenBSD: readconf.h,v 1.135 2020/10/16 13:26:13 djm Exp $ */
+/* $OpenBSD: readconf.h,v 1.140 2021/02/15 20:43:15 markus Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -110,6 +110,10 @@ typedef struct {
 	struct Forward *remote_forwards;
 	int	clear_forwardings;
 
+	/* Restrict remote dynamic forwarding */
+	char  **permitted_remote_opens;
+	u_int	num_permitted_remote_opens;
+
 	/* stdio forwarding (-W) host and port */
 	char   *stdio_forward_host;
 	int	stdio_forward_port;
@@ -161,13 +165,15 @@ typedef struct {
 
 	int	 update_hostkeys; /* one of SSH_UPDATE_HOSTKEYS_* */
 
-	char   *hostbased_key_types;
-	char   *pubkey_key_types;
+	char   *hostbased_accepted_algos;
+	char   *pubkey_accepted_algos;
 
 	char   *jump_user;
 	char   *jump_host;
 	int	jump_port;
 	char   *jump_extra;
+
+	char   *known_hosts_command;
 
 	char	*ignored_unknown; /* Pattern list of unknown tokens to ignore */
 }       Options;
@@ -205,8 +211,9 @@ const char *kex_default_pk_alg(void);
 char	*ssh_connection_hash(const char *thishost, const char *host,
     const char *portstr, const char *user);
 void     initialize_options(Options *);
-void     fill_default_options(Options *);
+int      fill_default_options(Options *);
 void	 fill_default_options_for_canonicalization(Options *);
+void	 free_options(Options *o);
 int	 process_config_line(Options *, struct passwd *, const char *,
     const char *, char *, const char *, int, int *, int);
 int	 read_config_file(const char *, struct passwd *, const char *,

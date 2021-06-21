@@ -1,4 +1,4 @@
-/*	$OpenBSD: roa.c,v 1.9 2020/09/12 15:46:48 claudio Exp $ */
+/*	$OpenBSD: roa.c,v 1.20 2021/06/14 12:08:50 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -22,6 +22,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include <openssl/asn1.h>
+#include <openssl/x509.h>
 
 #include "extern.h"
 
@@ -108,12 +111,11 @@ roa_parse_addr(const ASN1_OCTET_STRING *os, enum afi afi, struct parse *p)
 		/* FIXME: maximum check. */
 	}
 
-	p->res->ips = reallocarray(p->res->ips,
-		p->res->ipsz + 1, sizeof(struct roa_ip));
+	p->res->ips = recallocarray(p->res->ips, p->res->ipsz, p->res->ipsz + 1,
+	    sizeof(struct roa_ip));
 	if (p->res->ips == NULL)
 		err(1, NULL);
 	res = &p->res->ips[p->res->ipsz++];
-	memset(res, 0, sizeof(struct roa_ip));
 
 	res->addr = addr;
 	res->afi = afi;
@@ -266,25 +268,9 @@ roa_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 	/* RFC 6482, section 3.1. */
 
 	if (sz == 3) {
-		t = sk_ASN1_TYPE_value(seq, i++);
-
-		/*
-		 * This check with ASN1_INTEGER_get() is fine since
-		 * we're looking for a value of zero anyway, so any
-		 * overflowing number will be definition be wrong.
-		 */
-
-		if (t->type != V_ASN1_INTEGER) {
-			warnx("%s: RFC 6482 section 3.1: version: "
-			    "want ASN.1 integer, have %s (NID %d)",
-			    p->fn, ASN1_tag2str(t->type), t->type);
-			goto out;
-		} else if (ASN1_INTEGER_get(t->value.integer) != 0) {
-			warnx("%s: RFC 6482 section 3.1: version: "
-			    "want version 0, have %ld",
-			    p->fn, ASN1_INTEGER_get(t->value.integer));
-			goto out;
-		}
+		warnx("%s: RFC 6482 section 3 and X.690, 11.5: not expecting "
+		    "version field, as only version 0 is supported", p->fn);
+		goto out;
 	}
 
 	/*
@@ -323,18 +309,19 @@ out:
 }
 
 /*
- * Parse a full RFC 6482 file with a SHA256 digest "dgst" and signed by
- * the certificate "cacert" (the latter two are optional and may be
- * passed as NULL to disable).
+ * Parse a full RFC 6482 file.
  * Returns the ROA or NULL if the document was malformed.
  */
 struct roa *
-roa_parse(X509 **x509, const char *fn, const unsigned char *dgst)
+roa_parse(X509 **x509, const char *fn)
 {
 	struct parse	 p;
 	size_t		 cmsz;
 	unsigned char	*cms;
 	int		 rc = 0;
+	const ASN1_TIME	*at;
+	struct tm	 expires_tm;
+	time_t		 expires;
 
 	memset(&p, 0, sizeof(struct parse));
 	p.fn = fn;
@@ -342,14 +329,38 @@ roa_parse(X509 **x509, const char *fn, const unsigned char *dgst)
 	/* OID from section 2, RFC 6482. */
 
 	cms = cms_parse_validate(x509, fn,
-	    "1.2.840.113549.1.9.16.1.24", dgst, &cmsz);
+	    "1.2.840.113549.1.9.16.1.24", &cmsz);
 	if (cms == NULL)
 		return NULL;
 
 	if ((p.res = calloc(1, sizeof(struct roa))) == NULL)
 		err(1, NULL);
-	if (!x509_get_ski_aki(*x509, fn, &p.res->ski, &p.res->aki))
+
+	p.res->aia = x509_get_aia(*x509, fn);
+	p.res->aki = x509_get_aki(*x509, 0, fn);
+	p.res->ski = x509_get_ski(*x509, fn);
+	if (p.res->aia == NULL || p.res->aki == NULL || p.res->ski == NULL) {
+		warnx("%s: RFC 6487 section 4.8: "
+		    "missing AIA, AKI or SKI X509 extension", fn);
 		goto out;
+	}
+
+	at = X509_get0_notAfter(*x509);
+	if (at == NULL) {
+		warnx("%s: X509_get0_notAfter failed", fn);
+		goto out;
+	}
+	memset(&expires_tm, 0, sizeof(expires_tm));
+	if (ASN1_time_parse(at->data, at->length, &expires_tm, 0) == -1) {
+		warnx("%s: ASN1_time_parse failed", fn);
+		goto out;
+	}
+	if ((expires = mktime(&expires_tm)) == -1) {
+		err(1, "mktime failed");
+		goto out;
+	}
+	p.res->expires = expires;
+	
 	if (!roa_parse_econtent(cms, cmsz, &p))
 		goto out;
 
@@ -376,6 +387,7 @@ roa_free(struct roa *p)
 
 	if (p == NULL)
 		return;
+	free(p->aia);
 	free(p->aki);
 	free(p->ski);
 	free(p->ips);
@@ -388,29 +400,27 @@ roa_free(struct roa *p)
  * See roa_read() for reader.
  */
 void
-roa_buffer(char **b, size_t *bsz, size_t *bmax, const struct roa *p)
+roa_buffer(struct ibuf *b, const struct roa *p)
 {
 	size_t	 i;
 
-	io_simple_buffer(b, bsz, bmax, &p->valid, sizeof(int));
-	io_simple_buffer(b, bsz, bmax, &p->asid, sizeof(uint32_t));
-	io_simple_buffer(b, bsz, bmax, &p->ipsz, sizeof(size_t));
+	io_simple_buffer(b, &p->valid, sizeof(int));
+	io_simple_buffer(b, &p->asid, sizeof(uint32_t));
+	io_simple_buffer(b, &p->ipsz, sizeof(size_t));
+	io_simple_buffer(b, &p->expires, sizeof(time_t));
 
 	for (i = 0; i < p->ipsz; i++) {
-		io_simple_buffer(b, bsz, bmax,
-		    &p->ips[i].afi, sizeof(enum afi));
-		io_simple_buffer(b, bsz, bmax,
-		    &p->ips[i].maxlength, sizeof(size_t));
-		io_simple_buffer(b, bsz, bmax,
-		    p->ips[i].min, sizeof(p->ips[i].min));
-		io_simple_buffer(b, bsz, bmax,
-		    p->ips[i].max, sizeof(p->ips[i].max));
-		ip_addr_buffer(b, bsz, bmax, &p->ips[i].addr);
+		io_simple_buffer(b, &p->ips[i].afi, sizeof(enum afi));
+		io_simple_buffer(b, &p->ips[i].maxlength, sizeof(size_t));
+		io_simple_buffer(b, p->ips[i].min, sizeof(p->ips[i].min));
+		io_simple_buffer(b, p->ips[i].max, sizeof(p->ips[i].max));
+		ip_addr_buffer(b, &p->ips[i].addr);
 	}
 
-	io_str_buffer(b, bsz, bmax, p->aki);
-	io_str_buffer(b, bsz, bmax, p->ski);
-	io_str_buffer(b, bsz, bmax, p->tal);
+	io_str_buffer(b, p->aia);
+	io_str_buffer(b, p->aki);
+	io_str_buffer(b, p->ski);
+	io_str_buffer(b, p->tal);
 }
 
 /*
@@ -430,6 +440,7 @@ roa_read(int fd)
 	io_simple_read(fd, &p->valid, sizeof(int));
 	io_simple_read(fd, &p->asid, sizeof(uint32_t));
 	io_simple_read(fd, &p->ipsz, sizeof(size_t));
+	io_simple_read(fd, &p->expires, sizeof(time_t));
 
 	if ((p->ips = calloc(p->ipsz, sizeof(struct roa_ip))) == NULL)
 		err(1, NULL);
@@ -442,9 +453,12 @@ roa_read(int fd)
 		ip_addr_read(fd, &p->ips[i].addr);
 	}
 
+	io_str_read(fd, &p->aia);
 	io_str_read(fd, &p->aki);
 	io_str_read(fd, &p->ski);
 	io_str_read(fd, &p->tal);
+	assert(p->aia && p->aki && p->ski && p->tal);
+
 	return p;
 }
 
@@ -457,8 +471,8 @@ void
 roa_insert_vrps(struct vrp_tree *tree, struct roa *roa, size_t *vrps,
     size_t *uniqs)
 {
-	struct vrp *v;
-	size_t i;
+	struct vrp	*v, *found;
+	size_t		 i;
 
 	for (i = 0; i < roa->ipsz; i++) {
 		if ((v = malloc(sizeof(*v))) == NULL)
@@ -469,10 +483,27 @@ roa_insert_vrps(struct vrp_tree *tree, struct roa *roa, size_t *vrps,
 		v->asid = roa->asid;
 		if ((v->tal = strdup(roa->tal)) == NULL)
 			err(1, NULL);
-		if (RB_INSERT(vrp_tree, tree, v) == NULL)
-			(*uniqs)++;
-		else /* already exists */
+		v->expires = roa->expires;
+
+		/*
+		 * Check if a similar VRP already exists in the tree.
+		 * If the found VRP expires sooner, update it to this
+		 * ROAs later expiry moment.
+		 */
+		if ((found = RB_INSERT(vrp_tree, tree, v)) != NULL) {
+			/* already exists */
+			if (found->expires < v->expires) {
+				/* update found with preferred data */
+				found->expires = roa->expires;
+				free(found->tal);
+				found->tal = v->tal;
+				v->tal = NULL;
+			}
+			free(v->tal);
 			free(v);
+		} else
+			(*uniqs)++;
+
 		(*vrps)++;
 	}
 }

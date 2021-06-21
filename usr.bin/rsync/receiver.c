@@ -1,4 +1,4 @@
-/*	$Id: receiver.c,v 1.24 2019/05/08 21:30:11 benno Exp $ */
+/*	$Id: receiver.c,v 1.27 2021/05/17 11:59:09 claudio Exp $ */
 
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 
 #include <assert.h>
+#include <err.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -180,15 +181,12 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 	struct upload	*ul = NULL;
 	mode_t		 oumask;
 
-	if (pledge("stdio unix rpath wpath cpath dpath fattr chown getpw unveil", NULL) == -1) {
-		ERR("pledge");
-		goto out;
-	}
+	if (pledge("stdio unix rpath wpath cpath dpath fattr chown getpw unveil", NULL) == -1)
+		err(ERR_IPC, "pledge");
 
 	/* Client sends zero-length exclusions. */
 
-	if (!sess->opts->server &&
-	     !io_write_int(sess, fdout, 0)) {
+	if (!sess->opts->server && !io_write_int(sess, fdout, 0)) {
 		ERRX1("io_write_int");
 		goto out;
 	}
@@ -240,14 +238,10 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 	 */
 
 	if (!sess->opts->dry_run) {
-		if ((tofree = strdup(root)) == NULL) {
-			ERR("strdup");
-			goto out;
-		} else if (mkpath(tofree) < 0) {
-			ERRX1("%s: mkpath", root);
-			free(tofree);
-			goto out;
-		}
+		if ((tofree = strdup(root)) == NULL)
+			err(ERR_NOMEM, NULL);
+		if (mkpath(tofree) < 0)
+			err(ERR_FILE_IO, "%s: mkpath", tofree);
 		free(tofree);
 	}
 
@@ -260,10 +254,8 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 
 	if (!sess->opts->dry_run) {
 		dfd = open(root, O_RDONLY | O_DIRECTORY, 0);
-		if (dfd == -1) {
-			ERR("%s: open", root);
-			goto out;
-		}
+		if (dfd == -1)
+			err(ERR_FILE_IO, "%s: open", root);
 	}
 
 	/*
@@ -285,13 +277,10 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 	 * writing into other parts of the file-system.
 	 */
 
-	if (unveil(root, "rwc") == -1) {
-		ERR("%s: unveil", root);
-		goto out;
-	} else if (unveil(NULL, NULL) == -1) {
-		ERR("%s: unveil", root);
-		goto out;
-	}
+	if (unveil(root, "rwc") == -1)
+		err(ERR_IPC, "%s: unveil", root);
+	if (unveil(NULL, NULL) == -1)
+		err(ERR_IPC, "unveil");
 
 	/* If we have a local set, go for the deletion. */
 
@@ -329,7 +318,7 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 	LOG2("%s: ready for phase 1 data", root);
 
 	for (;;) {
-		if ((c = poll(pfd, PFD__MAX, POLL_TIMEOUT)) == -1) {
+		if ((c = poll(pfd, PFD__MAX, poll_timeout)) == -1) {
 			ERR("poll");
 			goto out;
 		} else if (c == 0) {
@@ -356,7 +345,7 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 		 */
 
 		if (sess->mplex_reads &&
-		    (POLLIN & pfd[PFD_SENDER_IN].revents)) {
+		    (pfd[PFD_SENDER_IN].revents & POLLIN)) {
 			if (!io_read_flush(sess, fdin)) {
 				ERRX1("io_read_flush");
 				goto out;
@@ -371,8 +360,8 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 		 * is read to mmap.
 		 */
 
-		if ((POLLIN & pfd[PFD_UPLOADER_IN].revents) ||
-		    (POLLOUT & pfd[PFD_SENDER_OUT].revents)) {
+		if ((pfd[PFD_UPLOADER_IN].revents & POLLIN) ||
+		    (pfd[PFD_SENDER_OUT].revents & POLLOUT)) {
 			c = rsync_uploader(ul,
 				&pfd[PFD_UPLOADER_IN].fd,
 				sess, &pfd[PFD_SENDER_OUT].fd);
@@ -391,8 +380,8 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 		 * messages, which will otherwise clog up the pipes.
 		 */
 
-		if ((POLLIN & pfd[PFD_SENDER_IN].revents) ||
-		    (POLLIN & pfd[PFD_DOWNLOADER_IN].revents)) {
+		if ((pfd[PFD_SENDER_IN].revents & POLLIN) ||
+		    (pfd[PFD_DOWNLOADER_IN].revents & POLLIN)) {
 			c = rsync_downloader(dl, sess,
 				&pfd[PFD_DOWNLOADER_IN].fd);
 			if (c < 0) {
@@ -421,10 +410,12 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 		if (!io_write_int(sess, fdout, -1)) {
 			ERRX1("io_write_int");
 			goto out;
-		} else if (!io_read_int(sess, fdin, &ioerror)) {
+		}
+		if (!io_read_int(sess, fdin, &ioerror)) {
 			ERRX1("io_read_int");
 			goto out;
-		} else if (ioerror != -1) {
+		}
+		if (ioerror != -1) {
 			ERRX("expected phase ack");
 			goto out;
 		}
@@ -445,7 +436,8 @@ rsync_receiver(struct sess *sess, int fdin, int fdout, const char *root)
 	if (!sess_stats_recv(sess, fdin)) {
 		ERRX1("sess_stats_recv");
 		goto out;
-	} else if (!io_write_int(sess, fdout, -1)) {
+	}
+	if (!io_write_int(sess, fdout, -1)) {
 		ERRX1("io_write_int");
 		goto out;
 	}

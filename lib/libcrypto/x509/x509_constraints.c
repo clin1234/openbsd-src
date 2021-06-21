@@ -1,4 +1,4 @@
-/* $OpenBSD: x509_constraints.c,v 1.10 2020/09/21 05:41:43 tb Exp $ */
+/* $OpenBSD: x509_constraints.c,v 1.16 2021/04/27 03:35:29 beck Exp $ */
 /*
  * Copyright (c) 2020 Bob Beck <beck@openbsd.org>
  *
@@ -36,7 +36,7 @@
 #define DOMAIN_PART_MAX_LEN 255
 
 struct x509_constraints_name *
-x509_constraints_name_new()
+x509_constraints_name_new(void)
 {
 	return (calloc(1, sizeof(struct x509_constraints_name)));
 }
@@ -69,9 +69,11 @@ x509_constraints_name_dup(struct x509_constraints_name *name)
 	new->type = name->type;
 	new->af = name->af;
 	new->der_len = name->der_len;
-	if (name->der_len > 0 && (new->der = malloc(name->der_len)) == NULL)
-		goto err;
-	memcpy(new->der, name->der, name->der_len);
+	if (name->der_len > 0) {
+		if ((new->der = malloc(name->der_len)) == NULL)
+			goto err;
+		memcpy(new->der, name->der, name->der_len);
+	}
 	if (name->name != NULL && (new->name = strdup(name->name)) == NULL)
 		goto err;
 	if (name->local != NULL && (new->local = strdup(name->local)) == NULL)
@@ -84,9 +86,16 @@ x509_constraints_name_dup(struct x509_constraints_name *name)
 }
 
 struct x509_constraints_names *
-x509_constraints_names_new()
+x509_constraints_names_new(size_t names_max)
 {
-	return (calloc(1, sizeof(struct x509_constraints_names)));
+	struct x509_constraints_names *new;
+
+	if ((new = calloc(1, sizeof(struct x509_constraints_names))) == NULL)
+		return NULL;
+
+	new->names_max = names_max;
+
+	return new;
 }
 
 void
@@ -114,8 +123,8 @@ int
 x509_constraints_names_add(struct x509_constraints_names *names,
     struct x509_constraints_name *name)
 {
-	size_t i = names->names_count;
-
+	if (names->names_count >= names->names_max)
+		return 0;
 	if (names->names_count == names->names_len) {
 		struct x509_constraints_name **tmp;
 		if ((tmp = recallocarray(names->names, names->names_len,
@@ -124,7 +133,7 @@ x509_constraints_names_add(struct x509_constraints_names *names,
 		names->names_len += 32;
 		names->names = tmp;
 	}
-	names->names[i] = name;
+	names->names[names->names_count] = name;
 	names->names_count++;
 	return 1;
 }
@@ -139,14 +148,16 @@ x509_constraints_names_dup(struct x509_constraints_names *names)
 	if (names == NULL)
 		return NULL;
 
-	if ((new = x509_constraints_names_new()) == NULL)
+	if ((new = x509_constraints_names_new(names->names_max)) == NULL)
 		goto err;
+
 	for (i = 0; i < names->names_count; i++) {
 		if ((name = x509_constraints_name_dup(names->names[i])) == NULL)
 			goto err;
 		if (!x509_constraints_names_add(new, name))
 			goto err;
 	}
+
 	return new;
  err:
 	x509_constraints_names_free(new);
@@ -158,13 +169,15 @@ x509_constraints_names_dup(struct x509_constraints_names *names)
 /*
  * Validate that the name contains only a hostname consisting of RFC
  * 5890 compliant A-labels (see RFC 6066 section 3). This is more
- * permissive to allow for a leading '*' for a SAN DNSname wildcard,
- * or a leading '.'  for a subdomain based constraint, as well as
- * allowing for '_' which is commonly accepted by nonconformant
- * DNS implementaitons.
+ * permissive to allow for a leading '.'  for a subdomain based
+ * constraint, as well as allowing for '_' which is commonly accepted
+ * by nonconformant DNS implementaitons.
+ *
+ * if "wildcards" is set it allows '*' to occur in the string at the end of a
+ * component.
  */
 static int
-x509_constraints_valid_domain_internal(uint8_t *name, size_t len)
+x509_constraints_valid_domain_internal(uint8_t *name, size_t len, int wildcards)
 {
 	uint8_t prev, c = 0;
 	int component = 0;
@@ -187,8 +200,8 @@ x509_constraints_valid_domain_internal(uint8_t *name, size_t len)
 		if (!isalnum(c) && c != '-' && c != '.' && c != '_' && c != '*')
 			return 0;
 
-		/* '*' can only be the first thing. */
-		if (c == '*' && !first)
+		/* if it is a '*', fail if not wildcards */
+		if (!wildcards && c == '*')
 			return 0;
 
 		/* '-' must not start a component or be at the end. */
@@ -210,6 +223,13 @@ x509_constraints_valid_domain_internal(uint8_t *name, size_t len)
 			component = 0;
 			continue;
 		}
+		/*
+		 * Wildcards can only occur at the end of a component.
+		 * c*.com is valid, c*c.com is not.
+		 */
+		if (prev == '*')
+			return 0;
+
 		/* Components must be 63 chars or less. */
 		if (++component > 63)
 			return 0;
@@ -222,15 +242,13 @@ x509_constraints_valid_domain(uint8_t *name, size_t len)
 {
 	if (len == 0)
 		return 0;
-	if (name[0] == '*') /* wildcard not allowed in a domain name */
-		return 0;
 	/*
 	 * A domain may not be less than two characters, so you can't
 	 * have a require subdomain name with less than that.
 	 */
 	if (len < 3 && name[0] == '.')
 		return 0;
-	return x509_constraints_valid_domain_internal(name, len);
+	return x509_constraints_valid_domain_internal(name, len, 0);
 }
 
 int
@@ -241,15 +259,13 @@ x509_constraints_valid_host(uint8_t *name, size_t len)
 
 	if (len == 0)
 		return 0;
-	if (name[0] == '*') /* wildcard not allowed in a host name */
-		return 0;
 	if (name[0] == '.') /* leading . not allowed in a host name*/
 		return 0;
 	if (inet_pton(AF_INET, name, &sin4) == 1)
 		return 0;
 	if (inet_pton(AF_INET6, name, &sin6) == 1)
 		return 0;
-	return x509_constraints_valid_domain_internal(name, len);
+	return x509_constraints_valid_domain_internal(name, len, 0);
 }
 
 int
@@ -272,7 +288,7 @@ x509_constraints_valid_sandns(uint8_t *name, size_t len)
 	if (len >= 4 && name[0] == '*' && name[1] != '.')
 		return 0;
 
-	return x509_constraints_valid_domain_internal(name, len);
+	return x509_constraints_valid_domain_internal(name, len, 1);
 }
 
 static inline int
@@ -420,16 +436,13 @@ x509_constraints_valid_domain_constraint(uint8_t *constraint, size_t len)
 	if (len == 0)
 		return 1;	/* empty constraints match */
 
-	if (constraint[0] == '*') /* wildcard not allowed in a constraint */
-		return 0;
-
 	/*
 	 * A domain may not be less than two characters, so you
 	 * can't match a single domain of less than that
 	 */
 	if (len < 3 && constraint[0] == '.')
 		return 0;
-	return x509_constraints_valid_domain_internal(constraint, len);
+	return x509_constraints_valid_domain_internal(constraint, len, 0);
 }
 
 /*
@@ -700,7 +713,7 @@ x509_constraints_extract_names(struct x509_constraints_names *names,
 				*error = X509_V_ERR_OUT_OF_MEM;
 				goto err;
 			}
-			vname->type=GEN_DNS;
+			vname->type = GEN_DNS;
 			include_cn = 0; /* don't use cn from subject */
 			break;
 		case GEN_EMAIL:
@@ -1115,7 +1128,8 @@ x509_constraints_chain(STACK_OF(X509) *chain, int *error, int *depth)
 		goto err;
 	if (chain_length == 1)
 		return 1;
-	if ((names = x509_constraints_names_new()) == NULL) {
+	if ((names = x509_constraints_names_new(
+	    X509_VERIFY_MAX_CHAIN_NAMES)) == NULL) {
 		verify_err = X509_V_ERR_OUT_OF_MEM;
 		goto err;
 	}
@@ -1128,13 +1142,13 @@ x509_constraints_chain(STACK_OF(X509) *chain, int *error, int *depth)
 		if ((cert = sk_X509_value(chain, i)) == NULL)
 			goto err;
 		if (cert->nc != NULL) {
-			if ((permitted =
-			    x509_constraints_names_new()) == NULL) {
+			if ((permitted = x509_constraints_names_new(
+			    X509_VERIFY_MAX_CHAIN_CONSTRAINTS)) == NULL) {
 				verify_err = X509_V_ERR_OUT_OF_MEM;
 				goto err;
 			}
-			if ((excluded =
-			    x509_constraints_names_new()) == NULL) {
+			if ((excluded = x509_constraints_names_new(
+			    X509_VERIFY_MAX_CHAIN_CONSTRAINTS)) == NULL) {
 				verify_err = X509_V_ERR_OUT_OF_MEM;
 				goto err;
 			}
@@ -1159,10 +1173,6 @@ x509_constraints_chain(STACK_OF(X509) *chain, int *error, int *depth)
 		if (!x509_constraints_extract_names(names, cert, 0,
 		    &verify_err))
 			goto err;
-		if (names->names_count > X509_VERIFY_MAX_CHAIN_NAMES) {
-			verify_err = X509_V_ERR_OUT_OF_MEM;
-			goto err;
-		}
 	}
 
 	x509_constraints_names_free(names);

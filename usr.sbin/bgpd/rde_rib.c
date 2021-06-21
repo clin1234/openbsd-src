@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_rib.c,v 1.217 2020/11/05 11:51:13 claudio Exp $ */
+/*	$OpenBSD: rde_rib.c,v 1.222 2021/06/17 08:16:04 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Claudio Jeker <claudio@openbsd.org>
@@ -252,14 +252,8 @@ rib_free(struct rib *rib)
 		 */
 		while ((p = LIST_FIRST(&re->prefix_h))) {
 			struct rde_aspath *asp = prefix_aspath(p);
-			if (asp && asp->pftableid) {
-				struct bgpd_addr addr;
-
-				pt_getaddr(p->pt, &addr);
-				/* Commit is done in rde_reload_done() */
-				rde_send_pftable(asp->pftableid, &addr,
-				    p->pt->prefixlen, 1);
-			}
+			if (asp && asp->pftableid)
+				rde_pftable_del(asp->pftableid, p);
 			prefix_destroy(p);
 		}
 	}
@@ -967,9 +961,6 @@ prefix_update(struct rib *rib, struct rde_peer *peer, struct filterstate *state,
 	struct rde_community	*comm, *ncomm = &state->communities;
 	struct prefix		*p;
 
-	if (nasp->pftableid)
-		rde_send_pftable(nasp->pftableid, prefix, prefixlen, 0);
-
 	/*
 	 * First try to find a prefix in the specified RIB.
 	 */
@@ -1043,6 +1034,7 @@ prefix_move(struct prefix *p, struct rde_peer *peer,
 	if (peer != prefix_peer(p))
 		fatalx("prefix_move: cross peer move");
 
+	/* add new prefix node */
 	np = prefix_alloc();
 	/* add reference to new AS path and communities */
 	np->aspath = path_ref(asp);
@@ -1056,26 +1048,21 @@ prefix_move(struct prefix *p, struct rde_peer *peer,
 	nexthop_link(np);
 	np->lastchange = getmonotime();
 
+	/* add possible pftable reference from new aspath */
+	if (asp && asp->pftableid)
+		rde_pftable_add(asp->pftableid, np);
+
 	/*
 	 * no need to update the peer prefix count because we are only moving
 	 * the prefix without changing the peer.
 	 */
+	prefix_evaluate(np->re, np, p);
 
-	/*
-	 * First kick the old prefix node out of the prefix list,
-	 * afterwards run the route decision for new prefix node.
-	 * Because of this only one update is generated if the prefix
-	 * was active.
-	 * This is safe because we create a new prefix and so the change
-	 * is noticed by prefix_evaluate().
-	 */
-	LIST_REMOVE(p, entry.list.rib);
-	prefix_evaluate(np, np->re);
+	/* remove possible pftable reference from old path first */
+	if (p->aspath && p->aspath->pftableid)
+		rde_pftable_del(p->aspath->pftableid, p);
 
 	/* remove old prefix node */
-	/* as before peer count needs no update because of move */
-
-	/* destroy all references to other objects and free the old prefix */
 	nexthop_unlink(p);
 	nexthop_unref(p->nexthop);
 	communities_unref(p->communities);
@@ -1109,7 +1096,7 @@ prefix_withdraw(struct rib *rib, struct rde_peer *peer,
 	asp = prefix_aspath(p);
 	if (asp && asp->pftableid)
 		/* only prefixes in the local RIB were pushed into pf */
-		rde_send_pftable(asp->pftableid, prefix, prefixlen, 1);
+		rde_pftable_del(asp->pftableid, p);
 
 	prefix_destroy(p);
 
@@ -1418,16 +1405,17 @@ prefix_write(u_char *buf, int len, struct bgpd_addr *prefix, u_int8_t plen,
 		memcpy(buf, &prefix->ba, totlen - 1);
 		return (totlen);
 	case AID_VPN_IPv4:
-		totlen = PREFIX_SIZE(plen) + sizeof(prefix->vpn4.rd);
+	case AID_VPN_IPv6:
+		totlen = PREFIX_SIZE(plen) + sizeof(prefix->rd);
 		psize = PREFIX_SIZE(plen) - 1;
-		plen += sizeof(prefix->vpn4.rd) * 8;
+		plen += sizeof(prefix->rd) * 8;
 		if (withdraw) {
 			/* withdraw have one compat label as placeholder */
 			totlen += 3;
 			plen += 3 * 8;
 		} else {
-			totlen += prefix->vpn4.labellen;
-			plen += prefix->vpn4.labellen * 8;
+			totlen += prefix->labellen;
+			plen += prefix->labellen * 8;
 		}
 
 		if (totlen > len)
@@ -1439,42 +1427,13 @@ prefix_write(u_char *buf, int len, struct bgpd_addr *prefix, u_int8_t plen,
 			*buf++ = 0x0;
 			*buf++ = 0x0;
 		} else  {
-			memcpy(buf, &prefix->vpn4.labelstack,
-			    prefix->vpn4.labellen);
-			buf += prefix->vpn4.labellen;
+			memcpy(buf, &prefix->labelstack,
+			    prefix->labellen);
+			buf += prefix->labellen;
 		}
-		memcpy(buf, &prefix->vpn4.rd, sizeof(prefix->vpn4.rd));
-		buf += sizeof(prefix->vpn4.rd);
-		memcpy(buf, &prefix->vpn4.addr, psize);
-		return (totlen);
-	case AID_VPN_IPv6:
-		totlen = PREFIX_SIZE(plen) + sizeof(prefix->vpn6.rd);
-		psize = PREFIX_SIZE(plen) - 1;
-		plen += sizeof(prefix->vpn6.rd) * 8;
-		if (withdraw) {
-			/* withdraw have one compat label as placeholder */
-			totlen += 3;
-			plen += 3 * 8;
-		} else {
-			totlen += prefix->vpn6.labellen;
-			plen += prefix->vpn6.labellen * 8;
-		}
-		if (totlen > len)
-			return (-1);
-		*buf++ = plen;
-		if (withdraw) {
-			/* magic compatibility label as per rfc8277 */
-			*buf++ = 0x80;
-			*buf++ = 0x0;
-			*buf++ = 0x0;
-		} else  {
-			memcpy(buf, &prefix->vpn6.labelstack,
-			    prefix->vpn6.labellen);
-			buf += prefix->vpn6.labellen;
-		}
-		memcpy(buf, &prefix->vpn6.rd, sizeof(prefix->vpn6.rd));
-		buf += sizeof(prefix->vpn6.rd);
-		memcpy(buf, &prefix->vpn6.addr, psize);
+		memcpy(buf, &prefix->rd, sizeof(prefix->rd));
+		buf += sizeof(prefix->rd);
+		memcpy(buf, &prefix->ba, psize);
 		return (totlen);
 	default:
 		return (-1);
@@ -1493,12 +1452,9 @@ prefix_writebuf(struct ibuf *buf, struct bgpd_addr *prefix, u_int8_t plen)
 		totlen = PREFIX_SIZE(plen);
 		break;
 	case AID_VPN_IPv4:
-		totlen = PREFIX_SIZE(plen) + sizeof(prefix->vpn4.rd) +
-		    prefix->vpn4.labellen;
-		break;
 	case AID_VPN_IPv6:
-		totlen = PREFIX_SIZE(plen) + sizeof(prefix->vpn6.rd) +
-		    prefix->vpn6.labellen;
+		totlen = PREFIX_SIZE(plen) + sizeof(prefix->rd) +
+		    prefix->labellen;
 		break;
 	default:
 		return (-1);
@@ -1552,18 +1508,7 @@ prefix_evaluate_all(struct prefix *p, enum nexthop_state state,
 	}
 
 	/* redo the route decision */
-	LIST_REMOVE(p, entry.list.rib);
-	/*
-	 * If the prefix is the active one remove it first,
-	 * this has to be done because we can not detect when
-	 * the active prefix changes its state. In this case
-	 * we know that this is a withdrawal and so the second
-	 * prefix_evaluate() will generate no update because
-	 * the nexthop is unreachable or ineligible.
-	 */
-	if (p == p->re->active)
-		prefix_evaluate(NULL, p->re);
-	prefix_evaluate(p, p->re);
+	prefix_evaluate(p->re, p, p);
 }
 
 /* kill a prefix. */
@@ -1571,8 +1516,7 @@ void
 prefix_destroy(struct prefix *p)
 {
 	/* make route decision */
-	LIST_REMOVE(p, entry.list.rib);
-	prefix_evaluate(NULL, p->re);
+	prefix_evaluate(p->re, NULL, p);
 
 	prefix_unlink(p);
 	prefix_free(p);
@@ -1597,8 +1541,12 @@ prefix_link(struct prefix *p, struct rib_entry *re, struct rde_peer *peer,
 	nexthop_link(p);
 	p->lastchange = getmonotime();
 
+	/* add possible pftable reference from aspath */
+	if (asp && asp->pftableid)
+		rde_pftable_add(asp->pftableid, p);
+
 	/* make route decision */
-	prefix_evaluate(p, re);
+	prefix_evaluate(re, p, NULL);
 }
 
 /*
@@ -1992,7 +1940,7 @@ nexthop_hash(struct bgpd_addr *nexthop)
 		    sizeof(struct in6_addr));
 		break;
 	default:
-		fatalx("nexthop_hash: unsupported AF");
+		fatalx("nexthop_hash: unsupported AID %d", nexthop->aid);
 	}
 	return (&nexthoptable.nexthop_hashtbl[h & nexthoptable.nexthop_hashmask]);
 }

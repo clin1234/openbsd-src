@@ -1,4 +1,4 @@
-#	$OpenBSD: install.md,v 1.14 2019/11/17 06:03:39 jsg Exp $
+#	$OpenBSD: install.md,v 1.19 2021/06/07 07:38:55 kettenis Exp $
 #
 #
 # Copyright (c) 1996 The NetBSD Foundation, Inc.
@@ -39,15 +39,19 @@ MOUNT_ARGS_msdos="-o-l"
 md_installboot() {
 	local _disk=/dev/$1 _mdec _plat
 
-	case $(sysctl -n hw.product) in
-	Pine64*(+))			_plat=pine64;;
-	*'Raspberry Pi'*)		_plat=rpi;;
+	case $(sysctl -n machdep.compatible) in
+	pine64,pine64*(+))	_plat=pine64;;
+	raspberrypi,*)		_plat=rpi;
 	esac
 
-	# Mount MSDOS partition, extract U-Boot and copy UEFI boot program
+	if ! installboot -r /mnt ${1}; then
+		echo "\nFailed to install bootblocks."
+		echo "You will not be able to boot OpenBSD from ${1}."
+		exit
+	fi
+
+	# Mount MSDOS partition to do some final tweaks
 	mount ${MOUNT_ARGS_msdos} ${_disk}i /mnt/mnt
-	mkdir -p /mnt/mnt/efi/boot
-	cp /mnt/usr/mdec/BOOTAA64.EFI /mnt/mnt/efi/boot/bootaa64.efi
 	echo bootaa64.efi > /mnt/mnt/efi/boot/startup.nsh
 
 	_mdec=/usr/mdec/$_plat
@@ -58,7 +62,7 @@ md_installboot() {
 		    bs=1024 seek=8 >/dev/null 2>&1
 		;;
 	rpi)
-		cp $_mdec/{bootcode.bin,start.elf,fixup.dat,*.dtb} /mnt/mnt/
+		cp $_mdec/{bootcode.bin,start*.elf,fixup*.dat,*.dtb} /mnt/mnt/
 		cp $_mdec/u-boot.bin /mnt/mnt/
 		mkdir -p /mnt/mnt/overlays
 		cp $_mdec/disable-bt.dtbo /mnt/mnt/overlays
@@ -73,7 +77,11 @@ md_installboot() {
 }
 
 md_prep_fdisk() {
-	local _disk=$1 _d
+	local _disk=$1 _d _plat
+
+	case $(sysctl -n machdep.compatible) in
+	apple,*)	_plat=apple;;
+	esac
 
 	local bootparttype="C"
 	local bootsectorstart="32768"
@@ -86,12 +94,19 @@ md_prep_fdisk() {
 		_d=whole
 		if disk_has $_disk mbr; then
 			fdisk $_disk
+		elif disk_has $_disk gpt; then
+		     	fdisk $_disk
+			[[ $_plat == apple ]] && _d=edit
 		else
 			echo "MBR has invalid signature; not showing it."
 		fi
 		ask "Use (W)hole disk or (E)dit the MBR?" "$_d"
 		case $resp in
 		[wW]*)
+			if disk_has $_disk gpt apfsisc; then
+				echo "(W)hole disk can not be used on Apple NVMe storage!"
+				continue
+			fi
 			echo -n "Creating a ${bootfstype} partition and an OpenBSD partition for rest of $_disk..."
 			fdisk -e ${_disk} <<__EOT >/dev/null
 reinit
@@ -114,8 +129,31 @@ __EOT
 			newfs -t ${bootfstype} ${newfs_args} ${_disk}i
 			return ;;
 		[eE]*)
-			# Manually configure the MBR.
-			cat <<__EOT
+			if disk_has $_disk gpt; then
+				# Manually configure the GPT.
+				cat <<__EOT
+
+You will now create two GPT partitions. The first must have an id
+of 'EF' and be large enough to contain the OpenBSD boot programs,
+at least 32768 blocks. The second must have an id of 'A6' and will
+contain your OpenBSD data. Neither may overlap other partitions.
+Inside the fdisk command, the 'manual' command describes the fdisk
+commands in detail.
+
+$(fdisk $_disk)
+__EOT
+				fdisk -e $_disk
+
+				if ! disk_has $_disk gpt openbsd; then
+					echo -n "No OpenBSD partition in GPT,"
+				elif ! disk_has $_disk gpt efisys; then
+					echo -n "No EFI Sys partition in GPT,"
+				else
+					return
+				fi
+			else
+				# Manually configure the MBR.
+				cat <<__EOT
 
 You will now create one MBR partition to contain your OpenBSD data
 and one MBR partition on which the OpenBSD boot program is located.
@@ -128,9 +166,11 @@ partition on the disk.
 
 $(fdisk ${_disk})
 __EOT
-			fdisk -e ${_disk}
-			disk_has $_disk mbr openbsd && return
-			echo No OpenBSD partition in MBR, try again. ;;
+				fdisk -e ${_disk}
+				disk_has $_disk mbr openbsd && return
+				echo -n "No OpenBSD partition in MBR,"
+			fi
+			echo "try again." ;;
 		esac
 	done
 }

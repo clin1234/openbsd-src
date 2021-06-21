@@ -1,4 +1,4 @@
-/* $OpenBSD: dsdt.c,v 1.256 2020/09/27 16:46:15 kettenis Exp $ */
+/* $OpenBSD: dsdt.c,v 1.263 2021/05/22 13:13:14 kettenis Exp $ */
 /*
  * Copyright (c) 2005 Jordan Hargrave <jordan@openbsd.org>
  *
@@ -965,6 +965,7 @@ aml_copyvalue(struct aml_value *lhs, struct aml_value *rhs)
 		lhs->v_mutex = rhs->v_mutex;
 		break;
 	case AML_OBJTYPE_POWERRSRC:
+		lhs->node = rhs->node;
 		lhs->v_powerrsrc = rhs->v_powerrsrc;
 		break;
 	case AML_OBJTYPE_METHOD:
@@ -980,6 +981,7 @@ aml_copyvalue(struct aml_value *lhs, struct aml_value *rhs)
 		lhs->v_opregion = rhs->v_opregion;
 		break;
 	case AML_OBJTYPE_PROCESSOR:
+		lhs->node = rhs->node;
 		lhs->v_processor = rhs->v_processor;
 		break;
 	case AML_OBJTYPE_NAMEREF:
@@ -995,6 +997,8 @@ aml_copyvalue(struct aml_value *lhs, struct aml_value *rhs)
 		aml_addref(lhs->v_objref.ref, "");
 		break;
 	case AML_OBJTYPE_DEVICE:
+	case AML_OBJTYPE_THERMZONE:
+		lhs->node = rhs->node;
 		break;
 	default:
 		printf("copyvalue: %x", rhs->type);
@@ -1035,10 +1039,8 @@ aml_freevalue(struct aml_value *val)
 		acpi_os_free(val->v_buffer);
 		break;
 	case AML_OBJTYPE_PACKAGE:
-		for (idx = 0; idx < val->length; idx++) {
-			aml_freevalue(val->v_package[idx]);
-			acpi_os_free(val->v_package[idx]);
-		}
+		for (idx = 0; idx < val->length; idx++)
+			aml_delref(&val->v_package[idx], "");
 		acpi_os_free(val->v_package);
 		break;
 	case AML_OBJTYPE_OBJREF:
@@ -1471,11 +1473,11 @@ struct aml_defval {
 	{ "_OSI", AML_OBJTYPE_METHOD, 1, aml_callosi },
 
 	/* Create default scopes */
-	{ "_GPE" },
-	{ "_PR_" },
-	{ "_SB_" },
-	{ "_TZ_" },
-	{ "_SI_" },
+	{ "_GPE", AML_OBJTYPE_DEVICE },
+	{ "_PR_", AML_OBJTYPE_DEVICE },
+	{ "_SB_", AML_OBJTYPE_DEVICE },
+	{ "_TZ_", AML_OBJTYPE_DEVICE },
+	{ "_SI_", AML_OBJTYPE_DEVICE },
 
 	{ NULL }
 };
@@ -1687,7 +1689,7 @@ int aml_fixup_node(struct aml_node *node, void *arg)
 	if (arg == NULL)
 		aml_fixup_node(node, node->value);
 	else if (val->type == AML_OBJTYPE_NAMEREF) {
-		node = aml_searchname(node, val->v_nameref);
+		node = aml_searchname(node, aml_getname(val->v_nameref));
 		if (node && node->value) {
 			_aml_setvalue(val, AML_OBJTYPE_OBJREF, AMLOP_NAMECHAR,
 			    node->value);
@@ -2525,7 +2527,7 @@ aml_rwgpio(struct aml_value *conn, int bpos, int blen, struct aml_value *val,
 #ifndef SMALL_KERNEL
 
 void
-aml_rwgsb(struct aml_value *conn, int alen, int bpos, int blen,
+aml_rwgsb(struct aml_value *conn, int len, int bpos, int blen,
     struct aml_value *val, int mode, int flag)
 {
 	union acpi_resource *crs = (union acpi_resource *)conn->v_buffer;
@@ -2534,7 +2536,7 @@ aml_rwgsb(struct aml_value *conn, int alen, int bpos, int blen,
 	i2c_op_t op;
 	i2c_addr_t addr;
 	int cmdlen, buflen;
-	uint8_t cmd;
+	uint8_t cmd[2];
 	uint8_t *buf;
 	int err;
 
@@ -2543,14 +2545,11 @@ aml_rwgsb(struct aml_value *conn, int alen, int bpos, int blen,
 	    crs->lr_i2cbus.revid != 1 || crs->lr_i2cbus.type != LR_SERBUS_I2C)
 		aml_die("Invalid GenericSerialBus");
 	if (AML_FIELD_ACCESS(flag) != AML_FIELD_BUFFERACC ||
-	    bpos & 0x3 || blen != 8)
+	    bpos & 0x3 || (blen % 8) != 0 || blen > 16)
 		aml_die("Invalid GenericSerialBus access");
 
 	node = aml_searchname(conn->node,
 	    (char *)&crs->lr_i2cbus.vdata[crs->lr_i2cbus.tlength - 6]);
-
-	if (node == NULL || node->i2c == NULL)
-		aml_die("Could not find GenericSerialBus controller");
 
 	switch (((flag >> 6) & 0x3)) {
 	case 0:			/* Normal */
@@ -2564,20 +2563,20 @@ aml_rwgsb(struct aml_value *conn, int alen, int bpos, int blen,
 			buflen = 1;
 			break;
 		case 0x06:	/* AttribByte */
-			cmdlen = 1;
+			cmdlen = blen / 8;
 			buflen = 1;
 			break;
 		case 0x08:	/* AttribWord */
-			cmdlen = 1;
+			cmdlen = blen / 8;
 			buflen = 2;
 			break;
 		case 0x0b:	/* AttribBytes */
-			cmdlen = 1;
-			buflen = alen;
+			cmdlen = blen / 8;
+			buflen = len;
 			break;
 		case 0x0e:	/* AttribRawBytes */
 			cmdlen = 0;
-			buflen = alen;
+			buflen = len;
 			break;
 		default:
 			aml_die("unsupported access type 0x%x", flag);
@@ -2585,7 +2584,7 @@ aml_rwgsb(struct aml_value *conn, int alen, int bpos, int blen,
 		}
 		break;
 	case 1:			/* AttribBytes */
-		cmdlen = 1;
+		cmdlen = blen / 8;
 		buflen = AML_FIELD_ATTR(flag);
 		break;
 	case 2:			/* AttribRawBytes */
@@ -2604,10 +2603,21 @@ aml_rwgsb(struct aml_value *conn, int alen, int bpos, int blen,
 		op = I2C_OP_WRITE_WITH_STOP;
 	}
 
+	buf = val->v_buffer;
+
+	/*
+	 * Return an error if we can't find the I2C controller that
+	 * we're supposed to use for this request.
+	 */
+	if (node == NULL || node->i2c == NULL) {
+		buf[0] = EIO;
+		return;
+	}
+
 	tag = node->i2c;
 	addr = crs->lr_i2cbus._adr;
-	cmd = bpos >> 3;
-	buf = val->v_buffer;
+	cmd[0] = bpos >> 3;
+	cmd[1] = bpos >> 11;
 
 	iic_acquire_bus(tag, 0);
 	err = iic_exec(tag, op, addr, &cmd, cmdlen, &buf[2], buflen, 0);
@@ -2620,6 +2630,62 @@ aml_rwgsb(struct aml_value *conn, int alen, int bpos, int blen,
 	 * numbers should fit in a single byte.
 	 */
 	buf[0] = err;
+}
+
+#else
+
+/*
+ * We don't support GenericSerialBus in RAMDISK kernels.  Provide a
+ * dummy implementation that returns a non-zero error status.
+ */
+
+void
+aml_rwgsb(struct aml_value *conn, int len, int bpos, int blen,
+    struct aml_value *val, int mode, int flag)
+{
+	int buflen;
+	uint8_t *buf;
+
+	if (AML_FIELD_ACCESS(flag) != AML_FIELD_BUFFERACC ||
+	    bpos & 0x3 || (blen % 8) != 0 || blen > 16)
+		aml_die("Invalid GenericSerialBus access");
+
+	switch (((flag >> 6) & 0x3)) {
+	case 0:			/* Normal */
+		switch (AML_FIELD_ATTR(flag)) {
+		case 0x02:	/* AttribQuick */
+			buflen = 0;
+			break;
+		case 0x04:	/* AttribSendReceive */
+		case 0x06:	/* AttribByte */
+			buflen = 1;
+			break;
+		case 0x08:	/* AttribWord */
+			buflen = 2;
+			break;
+		case 0x0b:	/* AttribBytes */
+		case 0x0e:	/* AttribRawBytes */
+			buflen = len;
+			break;
+		default:
+			aml_die("unsupported access type 0x%x", flag);
+			break;
+		}
+		break;
+	case 1:			/* AttribBytes */
+	case 2:			/* AttribRawBytes */
+		buflen = AML_FIELD_ATTR(flag);
+		break;
+	default:
+		aml_die("unsupported access type 0x%x", flag);
+		break;
+	}
+
+	if (mode == ACPI_IOREAD)
+		_aml_setvalue(val, AML_OBJTYPE_BUFFER, buflen + 2, NULL);
+
+	buf = val->v_buffer;
+	buf[0] = EIO;
 }
 
 #endif
@@ -2725,13 +2791,11 @@ aml_rwfield(struct aml_value *fld, int bpos, int blen, struct aml_value *val,
 			aml_rwgpio(ref2, bpos, blen, val, mode,
 			    fld->v_field.flags);
 			break;
-#ifndef SMALL_KERNEL
 		case ACPI_OPREG_GSB:
 			aml_rwgsb(ref2, fld->v_field.ref3,
 			    fld->v_field.bitpos + bpos, blen,
 			    val, mode, fld->v_field.flags);
 			break;
-#endif
 		default:
 			aml_rwgen(ref1, fld->v_field.bitpos + bpos, blen,
 			    val, mode, fld->v_field.flags);
@@ -2964,6 +3028,10 @@ aml_store(struct aml_scope *scope, struct aml_value *lhs , int64_t ival,
 		aml_freevalue(lhs);
 
 	lhs = aml_gettgt(lhs, AMLOP_STORE);
+
+	/* Store to LocalX: free value again */
+	if (lhs->stack >= AMLOP_LOCAL0 && lhs->stack <= AMLOP_LOCAL7)
+		aml_freevalue(lhs);
 	switch (lhs->type) {
 	case AML_OBJTYPE_UNINITIALIZED:
 		aml_copyvalue(lhs, rhs);
@@ -3002,9 +3070,11 @@ aml_store(struct aml_scope *scope, struct aml_value *lhs , int64_t ival,
 		aml_copyvalue(lhs, rhs);
 		break;
 	case AML_OBJTYPE_NAMEREF:
-		node = __aml_searchname(scope->node, lhs->v_nameref, 1);
+		node = __aml_searchname(scope->node,
+		    aml_getname(lhs->v_nameref), 1);
 		if (node == NULL) {
-			aml_die("Could not create node %s", lhs->v_nameref);
+			aml_die("Could not create node %s",
+			    aml_getname(lhs->v_nameref));
 		}
 		aml_copyvalue(node->value, rhs);
 		break;
@@ -3875,17 +3945,13 @@ aml_parse(struct aml_scope *scope, int ret_type, const char *stype)
 	case AMLOP_NAMECHAR:
 		/* opargs[0] = named object (node != NULL), or nameref */
 		my_ret = opargs[0];
-		if (scope->type == AMLOP_PACKAGE) {
+		if (scope->type == AMLOP_PACKAGE && my_ret->node) {
 			/* Special case for package */
-			if (my_ret->type == AML_OBJTYPE_NAMEREF)
-				my_ret = aml_allocvalue(AML_OBJTYPE_STRING, -1,
-				    aml_getname(my_ret->v_nameref));
-			else if (my_ret->node)
-				my_ret = aml_allocvalue(AML_OBJTYPE_STRING, -1,
-				    aml_nodename(my_ret->node));
-			break;
-		}
-		if (my_ret->type == AML_OBJTYPE_OBJREF) {
+			my_ret = aml_allocvalue(AML_OBJTYPE_OBJREF,
+			    AMLOP_NAMECHAR, 0);
+			my_ret->v_objref.ref = opargs[0];
+			aml_addref(my_ret, "package");
+		} else if (my_ret->type == AML_OBJTYPE_OBJREF) {
 			my_ret = my_ret->v_objref.ref;
 			aml_addref(my_ret, "de-alias");
 		}
@@ -4617,15 +4683,27 @@ acpi_getdevlist(struct acpi_devlist_head *list, struct aml_node *root,
     struct aml_value *pkg, int off)
 {
 	struct acpi_devlist *dl;
+	struct aml_value *val;
 	struct aml_node *node;
 	int idx;
 
-	for (idx=off; idx<pkg->length; idx++) {
-		node = aml_searchname(root, pkg->v_package[idx]->v_string);
-		if (node) {
+	for (idx = off; idx < pkg->length; idx++) {
+		val = pkg->v_package[idx];
+		if (val->type == AML_OBJTYPE_NAMEREF) {
+			node = aml_searchrel(root, aml_getname(val->v_nameref));
+			if (node == NULL) {
+				printf("%s: device %s not found\n", __func__,
+				    aml_getname(val->v_nameref));
+				continue;
+			}
+			val = node->value;
+		}
+		if (val->type == AML_OBJTYPE_OBJREF)
+			val = val->v_objref.ref;
+		if (val->node) {
 			dl = acpi_os_malloc(sizeof(*dl));
 			if (dl) {
-				dl->dev_node = node;
+				dl->dev_node = val->node;
 				TAILQ_INSERT_TAIL(list, dl, dev_link);
 			}
 		}
@@ -4642,4 +4720,5 @@ acpi_freedevlist(struct acpi_devlist_head *list)
 		acpi_os_free(dl);
 	}
 }
+
 #endif /* SMALL_KERNEL */

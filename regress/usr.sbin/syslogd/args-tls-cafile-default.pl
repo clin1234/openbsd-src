@@ -7,7 +7,11 @@
 
 use strict;
 use warnings;
+use Errno ':POSIX';
 use Socket;
+
+my @errors = (EPIPE);
+my $errors = "(". join("|", map { $! = $_ } @errors). ")";
 
 our %args = (
     syslogd => {
@@ -20,7 +24,7 @@ our %args = (
 	    qr/Logging to FORWTLS \@tls:\/\/localhost:\d+/ => '>=4',
 	    qr/syslogd\[\d+\]: loghost .* connection error: /.
 		qr/certificate verification failed: /.
-		qr/unable to get local issuer certificate/ => 1,
+		qr/self signed certificate in certificate chain/ => 1,
 	    get_testgrep() => 1,
 	},
 	cacrt => "default",
@@ -32,8 +36,9 @@ our %args = (
 	exit => 255,
 	loggrep => {
 	    qr/listen sock: (127.0.0.1|::1) \d+/ => 1,
-	    qr/SSL accept attempt failed error:/.
-		qr/.*ST_ACCEPT:tlsv1 alert unknown ca/ => 1,
+	    qr/IO::Socket::SSL socket accept failed: /.
+		qr/.*,SSL accept attempt failed error:.*/.
+		qr/(ST_ACCEPT:tlsv1 alert unknown ca|$errors)/ => 1,
 	    get_testgrep() => 0,
 	},
     },

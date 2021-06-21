@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mcx.c,v 1.75 2020/11/06 02:50:02 jmatthew Exp $ */
+/*	$OpenBSD: if_mcx.c,v 1.101 2021/06/02 19:16:11 patrick Exp $ */
 
 /*
  * Copyright (c) 2017 David Gwynne <dlg@openbsd.org>
@@ -33,6 +33,8 @@
 #include <sys/timeout.h>
 #include <sys/task.h>
 #include <sys/atomic.h>
+#include <sys/timetc.h>
+#include <sys/intrmap.h>
 
 #include <machine/bus.h>
 #include <machine/intr.h>
@@ -83,7 +85,7 @@
 #define MCX_LOG_RQ_SIZE			10
 #define MCX_LOG_SQ_SIZE			11
 
-#define MCX_MAX_QUEUES			1
+#define MCX_MAX_QUEUES			16
 
 /* completion event moderation - about 10khz, or 90% of the cq */
 #define MCX_CQ_MOD_PERIOD		50
@@ -163,6 +165,7 @@ CTASSERT(MCX_MAX_QUEUES * MCX_WQ_DOORBELL_STRIDE <
 #define MCX_REG_MTCAP			0x9009 /* mgmt temp capabilities */
 #define MCX_REG_MTMP			0x900a /* mgmt temp */
 #define MCX_REG_MCIA			0x9014
+#define MCX_REG_MCAM			0x907f
 
 #define MCX_ETHER_CAP_SGMII		0
 #define MCX_ETHER_CAP_1000_KX		1
@@ -568,6 +571,22 @@ enum mcx_ppcnt_rfc3635 {
 };
 CTASSERT((mcx_ppcnt_rfc3635_count * sizeof(uint64_t)) == 0x80);
 
+struct mcx_reg_mcam {
+	uint8_t			_reserved1[1];
+	uint8_t			mcam_feature_group;
+	uint8_t			_reserved2[1];
+	uint8_t			mcam_access_reg_group;
+	uint8_t			_reserved3[4];
+	uint8_t			mcam_access_reg_cap_mask[16];
+	uint8_t			_reserved4[16];
+	uint8_t			mcam_feature_cap_mask[16];
+	uint8_t			_reserved5[16];
+} __packed __aligned(4);
+
+#define MCX_BITFIELD_BIT(bf, b)	(bf[(sizeof bf - 1) - (b / 8)] & (b % 8))
+
+#define MCX_MCAM_FEATURE_CAP_SENSOR_MAP	6
+
 struct mcx_reg_mtcap {
 	uint8_t			_reserved1[3];
 	uint8_t			mtcap_sensor_count;
@@ -835,6 +854,7 @@ struct mcx_cap_device {
 	uint8_t			local_ca_ack_delay; /* 5 bits */
 #define MCX_CAP_DEVICE_LOCAL_CA_ACK_DELAY \
 					0x1f
+#define MCX_CAP_DEVICE_MCAM_REG		0x40
 	uint8_t			port_type;
 #define MCX_CAP_DEVICE_PORT_MODULE_EVENT \
 					0x80
@@ -983,6 +1003,76 @@ struct mcx_cap_device {
 	uint8_t			log_max_tis_per_sq; /* 5 bits */
 #define MCX_CAP_DEVICE_LOG_MAX_TIS_PER_SQ \
 					0x1f
+
+	uint8_t			flags9;
+#define MXC_CAP_DEVICE_EXT_STRIDE_NUM_RANGES \
+					0x80
+#define MXC_CAP_DEVICE_LOG_MAX_STRIDE_SZ_RQ \
+					0x1f
+	uint8_t			log_min_stride_sz_rq; /* 5 bits */
+#define MXC_CAP_DEVICE_LOG_MIN_STRIDE_SZ_RQ \
+					0x1f
+	uint8_t			log_max_stride_sz_sq; /* 5 bits */
+#define MXC_CAP_DEVICE_LOG_MAX_STRIDE_SZ_SQ \
+					0x1f
+	uint8_t			log_min_stride_sz_sq; /* 5 bits */
+#define MXC_CAP_DEVICE_LOG_MIN_STRIDE_SZ_SQ \
+					0x1f
+
+	uint8_t			log_max_hairpin_queues;
+#define MXC_CAP_DEVICE_HAIRPIN		0x80
+#define MXC_CAP_DEVICE_LOG_MAX_HAIRPIN_QUEUES \
+					0x1f
+	uint8_t			log_min_hairpin_queues;
+#define MXC_CAP_DEVICE_LOG_MIN_HAIRPIN_QUEUES \
+					0x1f
+	uint8_t			log_max_hairpin_num_packets;
+#define MXC_CAP_DEVICE_LOG_MAX_HAIRPIN_NUM_PACKETS \
+					0x1f
+	uint8_t			log_max_mq_sz;
+#define MXC_CAP_DEVICE_LOG_MAX_WQ_SZ \
+					0x1f
+
+	uint8_t			log_min_hairpin_wq_data_sz;
+#define MXC_CAP_DEVICE_NIC_VPORT_CHANGE_EVENT \
+					0x80
+#define MXC_CAP_DEVICE_DISABLE_LOCAL_LB_UC \
+					0x40
+#define MXC_CAP_DEVICE_DISABLE_LOCAL_LB_MC \
+					0x20
+#define MCX_CAP_DEVICE_LOG_MIN_HAIRPIN_WQ_DATA_SZ \
+					0x1f
+	uint8_t			log_max_vlan_list;
+#define MXC_CAP_DEVICE_SYSTEM_IMAGE_GUID_MODIFIABLE \
+					0x80
+#define MXC_CAP_DEVICE_LOG_MAX_VLAN_LIST \
+					0x1f
+	uint8_t			log_max_current_mc_list;
+#define MXC_CAP_DEVICE_LOG_MAX_CURRENT_MC_LIST \
+					0x1f
+	uint8_t			log_max_current_uc_list;
+#define MXC_CAP_DEVICE_LOG_MAX_CURRENT_UC_LIST \
+					0x1f
+
+	uint8_t			__reserved__[4];
+
+	uint32_t		create_qp_start_hint; /* 24 bits */
+
+	uint8_t			log_max_uctx; /* 5 bits */
+#define MXC_CAP_DEVICE_LOG_MAX_UCTX	0x1f
+	uint8_t			log_max_umem; /* 5 bits */
+#define MXC_CAP_DEVICE_LOG_MAX_UMEM	0x1f
+	uint16_t		max_num_eqs;
+
+	uint8_t			log_max_l2_table; /* 5 bits */
+#define MXC_CAP_DEVICE_LOG_MAX_L2_TABLE	0x1f
+	uint8_t			__reserved__[1];
+	uint16_t		log_uar_page_sz;
+
+	uint8_t			__reserved__[8];
+
+	uint32_t		device_frequency_mhz;
+	uint32_t		device_frequency_khz;
 } __packed __aligned(8);
 
 CTASSERT(offsetof(struct mcx_cap_device, max_indirection) == 0x20);
@@ -991,6 +1081,8 @@ CTASSERT(offsetof(struct mcx_cap_device, flags2) == 0x30);
 CTASSERT(offsetof(struct mcx_cap_device, snapshot_log_max_msg) == 0x38);
 CTASSERT(offsetof(struct mcx_cap_device, flags5) == 0x40);
 CTASSERT(offsetof(struct mcx_cap_device, flags7) == 0x4c);
+CTASSERT(offsetof(struct mcx_cap_device, device_frequency_mhz) == 0x98);
+CTASSERT(offsetof(struct mcx_cap_device, device_frequency_khz) == 0x9c);
 CTASSERT(sizeof(struct mcx_cap_device) <= MCX_CMDQ_MAILBOX_DATASIZE);
 
 struct mcx_cmd_set_driver_version_in {
@@ -2147,6 +2239,7 @@ struct mcx_dmamem {
 #define MCX_DMA_MAP(_mxm)	((_mxm)->mxm_map)
 #define MCX_DMA_DVA(_mxm)	((_mxm)->mxm_map->dm_segs[0].ds_addr)
 #define MCX_DMA_KVA(_mxm)	((void *)(_mxm)->mxm_kva)
+#define MCX_DMA_OFF(_mxm, _off)	((void *)((_mxm)->mxm_kva + (_off)))
 #define MCX_DMA_LEN(_mxm)	((_mxm)->mxm_size)
 
 struct mcx_hwmem {
@@ -2170,7 +2263,7 @@ struct mcx_eq {
 struct mcx_cq {
 	int			 cq_n;
 	struct mcx_dmamem	 cq_mem;
-	uint32_t		*cq_doorbell;
+	bus_addr_t		 cq_doorbell;
 	uint32_t		 cq_cons;
 	uint32_t		 cq_count;
 };
@@ -2180,12 +2273,11 @@ struct mcx_calibration {
 	uint64_t		 c_uptime;	/* previous kernel nanouptime */
 	uint64_t		 c_tbase;	/* mcx chip time */
 	uint64_t		 c_ubase;	/* kernel nanouptime */
-	uint64_t		 c_tdiff;
-	uint64_t		 c_udiff;
+	uint64_t		 c_ratio;
 };
 
 #define MCX_CALIBRATE_FIRST    2
-#define MCX_CALIBRATE_NORMAL   30
+#define MCX_CALIBRATE_NORMAL   32
 
 struct mcx_rx {
 	struct mcx_softc	*rx_softc;
@@ -2194,7 +2286,7 @@ struct mcx_rx {
 	int			 rx_rqn;
 	struct mcx_dmamem	 rx_rq_mem;
 	struct mcx_slot		*rx_slots;
-	uint32_t		*rx_doorbell;
+	bus_addr_t		 rx_doorbell;
 
 	uint32_t		 rx_prod;
 	struct timeout		 rx_refill;
@@ -2209,7 +2301,7 @@ struct mcx_tx {
 	int			 tx_sqn;
 	struct mcx_dmamem	 tx_sq_mem;
 	struct mcx_slot		*tx_slots;
-	uint32_t		*tx_doorbell;
+	bus_addr_t		 tx_doorbell;
 	int			 tx_bf_offset;
 
 	uint32_t		 tx_cons;
@@ -2383,9 +2475,13 @@ struct mcx_softc {
 	struct mcx_calibration	 sc_calibration[2];
 	unsigned int		 sc_calibration_gen;
 	struct timeout		 sc_calibrate;
+	uint32_t		 sc_mhz;
+	uint32_t		 sc_khz;
 
-	struct mcx_queues	 sc_queues[MCX_MAX_QUEUES];
-	unsigned int		 sc_nqueues;
+	struct intrmap		*sc_intrmap;
+	struct mcx_queues	*sc_queues;
+
+	int			 sc_mcam_reg;
 
 #if NKSTAT > 0
 	struct kstat		*sc_kstat_ieee8023;
@@ -2395,6 +2491,8 @@ struct mcx_softc {
 	unsigned int		 sc_kstat_mtmp_count;
 	struct kstat		**sc_kstat_mtmp;
 #endif
+
+	struct timecounter	 sc_timecounter;
 };
 #define DEVNAME(_sc) ((_sc)->sc_dev.dv_xname)
 
@@ -2404,6 +2502,8 @@ static void	mcx_attach(struct device *, struct device *, void *);
 #if NKSTAT > 0
 static void	mcx_kstat_attach(struct mcx_softc *);
 #endif
+
+static void	mcx_timecounter_attach(struct mcx_softc *);
 
 static int	mcx_version(struct mcx_softc *);
 static int	mcx_init_wait(struct mcx_softc *);
@@ -2479,8 +2579,8 @@ static void	mcx_refill(void *);
 static int	mcx_process_rx(struct mcx_softc *, struct mcx_rx *,
 		    struct mcx_cq_entry *, struct mbuf_list *,
 		    const struct mcx_calibration *);
-static void	mcx_process_txeof(struct mcx_softc *, struct mcx_tx *,
-		    struct mcx_cq_entry *, int *);
+static int	mcx_process_txeof(struct mcx_softc *, struct mcx_tx *,
+		    struct mcx_cq_entry *);
 static void	mcx_process_cq(struct mcx_softc *, struct mcx_queues *,
 		    struct mcx_cq *);
 
@@ -2731,6 +2831,12 @@ mcx_attach(struct device *parent, struct device *self, void *aux)
 		goto teardown;
 	}
 
+	msix = pci_intr_msix_count(pa->pa_pc, pa->pa_tag);
+	if (msix < 2) {
+		printf(": not enough msi-x vectors\n");
+		goto teardown;
+	}
+
 	/*
 	 * PRM makes no mention of msi interrupts, just legacy and msi-x.
 	 * mellanox support tells me legacy interrupts are not supported,
@@ -2778,8 +2884,19 @@ mcx_attach(struct device *parent, struct device *self, void *aux)
 	printf(", %s, address %s\n", intrstr,
 	    ether_sprintf(sc->sc_ac.ac_enaddr));
 
-	msix = pci_intr_msix_count(pa->pa_pc, pa->pa_tag);
-	sc->sc_nqueues = 1;
+	msix--; /* admin ops took one */
+	sc->sc_intrmap = intrmap_create(&sc->sc_dev, msix, MCX_MAX_QUEUES,
+	    INTRMAP_POWEROF2);
+	if (sc->sc_intrmap == NULL) {
+		printf("%s: unable to create interrupt map\n", DEVNAME(sc));
+		goto teardown;
+	}
+	sc->sc_queues = mallocarray(intrmap_count(sc->sc_intrmap),
+	    sizeof(*sc->sc_queues), M_DEVBUF, M_WAITOK|M_ZERO);
+	if (sc->sc_queues == NULL) {
+		printf("%s: unable to create queues\n", DEVNAME(sc));
+		goto intrunmap;
+	}
 
 	strlcpy(ifp->if_xname, DEVNAME(sc), IFNAMSIZ);
 	ifp->if_softc = sc;
@@ -2806,9 +2923,9 @@ mcx_attach(struct device *parent, struct device *self, void *aux)
 	if_attach(ifp);
 	ether_ifattach(ifp);
 
-	if_attach_iqueues(ifp, sc->sc_nqueues);
-	if_attach_queues(ifp, sc->sc_nqueues);
-	for (i = 0; i < sc->sc_nqueues; i++) {
+	if_attach_iqueues(ifp, intrmap_count(sc->sc_intrmap));
+	if_attach_queues(ifp, intrmap_count(sc->sc_intrmap));
+	for (i = 0; i < intrmap_count(sc->sc_intrmap); i++) {
 		struct ifiqueue *ifiq = ifp->if_iqs[i];
 		struct ifqueue *ifq = ifp->if_ifqs[i];
 		struct mcx_queues *q = &sc->sc_queues[i];
@@ -2824,13 +2941,13 @@ mcx_attach(struct device *parent, struct device *self, void *aux)
 		if (mcx_alloc_uar(sc, &q->q_uar) != 0) {
 			printf("%s: unable to alloc uar %d\n",
 			    DEVNAME(sc), i);
-			goto teardown;
+			goto intrdisestablish;
 		}
 
 		if (mcx_create_eq(sc, &q->q_eq, q->q_uar, 0, vec) != 0) {
 			printf("%s: unable to create event queue %d\n",
 			    DEVNAME(sc), i);
-			goto teardown;
+			goto intrdisestablish;
 		}
 
 		rx->rx_softc = sc;
@@ -2842,15 +2959,21 @@ mcx_attach(struct device *parent, struct device *self, void *aux)
 		tx->tx_ifq = ifq;
 		ifq->ifq_softc = tx;
 
-		if (pci_intr_map_msix(pa, i + 1, &ih) != 0) {
+		if (pci_intr_map_msix(pa, vec, &ih) != 0) {
 			printf("%s: unable to map queue interrupt %d\n",
 			    DEVNAME(sc), i);
-			goto teardown;
+			goto intrdisestablish;
 		}
 		snprintf(q->q_name, sizeof(q->q_name), "%s:%d",
 		    DEVNAME(sc), i);
-		q->q_ihc = pci_intr_establish(sc->sc_pc, ih,
-		    IPL_NET | IPL_MPSAFE, mcx_cq_intr, q, q->q_name);
+		q->q_ihc = pci_intr_establish_cpu(sc->sc_pc, ih,
+		    IPL_NET | IPL_MPSAFE, intrmap_cpu(sc->sc_intrmap, i),
+		    mcx_cq_intr, q, q->q_name);
+		if (q->q_ihc == NULL) {
+			printf("%s: unable to establish interrupt %d\n",
+			    DEVNAME(sc), i);
+			goto intrdisestablish;
+		}
 	}
 
 	timeout_set(&sc->sc_calibrate, mcx_calibrate, sc);
@@ -2874,8 +2997,22 @@ mcx_attach(struct device *parent, struct device *self, void *aux)
 #if NKSTAT > 0
 	mcx_kstat_attach(sc);
 #endif
+	mcx_timecounter_attach(sc);
 	return;
 
+intrdisestablish:
+	for (i = 0; i < intrmap_count(sc->sc_intrmap); i++) {
+		struct mcx_queues *q = &sc->sc_queues[i];
+		if (q->q_ihc == NULL)
+			continue;
+		pci_intr_disestablish(sc->sc_pc, q->q_ihc);
+		q->q_ihc = NULL;
+	}
+	free(sc->sc_queues, M_DEVBUF,
+	    intrmap_count(sc->sc_intrmap) * sizeof(*sc->sc_queues));
+intrunmap:
+	intrmap_destroy(sc->sc_intrmap);
+	sc->sc_intrmap = NULL;
 teardown:
 	mcx_teardown_hca(sc, htobe16(MCX_CMD_TEARDOWN_HCA_GRACEFUL));
 	/* error printed by mcx_teardown_hca, and we're already unwinding */
@@ -3788,6 +3925,12 @@ mcx_hca_max_caps(struct mcx_softc *sc)
 	 */
 	sc->sc_bf_size = (1 << hca->log_bf_reg_size) / 2;
 	sc->sc_max_rqt_size = (1 << hca->log_max_rqt_size);
+	
+	if (hca->local_ca_ack_delay & MCX_CAP_DEVICE_MCAM_REG)
+		sc->sc_mcam_reg = 1;
+
+	sc->sc_mhz = bemtoh32(&hca->device_frequency_mhz);
+	sc->sc_khz = bemtoh32(&hca->device_frequency_khz);
 
 free:
 	mcx_dmamem_free(sc, &mxm);
@@ -4130,13 +4273,16 @@ mcx_create_eq(struct mcx_softc *sc, struct mcx_eq *eq, int uar,
 	    howmany(insize, MCX_CMDQ_MAILBOX_DATASIZE),
 	    &cqe->cq_input_ptr, token) != 0) {
 		printf(", unable to allocate create eq mailboxen\n");
-		return (-1);
+		goto free_eq;
 	}
 	mbin = mcx_cq_mbox_data(mcx_cq_mbox(&mxm, 0));
 	mbin->cmd_eq_ctx.eq_uar_size = htobe32(
 	    (MCX_LOG_EQ_SIZE << MCX_EQ_CTX_LOG_EQ_SIZE_SHIFT) | uar);
 	mbin->cmd_eq_ctx.eq_intr = vector;
 	mbin->cmd_event_bitmask = htobe64(events);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&eq->eq_mem),
+	    0, MCX_DMA_LEN(&eq->eq_mem), BUS_DMASYNC_PREREAD);
 
 	/* physical addresses follow the mailbox in data */
 	mcx_cmdq_mboxes_pas(&mxm, sizeof(*mbin), npages, &eq->eq_mem);
@@ -4146,26 +4292,35 @@ mcx_create_eq(struct mcx_softc *sc, struct mcx_eq *eq, int uar,
 	error = mcx_cmdq_poll(sc, cqe, 1000);
 	if (error != 0) {
 		printf(", create eq timeout\n");
-		goto free;
+		goto free_mxm;
 	}
 	if (mcx_cmdq_verify(cqe) != 0) {
 		printf(", create eq command corrupt\n");
-		goto free;
+		goto free_mxm;
 	}
 
 	out = mcx_cmdq_out(cqe);
 	if (out->cmd_status != MCX_CQ_STATUS_OK) {
 		printf(", create eq failed (%x, %x)\n", out->cmd_status,
 		    betoh32(out->cmd_syndrome));
-		error = -1;
-		goto free;
+		goto free_mxm;
 	}
 
 	eq->eq_n = mcx_get_id(out->cmd_eqn);
-	mcx_arm_eq(sc, eq, uar);
-free:
+
 	mcx_dmamem_free(sc, &mxm);
-	return (error);
+
+	mcx_arm_eq(sc, eq, uar);
+
+	return (0);
+
+free_mxm:
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&eq->eq_mem),
+	    0, MCX_DMA_LEN(&eq->eq_mem), BUS_DMASYNC_POSTREAD);
+	mcx_dmamem_free(sc, &mxm);
+free_eq:
+	mcx_dmamem_free(sc, &eq->eq_mem);
+	return (-1);
 }
 
 static int
@@ -4383,6 +4538,8 @@ mcx_create_cq(struct mcx_softc *sc, struct mcx_cq *cq, int uar, int db, int eqn)
 	uint64_t *pas;
 	int insize, npages, paslen, i, token;
 
+	cq->cq_doorbell = MCX_CQ_DOORBELL_BASE + (MCX_CQ_DOORBELL_STRIDE * db);
+
 	npages = howmany((1 << MCX_LOG_CQ_SIZE) * sizeof(struct mcx_cq_entry),
 	    MCX_PAGE_SIZE);
 	paslen = npages * sizeof(*pas);
@@ -4412,8 +4569,7 @@ mcx_create_cq(struct mcx_softc *sc, struct mcx_cq *cq, int uar, int db, int eqn)
 	    &cmde->cq_input_ptr, token) != 0) {
 		printf("%s: unable to allocate create cq mailboxen\n",
 		    DEVNAME(sc));
-		error = -1;
-		goto free;
+		goto free_cq;
 	}
 	mbin = mcx_cq_mbox_data(mcx_cq_mbox(&mxm, 0));
 	mbin->cmd_cq_ctx.cq_uar_size = htobe32(
@@ -4423,8 +4579,10 @@ mcx_create_cq(struct mcx_softc *sc, struct mcx_cq *cq, int uar, int db, int eqn)
 	    (MCX_CQ_MOD_PERIOD << MCX_CQ_CTX_PERIOD_SHIFT) |
 	    MCX_CQ_MOD_COUNTER);
 	mbin->cmd_cq_ctx.cq_doorbell = htobe64(
-	    MCX_DMA_DVA(&sc->sc_doorbell_mem) +
-	    MCX_CQ_DOORBELL_BASE + (MCX_CQ_DOORBELL_STRIDE * db));
+	    MCX_DMA_DVA(&sc->sc_doorbell_mem) + cq->cq_doorbell);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&cq->cq_mem),
+	    0, MCX_DMA_LEN(&cq->cq_mem), BUS_DMASYNC_PREREAD);
 
 	/* physical addresses follow the mailbox in data */
 	mcx_cmdq_mboxes_pas(&mxm, sizeof(*mbin), npages, &cq->cq_mem);
@@ -4433,31 +4591,41 @@ mcx_create_cq(struct mcx_softc *sc, struct mcx_cq *cq, int uar, int db, int eqn)
 	error = mcx_cmdq_poll(sc, cmde, 1000);
 	if (error != 0) {
 		printf("%s: create cq timeout\n", DEVNAME(sc));
-		goto free;
+		goto free_mxm;
 	}
 	if (mcx_cmdq_verify(cmde) != 0) {
 		printf("%s: create cq command corrupt\n", DEVNAME(sc));
-		goto free;
+		goto free_mxm;
 	}
 
 	out = mcx_cmdq_out(cmde);
 	if (out->cmd_status != MCX_CQ_STATUS_OK) {
 		printf("%s: create cq failed (%x, %x)\n", DEVNAME(sc),
 		    out->cmd_status, betoh32(out->cmd_syndrome));
-		error = -1;
-		goto free;
+		goto free_mxm;
 	}
 
 	cq->cq_n = mcx_get_id(out->cmd_cqn);
 	cq->cq_cons = 0;
 	cq->cq_count = 0;
-	cq->cq_doorbell = MCX_DMA_KVA(&sc->sc_doorbell_mem) +
-	    MCX_CQ_DOORBELL_BASE + (MCX_CQ_DOORBELL_STRIDE * db);
+
+	mcx_dmamem_free(sc, &mxm);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    cq->cq_doorbell, sizeof(struct mcx_cq_doorbell),
+	    BUS_DMASYNC_PREWRITE);
+
 	mcx_arm_cq(sc, cq, uar);
 
-free:
+	return (0);
+
+free_mxm:
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&cq->cq_mem),
+	    0, MCX_DMA_LEN(&cq->cq_mem), BUS_DMASYNC_POSTREAD);
 	mcx_dmamem_free(sc, &mxm);
-	return (error);
+free_cq:
+	mcx_dmamem_free(sc, &cq->cq_mem);
+	return (-1);
 }
 
 static int
@@ -4496,8 +4664,15 @@ mcx_destroy_cq(struct mcx_softc *sc, struct mcx_cq *cq)
 		return -1;
 	}
 
-	cq->cq_n = 0;
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    cq->cq_doorbell, sizeof(struct mcx_cq_doorbell),
+	    BUS_DMASYNC_POSTWRITE);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&cq->cq_mem),
+	    0, MCX_DMA_LEN(&cq->cq_mem), BUS_DMASYNC_POSTREAD);
 	mcx_dmamem_free(sc, &cq->cq_mem);
+
+	cq->cq_n = 0;
 	cq->cq_cons = 0;
 	cq->cq_count = 0;
 	return 0;
@@ -4514,8 +4689,10 @@ mcx_create_rq(struct mcx_softc *sc, struct mcx_rx *rx, int db, int cqn)
 	int error;
 	uint64_t *pas;
 	uint32_t rq_flags;
-	uint8_t *doorbell;
 	int insize, npages, paslen, token;
+
+	rx->rx_doorbell = MCX_WQ_DOORBELL_BASE +
+	    (db * MCX_WQ_DOORBELL_STRIDE);
 
 	npages = howmany((1 << MCX_LOG_RQ_SIZE) * sizeof(struct mcx_rq_entry),
 	    MCX_PAGE_SIZE);
@@ -4542,8 +4719,7 @@ mcx_create_rq(struct mcx_softc *sc, struct mcx_rx *rx, int db, int cqn)
 	    &cqe->cq_input_ptr, token) != 0) {
 		printf("%s: unable to allocate create rq mailboxen\n",
 		    DEVNAME(sc));
-		error = -1;
-		goto free;
+		goto free_rq;
 	}
 	mbin = (struct mcx_rq_ctx *)
 	    (((char *)mcx_cq_mbox_data(mcx_cq_mbox(&mxm, 0))) + 0x10);
@@ -4556,9 +4732,12 @@ mcx_create_rq(struct mcx_softc *sc, struct mcx_rx *rx, int db, int cqn)
 	mbin->rq_wq.wq_type = MCX_WQ_CTX_TYPE_CYCLIC;
 	mbin->rq_wq.wq_pd = htobe32(sc->sc_pd);
 	mbin->rq_wq.wq_doorbell = htobe64(MCX_DMA_DVA(&sc->sc_doorbell_mem) +
-	    MCX_WQ_DOORBELL_BASE + (db * MCX_WQ_DOORBELL_STRIDE));
+	    rx->rx_doorbell);
 	mbin->rq_wq.wq_log_stride = htobe16(4);
 	mbin->rq_wq.wq_log_size = MCX_LOG_RQ_SIZE;
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&rx->rx_rq_mem),
+	    0, MCX_DMA_LEN(&rx->rx_rq_mem), BUS_DMASYNC_PREWRITE);
 
 	/* physical addresses follow the mailbox in data */
 	mcx_cmdq_mboxes_pas(&mxm, sizeof(*mbin) + 0x10, npages, &rx->rx_rq_mem);
@@ -4567,30 +4746,36 @@ mcx_create_rq(struct mcx_softc *sc, struct mcx_rx *rx, int db, int cqn)
 	error = mcx_cmdq_poll(sc, cqe, 1000);
 	if (error != 0) {
 		printf("%s: create rq timeout\n", DEVNAME(sc));
-		goto free;
+		goto free_mxm;
 	}
 	if (mcx_cmdq_verify(cqe) != 0) {
 		printf("%s: create rq command corrupt\n", DEVNAME(sc));
-		goto free;
+		goto free_mxm;
 	}
 
 	out = mcx_cmdq_out(cqe);
 	if (out->cmd_status != MCX_CQ_STATUS_OK) {
 		printf("%s: create rq failed (%x, %x)\n", DEVNAME(sc),
 		    out->cmd_status, betoh32(out->cmd_syndrome));
-		error = -1;
-		goto free;
+		goto free_mxm;
 	}
 
 	rx->rx_rqn = mcx_get_id(out->cmd_rqn);
 
-	doorbell = MCX_DMA_KVA(&sc->sc_doorbell_mem);
-	rx->rx_doorbell = (uint32_t *)(doorbell + MCX_WQ_DOORBELL_BASE +
-	    (db * MCX_WQ_DOORBELL_STRIDE));
-
-free:
 	mcx_dmamem_free(sc, &mxm);
-	return (error);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    rx->rx_doorbell, sizeof(uint32_t), BUS_DMASYNC_PREWRITE);
+
+	return (0);
+
+free_mxm:
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&rx->rx_rq_mem),
+	    0, MCX_DMA_LEN(&rx->rx_rq_mem), BUS_DMASYNC_POSTWRITE);
+	mcx_dmamem_free(sc, &mxm);
+free_rq:
+	mcx_dmamem_free(sc, &rx->rx_rq_mem);
+	return (-1);
 }
 
 static int
@@ -4684,6 +4869,13 @@ mcx_destroy_rq(struct mcx_softc *sc, struct mcx_rx *rx)
 		    out->cmd_status, betoh32(out->cmd_syndrome));
 		return -1;
 	}
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    rx->rx_doorbell, sizeof(uint32_t), BUS_DMASYNC_POSTWRITE);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&rx->rx_rq_mem),
+	    0, MCX_DMA_LEN(&rx->rx_rq_mem), BUS_DMASYNC_POSTWRITE);
+	mcx_dmamem_free(sc, &rx->rx_rq_mem);
 
 	rx->rx_rqn = 0;
 	return 0;
@@ -4857,8 +5049,10 @@ mcx_create_sq(struct mcx_softc *sc, struct mcx_tx *tx, int uar, int db,
 	struct mcx_cmd_create_sq_out *out;
 	int error;
 	uint64_t *pas;
-	uint8_t *doorbell;
 	int insize, npages, paslen, token;
+
+	tx->tx_doorbell = MCX_WQ_DOORBELL_BASE +
+	    (db * MCX_WQ_DOORBELL_STRIDE) + 4;
 
 	npages = howmany((1 << MCX_LOG_SQ_SIZE) * sizeof(struct mcx_sq_entry),
 	    MCX_PAGE_SIZE);
@@ -4886,8 +5080,7 @@ mcx_create_sq(struct mcx_softc *sc, struct mcx_tx *tx, int uar, int db,
 	    &cqe->cq_input_ptr, token) != 0) {
 		printf("%s: unable to allocate create sq mailboxen\n",
 		    DEVNAME(sc));
-		error = -1;
-		goto free;
+		goto free_sq;
 	}
 	mbin = (struct mcx_sq_ctx *)
 	    (((char *)mcx_cq_mbox_data(mcx_cq_mbox(&mxm, 0))) + 0x10);
@@ -4900,9 +5093,12 @@ mcx_create_sq(struct mcx_softc *sc, struct mcx_tx *tx, int uar, int db,
 	mbin->sq_wq.wq_pd = htobe32(sc->sc_pd);
 	mbin->sq_wq.wq_uar_page = htobe32(uar);
 	mbin->sq_wq.wq_doorbell = htobe64(MCX_DMA_DVA(&sc->sc_doorbell_mem) +
-	    MCX_WQ_DOORBELL_BASE + (db * MCX_WQ_DOORBELL_STRIDE));
+	    tx->tx_doorbell);
 	mbin->sq_wq.wq_log_stride = htobe16(MCX_LOG_SQ_ENTRY_SIZE);
 	mbin->sq_wq.wq_log_size = MCX_LOG_SQ_SIZE;
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&tx->tx_sq_mem),
+	    0, MCX_DMA_LEN(&tx->tx_sq_mem), BUS_DMASYNC_PREWRITE);
 
 	/* physical addresses follow the mailbox in data */
 	mcx_cmdq_mboxes_pas(&mxm, sizeof(*mbin) + 0x10,
@@ -4912,30 +5108,37 @@ mcx_create_sq(struct mcx_softc *sc, struct mcx_tx *tx, int uar, int db,
 	error = mcx_cmdq_poll(sc, cqe, 1000);
 	if (error != 0) {
 		printf("%s: create sq timeout\n", DEVNAME(sc));
-		goto free;
+		goto free_mxm;
 	}
 	if (mcx_cmdq_verify(cqe) != 0) {
 		printf("%s: create sq command corrupt\n", DEVNAME(sc));
-		goto free;
+		goto free_mxm;
 	}
 
 	out = mcx_cmdq_out(cqe);
 	if (out->cmd_status != MCX_CQ_STATUS_OK) {
 		printf("%s: create sq failed (%x, %x)\n", DEVNAME(sc),
 		    out->cmd_status, betoh32(out->cmd_syndrome));
-		error = -1;
-		goto free;
+		goto free_mxm;
 	}
 
 	tx->tx_uar = uar;
 	tx->tx_sqn = mcx_get_id(out->cmd_sqn);
 
-	doorbell = MCX_DMA_KVA(&sc->sc_doorbell_mem);
-	tx->tx_doorbell = (uint32_t *)(doorbell + MCX_WQ_DOORBELL_BASE +
-	    (db * MCX_WQ_DOORBELL_STRIDE) + 4);
-free:
 	mcx_dmamem_free(sc, &mxm);
-	return (error);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    tx->tx_doorbell, sizeof(uint32_t), BUS_DMASYNC_PREWRITE);
+
+	return (0);
+
+free_mxm:
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&tx->tx_sq_mem),
+	    0, MCX_DMA_LEN(&tx->tx_sq_mem), BUS_DMASYNC_POSTWRITE);
+	mcx_dmamem_free(sc, &mxm);
+free_sq:
+	mcx_dmamem_free(sc, &tx->tx_sq_mem);
+	return (-1);
 }
 
 static int
@@ -4973,6 +5176,13 @@ mcx_destroy_sq(struct mcx_softc *sc, struct mcx_tx *tx)
 		    out->cmd_status, betoh32(out->cmd_syndrome));
 		return -1;
 	}
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    tx->tx_doorbell, sizeof(uint32_t), BUS_DMASYNC_POSTWRITE);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&tx->tx_sq_mem),
+	    0, MCX_DMA_LEN(&tx->tx_sq_mem), BUS_DMASYNC_POSTWRITE);
+	mcx_dmamem_free(sc, &tx->tx_sq_mem);
 
 	tx->tx_sqn = 0;
 	return 0;
@@ -6398,28 +6608,34 @@ free:
 
 #endif /* NKSTAT > 0 */
 
-
-int
-mcx_rx_fill_slots(struct mcx_softc *sc, struct mcx_rx *rx,
-    void *ring, struct mcx_slot *slots, uint *prod, uint nslots)
+static inline unsigned int
+mcx_rx_fill_slots(struct mcx_softc *sc, struct mcx_rx *rx, uint nslots)
 {
-	struct mcx_rq_entry *rqe;
+	struct mcx_rq_entry *ring, *rqe;
 	struct mcx_slot *ms;
 	struct mbuf *m;
 	uint slot, p, fills;
 
-	p = *prod;
-	slot = (p % (1 << MCX_LOG_RQ_SIZE));
-	rqe = ring;
+	ring = MCX_DMA_KVA(&rx->rx_rq_mem);
+	p = rx->rx_prod;
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&rx->rx_rq_mem),
+	    0, MCX_DMA_LEN(&rx->rx_rq_mem), BUS_DMASYNC_POSTWRITE);
+
 	for (fills = 0; fills < nslots; fills++) {
-		ms = &slots[slot];
-		m = MCLGETI(NULL, M_DONTWAIT, NULL, sc->sc_rxbufsz);
+		slot = p % (1 << MCX_LOG_RQ_SIZE);
+
+		ms = &rx->rx_slots[slot];
+		rqe = &ring[slot];
+
+		m = MCLGETL(NULL, M_DONTWAIT, sc->sc_rxbufsz);
 		if (m == NULL)
 			break;
 
 		m->m_data += (m->m_ext.ext_size - sc->sc_rxbufsz);
 		m->m_data += ETHER_ALIGN;
 		m->m_len = m->m_pkthdr.len = sc->sc_hardmtu;
+
 		if (bus_dmamap_load_mbuf(sc->sc_dmat, ms->ms_map, m,
 		    BUS_DMA_NOWAIT) != 0) {
 			m_freem(m);
@@ -6427,23 +6643,24 @@ mcx_rx_fill_slots(struct mcx_softc *sc, struct mcx_rx *rx,
 		}
 		ms->ms_m = m;
 
-		rqe[slot].rqe_byte_count =
-		    htobe32(ms->ms_map->dm_segs[0].ds_len);
-		rqe[slot].rqe_addr = htobe64(ms->ms_map->dm_segs[0].ds_addr);
-		rqe[slot].rqe_lkey = htobe32(sc->sc_lkey);
+		htobem32(&rqe->rqe_byte_count, ms->ms_map->dm_segs[0].ds_len);
+		htobem64(&rqe->rqe_addr, ms->ms_map->dm_segs[0].ds_addr);
+		htobem32(&rqe->rqe_lkey, sc->sc_lkey);
 
 		p++;
-		slot++;
-		if (slot == (1 << MCX_LOG_RQ_SIZE))
-			slot = 0;
 	}
 
-	if (fills != 0) {
-		*rx->rx_doorbell = htobe32(p & MCX_WQ_DOORBELL_MASK);
-		/* barrier? */
-	}
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&rx->rx_rq_mem),
+	    0, MCX_DMA_LEN(&rx->rx_rq_mem), BUS_DMASYNC_PREWRITE);
 
-	*prod = p;
+	rx->rx_prod = p;
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    rx->rx_doorbell, sizeof(uint32_t), BUS_DMASYNC_POSTWRITE);
+	htobem32(MCX_DMA_OFF(&sc->sc_doorbell_mem, rx->rx_doorbell),
+	    p & MCX_WQ_DOORBELL_MASK);
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    rx->rx_doorbell, sizeof(uint32_t), BUS_DMASYNC_PREWRITE);
 
 	return (nslots - fills);
 }
@@ -6457,8 +6674,7 @@ mcx_rx_fill(struct mcx_softc *sc, struct mcx_rx *rx)
 	if (slots == 0)
 		return (1);
 
-	slots = mcx_rx_fill_slots(sc, rx, MCX_DMA_KVA(&rx->rx_rq_mem),
-	    rx->rx_slots, &rx->rx_prod, slots);
+	slots = mcx_rx_fill_slots(sc, rx, slots);
 	if_rxr_put(&rx->rx_rxr, slots);
 	return (0);
 }
@@ -6475,9 +6691,9 @@ mcx_refill(void *xrx)
 		timeout_add(&rx->rx_refill, 1);
 }
 
-void
+static int
 mcx_process_txeof(struct mcx_softc *sc, struct mcx_tx *tx,
-    struct mcx_cq_entry *cqe, int *txfree)
+    struct mcx_cq_entry *cqe)
 {
 	struct mcx_slot *ms;
 	bus_dmamap_t map;
@@ -6494,10 +6710,11 @@ mcx_process_txeof(struct mcx_softc *sc, struct mcx_tx *tx,
 	if (map->dm_nsegs > 1)
 		slots += (map->dm_nsegs+2) / MCX_SQ_SEGS_PER_SLOT;
 
-	(*txfree) += slots;
 	bus_dmamap_unload(sc->sc_dmat, map);
 	m_freem(ms->ms_m);
 	ms->ms_m = NULL;
+
+	return (slots);
 }
 
 static uint64_t
@@ -6514,24 +6731,31 @@ static void
 mcx_calibrate_first(struct mcx_softc *sc)
 {
 	struct mcx_calibration *c = &sc->sc_calibration[0];
+	int s;
 
 	sc->sc_calibration_gen = 0;
 
+	s = splhigh(); /* crit_enter? */
 	c->c_ubase = mcx_uptime();
 	c->c_tbase = mcx_timer(sc);
-	c->c_tdiff = 0;
+	splx(s);
+	c->c_ratio = 0;
 
+#ifdef notyet
 	timeout_add_sec(&sc->sc_calibrate, MCX_CALIBRATE_FIRST);
+#endif
 }
 
-#define MCX_TIMESTAMP_SHIFT 10
+#define MCX_TIMESTAMP_SHIFT 24
 
 static void
 mcx_calibrate(void *arg)
 {
 	struct mcx_softc *sc = arg;
 	struct mcx_calibration *nc, *pc;
+	uint64_t udiff, tdiff;
 	unsigned int gen;
+	int s;
 
 	if (!ISSET(sc->sc_ac.ac_if.if_flags, IFF_RUNNING))
 		return;
@@ -6546,11 +6770,24 @@ mcx_calibrate(void *arg)
 	nc->c_uptime = pc->c_ubase;
 	nc->c_timestamp = pc->c_tbase;
 
+	s = splhigh(); /* crit_enter? */
 	nc->c_ubase = mcx_uptime();
 	nc->c_tbase = mcx_timer(sc);
+	splx(s);
 
-	nc->c_udiff = (nc->c_ubase - nc->c_uptime) >> MCX_TIMESTAMP_SHIFT;
-	nc->c_tdiff = (nc->c_tbase - nc->c_timestamp) >> MCX_TIMESTAMP_SHIFT;
+	udiff = nc->c_ubase - nc->c_uptime;
+	tdiff = nc->c_tbase - nc->c_timestamp;
+
+	/*
+	 * udiff is the wall clock time between calibration ticks,
+	 * which should be 32 seconds or 32 billion nanoseconds. if
+	 * we squint, 1 billion nanoseconds is kind of like a 32 bit
+	 * number, so 32 billion should still have a lot of high bits
+	 * spare. we use this space by shifting the nanoseconds up
+	 * 24 bits so we have a nice big number to divide by the
+	 * number of mcx timer ticks.
+	 */
+	nc->c_ratio = (udiff << MCX_TIMESTAMP_SHIFT) / tdiff;
 
 	membar_producer();
 	sc->sc_calibration_gen = gen;
@@ -6563,20 +6800,20 @@ mcx_process_rx(struct mcx_softc *sc, struct mcx_rx *rx,
 {
 	struct mcx_slot *ms;
 	struct mbuf *m;
-	uint32_t flags;
+	uint32_t flags, len;
 	int slot;
 
+	len = bemtoh32(&cqe->cq_byte_cnt);
 	slot = betoh16(cqe->cq_wqe_count) % (1 << MCX_LOG_RQ_SIZE);
 
 	ms = &rx->rx_slots[slot];
-	bus_dmamap_sync(sc->sc_dmat, ms->ms_map, 0, ms->ms_map->dm_mapsize,
-	    BUS_DMASYNC_POSTREAD);
+	bus_dmamap_sync(sc->sc_dmat, ms->ms_map, 0, len, BUS_DMASYNC_POSTREAD);
 	bus_dmamap_unload(sc->sc_dmat, ms->ms_map);
 
 	m = ms->ms_m;
 	ms->ms_m = NULL;
 
-	m->m_pkthdr.len = m->m_len = bemtoh32(&cqe->cq_byte_cnt);
+	m->m_pkthdr.len = m->m_len = len;
 
 	if (cqe->cq_rx_hash_type) {
 		m->m_pkthdr.ph_flowid = betoh32(cqe->cq_rx_hash);
@@ -6585,7 +6822,7 @@ mcx_process_rx(struct mcx_softc *sc, struct mcx_rx *rx,
 
 	flags = bemtoh32(&cqe->cq_flags);
 	if (flags & MCX_CQ_ENTRY_FLAGS_L3_OK)
-		m->m_pkthdr.csum_flags = M_IPV4_CSUM_IN_OK;
+		m->m_pkthdr.csum_flags |= M_IPV4_CSUM_IN_OK;
 	if (flags & MCX_CQ_ENTRY_FLAGS_L4_OK)
 		m->m_pkthdr.csum_flags |= M_TCP_CSUM_IN_OK |
 		    M_UDP_CSUM_IN_OK;
@@ -6597,14 +6834,18 @@ mcx_process_rx(struct mcx_softc *sc, struct mcx_rx *rx,
 	}
 #endif
 
-	if (c->c_tdiff) {
-		uint64_t t = bemtoh64(&cqe->cq_timestamp) - c->c_timestamp;
-		t *= c->c_udiff;
-		t /= c->c_tdiff;
+#ifdef notyet
+	if (ISSET(sc->sc_ac.ac_if.if_flags, IFF_LINK0) && c->c_ratio) {
+		uint64_t t = bemtoh64(&cqe->cq_timestamp);
+		t -= c->c_timestamp;
+		t *= c->c_ratio;
+		t >>= MCX_TIMESTAMP_SHIFT;
+		t += c->c_uptime;
 
-		m->m_pkthdr.ph_timestamp = c->c_uptime + t;
+		m->m_pkthdr.ph_timestamp = t;
 		SET(m->m_pkthdr.csum_flags, M_TIMESTAMP);
 	}
+#endif
 
 	ml_enqueue(ml, m);
 
@@ -6631,24 +6872,32 @@ mcx_next_cq_entry(struct mcx_softc *sc, struct mcx_cq *cq)
 static void
 mcx_arm_cq(struct mcx_softc *sc, struct mcx_cq *cq, int uar)
 {
+	struct mcx_cq_doorbell *db;
 	bus_size_t offset;
 	uint32_t val;
 	uint64_t uval;
 
-	offset = (MCX_PAGE_SIZE * uar);
 	val = ((cq->cq_count) & 3) << MCX_CQ_DOORBELL_ARM_CMD_SN_SHIFT;
 	val |= (cq->cq_cons & MCX_CQ_DOORBELL_ARM_CI_MASK);
 
-	cq->cq_doorbell[0] = htobe32(cq->cq_cons & MCX_CQ_DOORBELL_ARM_CI_MASK);
-	cq->cq_doorbell[1] = htobe32(val);
+	db = MCX_DMA_OFF(&sc->sc_doorbell_mem, cq->cq_doorbell);
 
-	uval = val;
-	uval <<= 32;
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    cq->cq_doorbell, sizeof(*db), BUS_DMASYNC_POSTWRITE);
+
+	htobem32(&db->db_update_ci, cq->cq_cons & MCX_CQ_DOORBELL_ARM_CI_MASK);
+	htobem32(&db->db_arm_ci, val);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+	    cq->cq_doorbell, sizeof(*db), BUS_DMASYNC_PREWRITE);
+
+	offset = (MCX_PAGE_SIZE * uar) + MCX_UAR_CQ_DOORBELL;
+
+	uval = (uint64_t)val << 32;
 	uval |= cq->cq_n;
-	bus_space_write_raw_8(sc->sc_memt, sc->sc_memh,
-	    offset + MCX_UAR_CQ_DOORBELL, htobe64(uval));
-	mcx_bar(sc, offset + MCX_UAR_CQ_DOORBELL, sizeof(uint64_t),
-	    BUS_SPACE_BARRIER_WRITE);
+
+	bus_space_write_raw_8(sc->sc_memt, sc->sc_memh, offset, htobe64(uval));
+	mcx_bar(sc, offset, sizeof(uval), BUS_SPACE_BARRIER_WRITE);
 }
 
 void
@@ -6667,6 +6916,9 @@ mcx_process_cq(struct mcx_softc *sc, struct mcx_queues *q, struct mcx_cq *cq)
 	membar_consumer();
 	c = &sc->sc_calibration[gen % nitems(sc->sc_calibration)];
 
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&cq->cq_mem),
+	    0, MCX_DMA_LEN(&cq->cq_mem), BUS_DMASYNC_POSTREAD);
+
 	rxfree = 0;
 	txfree = 0;
 	while ((cqe = mcx_next_cq_entry(sc, cq))) {
@@ -6674,7 +6926,7 @@ mcx_process_cq(struct mcx_softc *sc, struct mcx_queues *q, struct mcx_cq *cq)
 		opcode = (cqe->cq_opcode_owner >> MCX_CQ_ENTRY_OPCODE_SHIFT);
 		switch (opcode) {
 		case MCX_CQ_ENTRY_OPCODE_REQ:
-			mcx_process_txeof(sc, tx, cqe, &txfree);
+			txfree += mcx_process_txeof(sc, tx, cqe);
 			break;
 		case MCX_CQ_ENTRY_OPCODE_SEND:
 			rxfree += mcx_process_rx(sc, rx, cqe, &ml, c);
@@ -6695,8 +6947,8 @@ mcx_process_cq(struct mcx_softc *sc, struct mcx_queues *q, struct mcx_cq *cq)
 		cq->cq_cons++;
 	}
 
-	cq->cq_count++;
-	mcx_arm_cq(sc, cq, q->q_uar);
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&cq->cq_mem),
+	    0, MCX_DMA_LEN(&cq->cq_mem), BUS_DMASYNC_PREREAD);
 
 	if (rxfree > 0) {
 		if_rxr_put(&rx->rx_rxr, rxfree);
@@ -6707,6 +6959,10 @@ mcx_process_cq(struct mcx_softc *sc, struct mcx_queues *q, struct mcx_cq *cq)
 		if (if_rxr_inuse(&rx->rx_rxr) == 0)
 			timeout_add(&rx->rx_refill, 1);
 	}
+
+	cq->cq_count++;
+	mcx_arm_cq(sc, cq, q->q_uar);
+
 	if (txfree > 0) {
 		tx->tx_cons += txfree;
 		if (ifq_is_oactive(tx->tx_ifq))
@@ -6725,7 +6981,7 @@ mcx_arm_eq(struct mcx_softc *sc, struct mcx_eq *eq, int uar)
 	val = (eq->eq_n << 24) | (eq->eq_cons & 0xffffff);
 
 	mcx_wr(sc, offset, val);
-	/* barrier? */
+	mcx_bar(sc, offset, sizeof(val), BUS_SPACE_BARRIER_WRITE);
 }
 
 static struct mcx_eq_entry *
@@ -6748,9 +7004,13 @@ int
 mcx_admin_intr(void *xsc)
 {
 	struct mcx_softc *sc = (struct mcx_softc *)xsc;
+	struct mcx_eq *eq = &sc->sc_admin_eq;
 	struct mcx_eq_entry *eqe;
 
-	while ((eqe = mcx_next_eq_entry(sc, &sc->sc_admin_eq))) {
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&eq->eq_mem),
+	    0, MCX_DMA_LEN(&eq->eq_mem), BUS_DMASYNC_POSTREAD);
+
+	while ((eqe = mcx_next_eq_entry(sc, eq)) != NULL) {
 		switch (eqe->eq_event_type) {
 		case MCX_EVENT_TYPE_LAST_WQE:
 			/* printf("%s: last wqe reached?\n", DEVNAME(sc)); */
@@ -6773,7 +7033,12 @@ mcx_admin_intr(void *xsc)
 			break;
 		}
 	}
-	mcx_arm_eq(sc, &sc->sc_admin_eq, sc->sc_uar);
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&eq->eq_mem),
+	    0, MCX_DMA_LEN(&eq->eq_mem), BUS_DMASYNC_PREREAD);
+
+	mcx_arm_eq(sc, eq, sc->sc_uar);
+
 	return (1);
 }
 
@@ -6782,10 +7047,14 @@ mcx_cq_intr(void *xq)
 {
 	struct mcx_queues *q = (struct mcx_queues *)xq;
 	struct mcx_softc *sc = q->q_sc;
+	struct mcx_eq *eq = &q->q_eq;
 	struct mcx_eq_entry *eqe;
 	int cqn;
 
-	while ((eqe = mcx_next_eq_entry(sc, &q->q_eq))) {
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&eq->eq_mem),
+	    0, MCX_DMA_LEN(&eq->eq_mem), BUS_DMASYNC_POSTREAD);
+
+	while ((eqe = mcx_next_eq_entry(sc, eq)) != NULL) {
 		switch (eqe->eq_event_type) {
 		case MCX_EVENT_TYPE_COMPLETION:
 			cqn = betoh32(eqe->eq_event_data[6]);
@@ -6795,10 +7064,13 @@ mcx_cq_intr(void *xq)
 		}
 	}
 
-	mcx_arm_eq(sc, &q->q_eq, q->q_uar);
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&eq->eq_mem),
+	    0, MCX_DMA_LEN(&eq->eq_mem), BUS_DMASYNC_PREREAD);
+
+	mcx_arm_eq(sc, eq, q->q_uar);
+
 	return (1);
 }
-
 
 static void
 mcx_free_slots(struct mcx_softc *sc, struct mcx_slot *slots, int allocated,
@@ -6866,16 +7138,21 @@ mcx_queue_up(struct mcx_softc *sc, struct mcx_queues *q)
 
 	if (mcx_create_cq(sc, &q->q_cq, q->q_uar, q->q_index,
 	    q->q_eq.eq_n) != 0)
-		return ENOMEM;
+		goto destroy_tx_slots;
 
 	if (mcx_create_sq(sc, tx, q->q_uar, q->q_index, q->q_cq.cq_n)
 	    != 0)
-		return ENOMEM;
+		goto destroy_cq;
 
 	if (mcx_create_rq(sc, rx, q->q_index, q->q_cq.cq_n) != 0)
-		return ENOMEM;
+		goto destroy_sq;
 
 	return 0;
+
+destroy_sq:
+	mcx_destroy_sq(sc, tx);
+destroy_cq:
+	mcx_destroy_cq(sc, &q->q_cq);
 destroy_tx_slots:
 	mcx_free_slots(sc, tx->tx_slots, i, (1 << MCX_LOG_SQ_SIZE));
 	tx->tx_slots = NULL;
@@ -6917,7 +7194,7 @@ mcx_up(struct mcx_softc *sc)
 	if (mcx_create_tis(sc, &sc->sc_tis) != 0)
 		goto down;
 
-	for (i = 0; i < sc->sc_nqueues; i++) {
+	for (i = 0; i < intrmap_count(sc->sc_intrmap); i++) {
 		if (mcx_queue_up(sc, &sc->sc_queues[i]) != 0) {
 			goto down;
 		}
@@ -7025,10 +7302,11 @@ mcx_up(struct mcx_softc *sc)
 	 * since we also restrict the number of queues to a power of two,
 	 * we can just put each rx queue in once.
 	 */
-	for (i = 0; i < sc->sc_nqueues; i++)
+	for (i = 0; i < intrmap_count(sc->sc_intrmap); i++)
 		rqns[i] = sc->sc_queues[i].q_rx.rx_rqn;
 
-	if (mcx_create_rqt(sc, sc->sc_nqueues, rqns, &sc->sc_rqt) != 0)
+	if (mcx_create_rqt(sc, intrmap_count(sc->sc_intrmap), rqns,
+	    &sc->sc_rqt) != 0)
 		goto down;
 
 	start = 0;
@@ -7058,7 +7336,7 @@ mcx_up(struct mcx_softc *sc)
 		flow_index++;
 	}
 
-	for (i = 0; i < sc->sc_nqueues; i++) {
+	for (i = 0; i < intrmap_count(sc->sc_intrmap); i++) {
 		struct mcx_queues *q = &sc->sc_queues[i];
 		rx = &q->q_rx;
 		tx = &q->q_tx;
@@ -7132,7 +7410,7 @@ mcx_down(struct mcx_softc *sc)
 		flow_index++;
 	}
 	intr_barrier(sc->sc_ihc);
-	for (i = 0; i < sc->sc_nqueues; i++) {
+	for (i = 0; i < intrmap_count(sc->sc_intrmap); i++) {
 		struct ifqueue *ifq = sc->sc_queues[i].q_tx.tx_ifq;
 		ifq_barrier(ifq);
 
@@ -7161,7 +7439,7 @@ mcx_down(struct mcx_softc *sc)
 		sc->sc_rqt = -1;
 	}
 
-	for (i = 0; i < sc->sc_nqueues; i++) {
+	for (i = 0; i < intrmap_count(sc->sc_intrmap); i++) {
 		struct mcx_queues *q = &sc->sc_queues[i];
 		struct mcx_rx *rx = &q->q_rx;
 		struct mcx_tx *tx = &q->q_tx;
@@ -7368,12 +7646,12 @@ mcx_rxrinfo(struct mcx_softc *sc, struct if_rxrinfo *ifri)
 	unsigned int i;
 	int error;
 
-	ifrs = mallocarray(sc->sc_nqueues, sizeof(*ifrs), M_TEMP,
-	    M_WAITOK|M_ZERO|M_CANFAIL);
+	ifrs = mallocarray(intrmap_count(sc->sc_intrmap), sizeof(*ifrs),
+	    M_TEMP, M_WAITOK|M_ZERO|M_CANFAIL);
 	if (ifrs == NULL)
 		return (ENOMEM);
 
-	for (i = 0; i < sc->sc_nqueues; i++) {
+	for (i = 0; i < intrmap_count(sc->sc_intrmap); i++) {
 		struct mcx_rx *rx = &sc->sc_queues[i].q_rx;
 		struct if_rxring_info *ifr = &ifrs[i];
 
@@ -7434,6 +7712,10 @@ mcx_start(struct ifqueue *ifq)
 
 	used = 0;
 	bf = NULL;
+
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&tx->tx_sq_mem),
+	    0, MCX_DMA_LEN(&tx->tx_sq_mem), BUS_DMASYNC_POSTWRITE);
+
 	sq = (struct mcx_sq_entry *)MCX_DMA_KVA(&tx->tx_sq_mem);
 
 	for (;;) {
@@ -7472,7 +7754,7 @@ mcx_start(struct ifqueue *ifq)
 			    &sqe->sqe_inline_headers;
 
 			/* slightly cheaper vlan_inject() */
-			m_copydata(m, 0, ETHER_HDR_LEN, (caddr_t)evh);
+			m_copydata(m, 0, ETHER_HDR_LEN, evh);
 			evh->evl_proto = evh->evl_encap_proto;
 			evh->evl_encap_proto = htons(ETHERTYPE_VLAN);
 			evh->evl_tag = htons(m->m_pkthdr.ether_vtag);
@@ -7482,7 +7764,7 @@ mcx_start(struct ifqueue *ifq)
 #endif
 		{
 			m_copydata(m, 0, MCX_SQ_INLINE_SIZE,
-			    (caddr_t)sqe->sqe_inline_headers);
+			    sqe->sqe_inline_headers);
 			m_adj(m, MCX_SQ_INLINE_SIZE);
 		}
 
@@ -7538,21 +7820,31 @@ mcx_start(struct ifqueue *ifq)
 		used++;
 	}
 
-	if (used) {
-		htobem32(tx->tx_doorbell, tx->tx_prod & MCX_WQ_DOORBELL_MASK);
+	bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&tx->tx_sq_mem),
+	    0, MCX_DMA_LEN(&tx->tx_sq_mem), BUS_DMASYNC_PREWRITE);
 
-		membar_sync();
+	if (used) {
+		bus_size_t blueflame;
+
+		bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+		    tx->tx_doorbell, sizeof(uint32_t), BUS_DMASYNC_POSTWRITE);
+		htobem32(MCX_DMA_OFF(&sc->sc_doorbell_mem, tx->tx_doorbell),
+		    tx->tx_prod & MCX_WQ_DOORBELL_MASK);
+		bus_dmamap_sync(sc->sc_dmat, MCX_DMA_MAP(&sc->sc_doorbell_mem),
+		    tx->tx_doorbell, sizeof(uint32_t), BUS_DMASYNC_PREWRITE);
 
 		/*
 		 * write the first 64 bits of the last sqe we produced
 		 * to the blue flame buffer
 		 */
+
+		blueflame = bf_base + tx->tx_bf_offset;
 		bus_space_write_raw_8(sc->sc_memt, sc->sc_memh,
-		    bf_base + tx->tx_bf_offset, *bf);
+		    blueflame, *bf);
+		mcx_bar(sc, blueflame, sizeof(*bf), BUS_SPACE_BARRIER_WRITE);
+
 		/* next write goes to the other buffer */
 		tx->tx_bf_offset ^= sc->sc_bf_size;
-
-		membar_sync();
 	}
 }
 
@@ -8154,12 +8446,31 @@ static void
 mcx_kstat_attach_tmps(struct mcx_softc *sc)
 {
 	struct kstat *ks;
+	struct mcx_reg_mcam mcam;
 	struct mcx_reg_mtcap mtcap;
 	struct mcx_kstat_mtmp *ktmp;
 	uint64_t map;
 	unsigned int i, n;
 
 	memset(&mtcap, 0, sizeof(mtcap));
+	memset(&mcam, 0, sizeof(mcam));
+
+	if (sc->sc_mcam_reg == 0) {
+		/* no management capabilities */
+		return;
+	}
+
+	if (mcx_access_hca_reg(sc, MCX_REG_MCAM, MCX_REG_OP_READ,
+	    &mcam, sizeof(mcam)) != 0) {
+		/* unable to check management capabilities? */
+		return;
+	}
+
+	if (MCX_BITFIELD_BIT(mcam.mcam_feature_cap_mask,
+	    MCX_MCAM_FEATURE_CAP_SENSOR_MAP) == 0) {
+		/* no sensor map */
+		return;
+	}
 
 	if (mcx_access_hca_reg(sc, MCX_REG_MTCAP, MCX_REG_OP_READ,
 	    &mtcap, sizeof(mtcap)) != 0) {
@@ -8292,7 +8603,7 @@ mcx_kstat_attach_queues(struct mcx_softc *sc)
 	struct kstat_kv *kvs;
 	int q, i;
 
-	for (q = 0; q < sc->sc_nqueues; q++) {
+	for (q = 0; q < intrmap_count(sc->sc_intrmap); q++) {
 		ks = kstat_create(DEVNAME(sc), 0, "mcx-queues", q,
 		    KSTAT_T_KV, 0);
 		if (ks == NULL) {
@@ -8483,3 +8794,26 @@ out:
 }
 
 #endif /* NKSTAT > 0 */
+
+static unsigned int
+mcx_timecounter_read(struct timecounter *tc)
+{
+	struct mcx_softc *sc = tc->tc_priv;
+
+	return (mcx_rd(sc, MCX_INTERNAL_TIMER_L));
+}
+
+static void
+mcx_timecounter_attach(struct mcx_softc *sc)
+{
+	struct timecounter *tc = &sc->sc_timecounter;
+
+	tc->tc_get_timecount = mcx_timecounter_read;
+	tc->tc_counter_mask = ~0U;
+	tc->tc_frequency = sc->sc_khz * 1000;
+	tc->tc_name = sc->sc_dev.dv_xname;
+	tc->tc_quality = -100;
+	tc->tc_priv = sc;
+
+	tc_init(tc);
+}

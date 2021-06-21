@@ -1,4 +1,4 @@
-/*	$OpenBSD: dt_dev.c,v 1.10 2020/09/28 13:16:58 kettenis Exp $ */
+/*	$OpenBSD: dt_dev.c,v 1.14 2021/05/22 21:25:38 bluhm Exp $ */
 
 /*
  * Copyright (c) 2019 Martin Pieuchot <mpi@openbsd.org>
@@ -109,6 +109,8 @@ SIMPLEQ_HEAD(, dt_probe)	dt_probe_list;	/* [I] list of probes */
 struct rwlock			dt_lock = RWLOCK_INITIALIZER("dtlk");
 volatile uint32_t		dt_tracing = 0;	/* [K] # of processes tracing */
 
+int allowdt;
+
 void	dtattach(struct device *, struct device *, void *);
 int	dtopen(dev_t, int, int, struct proc *);
 int	dtclose(dev_t, int, int, struct proc *);
@@ -145,7 +147,6 @@ dtopen(dev_t dev, int flags, int mode, struct proc *p)
 {
 	struct dt_softc *sc;
 	int unit = minor(dev);
-	extern int allowdt;
 
 	if (!allowdt)
 		return EPERM;
@@ -213,7 +214,7 @@ dtread(dev_t dev, struct uio *uio, int flags)
 	struct dt_softc *sc;
 	struct dt_evt *estq;
 	struct dt_pcb *dp;
-	int error, unit = minor(dev);
+	int error = 0, unit = minor(dev);
 	size_t qlen, count, read = 0;
 	uint64_t dropped = 0;
 
@@ -225,10 +226,8 @@ dtread(dev_t dev, struct uio *uio, int flags)
 		return (EMSGSIZE);
 
 	while (!sc->ds_evtcnt) {
-		sleep_setup(&sls, sc, PWAIT | PCATCH, "dtread");
-		sleep_setup_signal(&sls);
-		sleep_finish(&sls, !sc->ds_evtcnt);
-		error = sleep_finish_signal(&sls);
+		sleep_setup(&sls, sc, PWAIT | PCATCH, "dtread", 0);
+		error = sleep_finish(&sls, !sc->ds_evtcnt);
 		if (error == EINTR || error == ERESTART)
 			break;
 	}
@@ -566,7 +565,7 @@ dt_pcb_filter(struct dt_pcb *dp)
 		var = p->p_p->ps_pid;
 		break;
 	case DT_FV_TID:
-		var = p->p_tid;
+		var = p->p_tid + THREAD_PID_OFFSET;
 		break;
 	case DT_FV_NONE:
 		break;
@@ -622,7 +621,7 @@ dt_pcb_ring_get(struct dt_pcb *dp, int profiling)
 	dtev->dtev_pbn = dp->dp_dtp->dtp_pbn;
 	dtev->dtev_cpu = cpu_number();
 	dtev->dtev_pid = p->p_p->ps_pid;
-	dtev->dtev_tid = p->p_tid;
+	dtev->dtev_tid = p->p_tid + THREAD_PID_OFFSET;
 	nanotime(&dtev->dtev_tsp);
 
 	if (ISSET(dp->dp_evtflags, DTEVT_EXECNAME))

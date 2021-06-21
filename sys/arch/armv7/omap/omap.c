@@ -1,6 +1,6 @@
-/* $OpenBSD: omap.c,v 1.21 2017/03/01 04:36:45 jsg Exp $ */
+/* $OpenBSD: omap.c,v 1.23 2021/05/16 03:39:28 jsg Exp $ */
 /*
- * Copyright (c) 2005,2008 Dale Rahn <drahn@openbsd.com>
+ * Copyright (c) 2005,2008 Dale Rahn <drahn@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -26,9 +26,9 @@
 #include <dev/ofw/fdt.h>
 
 int	omap_match(struct device *, void *, void *);
-void	omap3_init();
-void	omap4_init();
-void	am335x_init();
+void	omap3_init(void);
+void	omap4_init(void);
+void	am335x_init(void);
 
 struct cfattach omap_ca = {
 	sizeof(struct armv7_softc), omap_match, armv7_attach

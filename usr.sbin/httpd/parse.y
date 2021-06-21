@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.120 2020/10/29 12:30:52 denis Exp $	*/
+/*	$OpenBSD: parse.y,v 1.125 2021/04/10 10:10:07 claudio Exp $	*/
 
 /*
  * Copyright (c) 2020 Matthias Pressfreund <mpfr@fn.de>
@@ -119,6 +119,7 @@ int		 listen_on(const char *, int, struct portrange *);
 int		 getservice(char *);
 int		 is_if_in_group(const char *, const char *);
 int		 get_fastcgi_dest(struct server_config *, const char *, char *);
+void		 remove_locations(struct server_config *);
 
 typedef struct {
 	union {
@@ -127,10 +128,6 @@ typedef struct {
 		struct timeval		 tv;
 		struct portrange	 port;
 		struct auth		 auth;
-		struct {
-			struct sockaddr_storage	 ss;
-			char			 name[HOST_NAME_MAX+1];
-		}			 addr;
 	} v;
 	int lineno;
 } YYSTYPE;
@@ -336,7 +333,8 @@ server		: SERVER optmatch STRING	{
 					free(srv);
 					YYERROR;
 				}
-				if (server_tls_cmp(s, srv, 0) != 0) {
+				if (srv->srv_conf.flags & SRVFLAG_TLS &&
+				    server_tls_cmp(s, srv) != 0) {
 					yyerror("server \"%s\": tls "
 					    "configuration mismatch on same "
 					    "address/port",
@@ -361,6 +359,8 @@ server		: SERVER optmatch STRING	{
 				log_warnx("%s:%d: server \"%s\": failed to "
 				    "load public/private keys", file->name,
 				    yylval.lineno, srv->srv_conf.name);
+
+				remove_locations(srv_conf);
 				serverconfig_free(srv_conf);
 				srv_conf = NULL;
 				free(srv);
@@ -2128,7 +2128,8 @@ host_if(const char *s, struct addresslist *al, int max,
 
  nextaf:
 	for (p = ifap; p != NULL && cnt < max; p = p->ifa_next) {
-		if (p->ifa_addr->sa_family != af ||
+		if (p->ifa_addr == NULL ||
+		    p->ifa_addr->sa_family != af ||
 		    (strcmp(s, p->ifa_name) != 0 &&
 		    !is_if_in_group(p->ifa_name, s)))
 			continue;
@@ -2143,6 +2144,7 @@ host_if(const char *s, struct addresslist *al, int max,
 				log_warnx("%s: interface name truncated",
 				    __func__);
 			freeifaddrs(ifap);
+			free(h);
 			return (-1);
 		}
 		if (ipproto != -1)
@@ -2492,4 +2494,19 @@ get_fastcgi_dest(struct server_config *xsrv_conf, const char *node, char *port)
 	freeaddrinfo(res);
 
 	return (0);
+}
+
+void
+remove_locations(struct server_config *xsrv_conf)
+{
+	struct server *s, *next;
+
+	TAILQ_FOREACH_SAFE(s, conf->sc_servers, srv_entry, next) {
+		if (!(s->srv_conf.flags & SRVFLAG_LOCATION &&
+		    s->srv_conf.parent_id == xsrv_conf->parent_id))
+			continue;
+		TAILQ_REMOVE(conf->sc_servers, s, srv_entry);
+		serverconfig_free(&s->srv_conf);
+		free(s);
+	}
 }

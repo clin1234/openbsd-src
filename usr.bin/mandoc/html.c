@@ -1,4 +1,4 @@
-/* $OpenBSD: html.c,v 1.142 2020/10/16 17:22:38 schwarze Exp $ */
+/* $OpenBSD: html.c,v 1.144 2021/05/22 05:49:32 anton Exp $ */
 /*
  * Copyright (c) 2011-2015, 2017-2020 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2008-2011, 2014 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -138,6 +138,7 @@ html_alloc(const struct manoutput *outopts)
 	h = mandoc_calloc(1, sizeof(struct html));
 
 	h->tag = NULL;
+	h->metac = h->metal = ESCAPE_FONTROMAN;
 	h->style = outopts->style;
 	if ((h->base_man1 = outopts->man) == NULL)
 		h->base_man2 = NULL;
@@ -193,6 +194,8 @@ print_gen_head(struct html *h)
 	struct tag	*t;
 
 	print_otag(h, TAG_META, "?", "charset", "utf-8");
+	print_otag(h, TAG_META, "??", "name", "viewport",
+	    "content", "width=device-width, initial-scale=1.0");
 	if (h->style != NULL) {
 		print_otag(h, TAG_LINK, "?h??", "rel", "stylesheet",
 		    h->style, "type", "text/css", "media", "all");

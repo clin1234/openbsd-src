@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_extern.h,v 1.154 2020/10/19 08:19:46 mpi Exp $	*/
+/*	$OpenBSD: uvm_extern.h,v 1.157 2021/03/12 14:15:49 jsg Exp $	*/
 /*	$NetBSD: uvm_extern.h,v 1.57 2001/03/09 01:02:12 chs Exp $	*/
 
 /*
@@ -142,14 +142,15 @@ typedef int		vm_prot_t;
 #define	UVM_PGA_ZERO		0x0002	/* returned page must be zeroed */
 
 /*
- * flags for uvm_pglistalloc()
+ * flags for uvm_pglistalloc() also used by uvm_pmr_getpages()
  */
 #define UVM_PLA_WAITOK		0x0001	/* may sleep */
 #define UVM_PLA_NOWAIT		0x0002	/* can't sleep (need one of the two) */
 #define UVM_PLA_ZERO		0x0004	/* zero all pages before returning */
 #define UVM_PLA_TRYCONTIG	0x0008	/* try to allocate contig physmem */
 #define UVM_PLA_FAILOK		0x0010	/* caller can handle failure */
-#define UVM_PLA_NOWAKE		0x0020	/* don't wake the page daemon on failure */
+#define UVM_PLA_NOWAKE		0x0020	/* don't wake page daemon on failure */
+#define UVM_PLA_USERESERVE	0x0040	/* can allocate from kernel reserve */
 
 /*
  * lockflags that control the locking behavior of various functions.
@@ -218,7 +219,7 @@ struct vmspace {
  * uvm_constraint_range's:
  * MD code is allowed to setup constraint ranges for memory allocators, the
  * primary use for this is to keep allocation for certain memory consumers
- * such as mbuf pools withing address ranges that are reachable by devices
+ * such as mbuf pools within address ranges that are reachable by devices
  * that perform DMA.
  *
  * It is also to discourge memory allocations from being satisfied from ranges
@@ -288,6 +289,7 @@ void			uvm_vsunlock_device(struct proc *, void *, size_t,
 			    void *);
 void			uvm_pause(void);
 void			uvm_init(void);	
+void			uvm_init_percpu(void);
 int			uvm_io(vm_map_t, struct uio *, int);
 
 #define	UVM_IO_FIXPROT	0x01

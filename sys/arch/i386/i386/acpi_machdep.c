@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpi_machdep.c,v 1.74 2020/07/21 03:48:06 deraadt Exp $	*/
+/*	$OpenBSD: acpi_machdep.c,v 1.76 2021/03/15 22:44:57 patrick Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -117,7 +117,8 @@ acpi_map(paddr_t pa, size_t len, struct acpi_mem_map *handle)
 {
 	paddr_t pgpa = trunc_page(pa);
 	paddr_t endpa = round_page(pa + len);
-	vaddr_t va = uvm_km_valloc(kernel_map, endpa - pgpa);
+	vaddr_t va = (vaddr_t)km_alloc(endpa - pgpa, &kv_any, &kp_none,
+	    &kd_nowait);
 
 	if (va == 0)
 		return (ENOMEM);
@@ -140,7 +141,7 @@ void
 acpi_unmap(struct acpi_mem_map *handle)
 {
 	pmap_kremove(handle->baseva, handle->vsize);
-	uvm_km_free(kernel_map, handle->baseva, handle->vsize);
+	km_free((void *)handle->baseva, handle->vsize, &kv_any, &kp_none);
 }
 
 int
@@ -519,3 +520,9 @@ acpi_resume_mp(void)
 #endif /* MULTIPROCESSOR */
 
 #endif /* ! SMALL_KERNEL */
+
+bus_dma_tag_t
+acpi_iommu_device_map(struct aml_node *node, bus_dma_tag_t dmat)
+{
+	return dmat;
+}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ssl.h,v 1.21 2019/09/18 11:26:30 eric Exp $	*/
+/*	$OpenBSD: ssl.h,v 1.24 2021/05/26 07:05:50 eric Exp $	*/
 /*
  * Copyright (c) 2013 Gilles Chehade <gilles@poolp.org>
  *
@@ -15,9 +15,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#define SSL_CIPHERS		"HIGH:!aNULL:!MD5"
-#define	SSL_SESSION_TIMEOUT	300
-
 struct pki {
 	char			 pki_name[HOST_NAME_MAX+1];
 
@@ -28,8 +25,6 @@ struct pki {
 	char			*pki_key_file;
 	char			*pki_key;
 	off_t			 pki_key_len;
-
-	EVP_PKEY		*pki_pkey;
 
 	int			 pki_dhe;
 };
@@ -44,27 +39,9 @@ struct ca {
 
 
 /* ssl.c */
-void		ssl_init(void);
-int		ssl_setup(SSL_CTX **, struct pki *,
-    int (*)(SSL *, int *, void *), const char *);
-SSL_CTX	       *ssl_ctx_create(const char *, char *, off_t, const char *);
-int	        ssl_cmp(struct pki *, struct pki *);
-char	       *ssl_load_file(const char *, off_t *, mode_t);
-char	       *ssl_load_key(const char *, off_t *, char *, mode_t, const char *);
-
-const char     *ssl_to_text(const SSL *);
-void		ssl_error(const char *);
-
-int		ssl_load_certificate(struct pki *, const char *);
-int		ssl_load_keyfile(struct pki *, const char *, const char *);
-int		ssl_load_cafile(struct ca *, const char *);
-int		ssl_load_pkey(const void *, size_t, char *, off_t,
-		    X509 **, EVP_PKEY **);
-int		ssl_ctx_fake_private_key(SSL_CTX *, const void *, size_t,
-		    char *, off_t, X509 **, EVP_PKEY **);
-
-/* ssl_privsep.c */
-int		ssl_by_mem_ctrl(X509_LOOKUP *, int, const char *, long, char **);
-
-/* ssl_verify.c */
-int ssl_check_name(X509 *, const char *, int *);
+void ssl_init(void);
+void ssl_error(const char *);
+int ssl_load_certificate(struct pki *, const char *);
+int ssl_load_keyfile(struct pki *, const char *, const char *);
+int ssl_load_cafile(struct ca *, const char *);
+char *ssl_pubkey_hash(const char *, off_t);

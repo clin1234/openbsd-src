@@ -1,4 +1,4 @@
-/* $OpenBSD: pmap.c,v 1.68 2020/10/21 21:53:45 deraadt Exp $ */
+/* $OpenBSD: pmap.c,v 1.79 2021/05/21 14:41:57 kettenis Exp $ */
 /*
  * Copyright (c) 2008-2009,2014-2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -35,6 +35,7 @@
 #include <ddb/db_output.h>
 
 void pmap_setttb(struct proc *p);
+void pmap_allocate_asid(pmap_t);
 void pmap_free_asid(pmap_t pm);
 
 /* We run userland code with ASIDs that have the low bit set. */
@@ -81,8 +82,6 @@ void pmap_remove_pv(struct pte_desc *pted);
 
 void _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags,
     int cache);
-
-void pmap_allocate_asid(pmap_t);
 
 struct pmapvp0 {
 	uint64_t l0[VP_IDX0_CNT];
@@ -223,6 +222,132 @@ const uint64_t ap_bits_kern[8] = {
 	[PROT_EXEC|PROT_WRITE]			= ATTR_UXN|ATTR_AF|ATTR_AP(0),
 	[PROT_EXEC|PROT_WRITE|PROT_READ]	= ATTR_UXN|ATTR_AF|ATTR_AP(0),
 };
+
+/*
+ * We allocate ASIDs in pairs.  The first ASID is used to run the
+ * kernel and has both userland and the full kernel mapped.  The
+ * second ASID is used for running userland and has only the
+ * trampoline page mapped in addition to userland.
+ */
+
+#define PMAP_MAX_NASID	(1 << 16)
+#define PMAP_ASID_MASK	(PMAP_MAX_NASID - 1)
+int pmap_nasid = (1 << 8);
+
+uint32_t pmap_asid[PMAP_MAX_NASID / 32];
+uint64_t pmap_asid_gen = PMAP_MAX_NASID;
+struct mutex pmap_asid_mtx = MUTEX_INITIALIZER(IPL_HIGH);
+
+int
+pmap_find_asid(pmap_t pm)
+{
+	uint32_t bits;
+	int asid, bit;
+	int retry;
+
+	/* Attempt to re-use the old ASID. */
+	asid = pm->pm_asid & PMAP_ASID_MASK;
+	bit = asid & (32 - 1);
+	bits = pmap_asid[asid / 32];
+	if ((bits & (3U << bit)) == 0)
+		return asid;
+
+	/* Attempt to obtain a random ASID. */
+	for (retry = 5; retry > 0; retry--) {
+		asid = arc4random() & (pmap_nasid - 2);
+		bit = (asid & (32 - 1));
+		bits = pmap_asid[asid / 32];
+		if ((bits & (3U << bit)) == 0)
+			return asid;
+	}
+
+	/* Do a linear search if that fails. */
+	for (asid = 0; asid < pmap_nasid; asid += 32) {
+		bits = pmap_asid[asid / 32];
+		if (bits == ~0)
+			continue;
+		for (bit = 0; bit < 32; bit += 2) {
+			if ((bits & (3U << bit)) == 0)
+				return asid + bit;
+		}
+	}
+
+	return -1;
+}
+
+int
+pmap_rollover_asid(pmap_t pm)
+{
+	struct cpu_info *ci;
+	CPU_INFO_ITERATOR cii;
+	int asid, bit;
+
+	SCHED_ASSERT_LOCKED();
+	MUTEX_ASSERT_LOCKED(&pmap_asid_mtx);
+
+	/* Start a new generation.  Mark ASID 0 as in-use again. */
+	pmap_asid_gen += PMAP_MAX_NASID;
+	memset(pmap_asid, 0, (pmap_nasid / 32) * sizeof(uint32_t));
+	pmap_asid[0] |= (3U << 0);
+
+	/* 
+	 * Carry over all the ASIDs that are currently active into the
+	 * new generation and reserve them.
+	 */
+	CPU_INFO_FOREACH(cii, ci) {
+		asid = ci->ci_curpm->pm_asid & PMAP_ASID_MASK;
+		ci->ci_curpm->pm_asid = asid | pmap_asid_gen;
+		bit = (asid & (32 - 1));
+		pmap_asid[asid / 32] |= (3U << bit);
+	}
+
+	/* Flush the TLBs on all CPUs. */
+	cpu_tlb_flush();
+
+	if ((pm->pm_asid & ~PMAP_ASID_MASK) == pmap_asid_gen)
+		return pm->pm_asid & PMAP_ASID_MASK;
+
+	return pmap_find_asid(pm);
+}
+
+void
+pmap_allocate_asid(pmap_t pm)
+{
+	int asid, bit;
+
+	mtx_enter(&pmap_asid_mtx);
+	asid = pmap_find_asid(pm);
+	if (asid == -1) {
+		/*
+		 * We have no free ASIDs.  Do a rollover to clear all
+		 * inactive ASIDs and pick a fresh one.
+		 */
+		asid = pmap_rollover_asid(pm);
+	}
+	KASSERT(asid > 0 && asid < pmap_nasid);
+	bit = asid & (32 - 1);
+	pmap_asid[asid / 32] |= (3U << bit);
+	pm->pm_asid = asid | pmap_asid_gen;
+	mtx_leave(&pmap_asid_mtx);
+}
+
+void
+pmap_free_asid(pmap_t pm)
+{
+	int asid, bit;
+
+	KASSERT(pm != curcpu()->ci_curpm);
+	cpu_tlb_flush_asid_all((uint64_t)pm->pm_asid << 48);
+	cpu_tlb_flush_asid_all((uint64_t)(pm->pm_asid | ASID_USER) << 48);
+
+	mtx_enter(&pmap_asid_mtx);
+	if ((pm->pm_asid & ~PMAP_ASID_MASK) == pmap_asid_gen) {
+		asid = pm->pm_asid & PMAP_ASID_MASK;
+		bit = (asid & (32 - 1));
+		pmap_asid[asid / 32] &= ~(3U << bit);
+	}
+	mtx_leave(&pmap_asid_mtx);
+}
 
 /*
  * This is used for pmap_kernel() mappings, they are not to be removed
@@ -431,7 +556,7 @@ PTED_VALID(struct pte_desc *pted)
  * One issue of making this a single data structure is that two pointers are
  * wasted for every page which does not map ram (device mappings), this
  * should be a low percentage of mapped pages in the system, so should not
- * have too noticable unnecessary ram consumption.
+ * have too noticeable unnecessary ram consumption.
  */
 
 void
@@ -472,7 +597,7 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 	if (pa & PMAP_NOCACHE)
 		cache = PMAP_CACHE_CI;
 	if (pa & PMAP_DEVICE)
-		cache = PMAP_CACHE_DEV;
+		cache = PMAP_CACHE_DEV_NGNRNE;
 	pg = PHYS_TO_VM_PAGE(pa);
 
 	pmap_lock(pm);
@@ -627,7 +752,7 @@ _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags, int cache)
 
 	/* Do not have pted for this, get one and put it in VP */
 	if (pted == NULL) {
-		panic("pted not preallocated in pmap_kernel() va %lx pa %lx\n",
+		panic("pted not preallocated in pmap_kernel() va %lx pa %lx",
 		    va, pa);
 	}
 
@@ -640,15 +765,11 @@ _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags, int cache)
 	/* Calculate PTE */
 	pmap_fill_pte(pm, va, pa, pted, prot, flags, cache);
 
-	/*
-	 * Insert into table
-	 * We were told to map the page, probably called from vm_fault,
-	 * so map the page!
-	 */
+	/* Insert into table */
 	pmap_pte_insert(pted);
 
 	ttlb_flush(pm, va & ~PAGE_MASK);
-	if (cache == PMAP_CACHE_CI || cache == PMAP_CACHE_DEV)
+	if (cache == PMAP_CACHE_CI || cache == PMAP_CACHE_DEV_NGNRNE)
 		cpu_idcache_wbinv_range(va & ~PAGE_MASK, PAGE_SIZE);
 }
 
@@ -735,7 +856,9 @@ pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 		break;
 	case PMAP_CACHE_CI:
 		break;
-	case PMAP_CACHE_DEV:
+	case PMAP_CACHE_DEV_NGNRNE:
+		break;
+	case PMAP_CACHE_DEV_NGNRE:
 		break;
 	default:
 		panic("pmap_fill_pte:invalid cache mode");
@@ -827,7 +950,6 @@ pmap_pinit(pmap_t pm)
 
 	pmap_extract(pmap_kernel(), l0va, (paddr_t *)&pm->pm_pt0pa);
 
-	pmap_allocate_asid(pm);
 	pmap_reference(pm);
 }
 
@@ -960,7 +1082,7 @@ pmap_vp_destroy(pmap_t pm)
 	pm->pm_vp.l0 = NULL;
 }
 
-vaddr_t virtual_avail, virtual_end;
+vaddr_t virtual_avail;
 int	pmap_virtual_space_called;
 
 static inline uint64_t
@@ -1156,6 +1278,7 @@ pmap_bootstrap(long kvo, paddr_t lpt1, long kernelstart, long kernelend,
 	struct pmapvp3 *vp3;
 	struct pte_desc *pted;
 	vaddr_t vstart;
+	uint64_t id_aa64mmfr0;
 	int i, j, k;
 	int lb_idx2, ub_idx2;
 
@@ -1189,6 +1312,9 @@ pmap_bootstrap(long kvo, paddr_t lpt1, long kernelstart, long kernelend,
 	pmap_tramp.pm_vp.l1 = (struct pmapvp1 *)va + 1;
 	pmap_tramp.pm_privileged = 1;
 	pmap_tramp.pm_asid = 0;
+
+	/* Mark ASID 0 as in-use. */
+	pmap_asid[0] |= (3U << 0);
 
 	/* allocate Lx entries */
 	for (i = VP_IDX1(VM_MIN_KERNEL_ADDRESS);
@@ -1314,6 +1440,10 @@ pmap_bootstrap(long kvo, paddr_t lpt1, long kernelstart, long kernelend,
 
 	curcpu()->ci_curpm = pmap_kernel();
 
+	id_aa64mmfr0 = READ_SPECIALREG(id_aa64mmfr0_el1);
+	if (ID_AA64MMFR0_ASID_BITS(id_aa64mmfr0) == ID_AA64MMFR0_ASID_BITS_16)
+		pmap_nasid = (1 << 16);
+
 	vmmap = vstart;
 	vstart += PAGE_SIZE;
 
@@ -1328,10 +1458,10 @@ pmap_set_l1(struct pmap *pm, uint64_t va, struct pmapvp1 *l1_va)
 	int idx0;
 
 	if (pmap_extract(pmap_kernel(), (vaddr_t)l1_va, &l1_pa) == 0)
-		panic("unable to find vp pa mapping %p\n", l1_va);
+		panic("unable to find vp pa mapping %p", l1_va);
 
 	if (l1_pa & (Lx_TABLE_ALIGN-1))
-		panic("misaligned L2 table\n");
+		panic("misaligned L2 table");
 
 	pg_entry = VP_Lx(l1_pa);
 
@@ -1349,10 +1479,10 @@ pmap_set_l2(struct pmap *pm, uint64_t va, struct pmapvp1 *vp1,
 	int idx1;
 
 	if (pmap_extract(pmap_kernel(), (vaddr_t)l2_va, &l2_pa) == 0)
-		panic("unable to find vp pa mapping %p\n", l2_va);
+		panic("unable to find vp pa mapping %p", l2_va);
 
 	if (l2_pa & (Lx_TABLE_ALIGN-1))
-		panic("misaligned L2 table\n");
+		panic("misaligned L2 table");
 
 	pg_entry = VP_Lx(l2_pa);
 
@@ -1370,10 +1500,10 @@ pmap_set_l3(struct pmap *pm, uint64_t va, struct pmapvp2 *vp2,
 	int idx2;
 
 	if (pmap_extract(pmap_kernel(), (vaddr_t)l3_va, &l3_pa) == 0)
-		panic("unable to find vp pa mapping %p\n", l3_va);
+		panic("unable to find vp pa mapping %p", l3_va);
 
 	if (l3_pa & (Lx_TABLE_ALIGN-1))
-		panic("misaligned L2 table\n");
+		panic("misaligned L2 table");
 
 	pg_entry = VP_Lx(l3_pa);
 
@@ -1389,12 +1519,13 @@ void
 pmap_activate(struct proc *p)
 {
 	pmap_t pm = p->p_vmspace->vm_map.pmap;
-	int psw;
+	int s;
 
-	psw = disable_interrupts();
-	if (p == curproc && pm != curcpu()->ci_curpm)
+	if (p == curproc && pm != curcpu()->ci_curpm) {
+		SCHED_LOCK(s);
 		pmap_setttb(p);
-	restore_interrupts(psw);
+		SCHED_UNLOCK(s);
+	}
 }
 
 /*
@@ -1537,11 +1668,14 @@ pmap_init(void)
 	 * the identity mapping in TTBR0 and can set the TCR to a
 	 * more useful value.
 	 */
+	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
+	__asm volatile("isb");
 	tcr = READ_SPECIALREG(tcr_el1);
 	tcr &= ~TCR_T0SZ(0x3f);
 	tcr |= TCR_T0SZ(64 - USER_SPACE_BITS);
 	tcr |= TCR_A1;
 	WRITE_SPECIALREG(tcr_el1, tcr);
+	cpu_tlb_flush();
 
 	pool_init(&pmap_pmap_pool, sizeof(struct pmap), 0, IPL_NONE, 0,
 	    "pmap", NULL);
@@ -1601,8 +1735,6 @@ pmap_proc_iflush(struct process *pr, vaddr_t va, vsize_t len)
 void
 pmap_pte_insert(struct pte_desc *pted)
 {
-	/* put entry into table */
-	/* need to deal with ref/change here */
 	pmap_t pm = pted->pted_pmap;
 	uint64_t *pl3;
 
@@ -1637,8 +1769,12 @@ pmap_pte_update(struct pte_desc *pted, uint64_t *pl3)
 		attr |= ATTR_IDX(PTE_ATTR_CI);
 		attr |= ATTR_SH(SH_INNER);
 		break;
-	case PMAP_CACHE_DEV:
-		attr |= ATTR_IDX(PTE_ATTR_DEV);
+	case PMAP_CACHE_DEV_NGNRNE:
+		attr |= ATTR_IDX(PTE_ATTR_DEV_NGNRNE);
+		attr |= ATTR_SH(SH_INNER);
+		break;
+	case PMAP_CACHE_DEV_NGNRE:
+		attr |= ATTR_IDX(PTE_ATTR_DEV_NGNRE);
 		attr |= ATTR_SH(SH_INNER);
 		break;
 	default:
@@ -1657,8 +1793,6 @@ pmap_pte_update(struct pte_desc *pted, uint64_t *pl3)
 void
 pmap_pte_remove(struct pte_desc *pted, int remove_pted)
 {
-	/* put entry into table */
-	/* need to deal with ref/change here */
 	struct pmapvp1 *vp1;
 	struct pmapvp2 *vp2;
 	struct pmapvp3 *vp3;
@@ -1685,13 +1819,11 @@ pmap_pte_remove(struct pte_desc *pted, int remove_pted)
 	vp3->l3[VP_IDX3(pted->pted_va)] = 0;
 	if (remove_pted)
 		vp3->vp[VP_IDX3(pted->pted_va)] = NULL;
-
-	ttlb_flush(pm, pted->pted_va);
 }
 
 /*
  * This function exists to do software referenced/modified emulation.
- * It's purpose is to tell the caller that a fault was generated either
+ * Its purpose is to tell the caller that a fault was generated either
  * for this emulation, or to tell the caller that it's a legit fault.
  */
 int
@@ -1720,13 +1852,6 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, vm_prot_t ftype)
 		goto done;
 
 	/*
-	 * Check based on fault type for mod/ref emulation.
-	 * if L3 entry is zero, it is not a possible fixup
-	 */
-	if (*pl3 == 0)
-		goto done;
-
-	/*
 	 * Check the fault types to find out if we were doing
 	 * any mod/ref emulation and fixup the PTE if we were.
 	 */
@@ -1751,7 +1876,7 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, vm_prot_t ftype)
 
 		/*
 		 * Exec always includes a reference. Since we now know
-		 * the page has been accesed, we can enable read as well
+		 * the page has been accessed, we can enable read as well
 		 * if UVM allows it.
 		 */
 		atomic_setbits_int(&pg->pg_flags, PG_PMAP_REF);
@@ -1857,17 +1982,13 @@ int
 pmap_clear_modify(struct vm_page *pg)
 {
 	struct pte_desc *pted;
-	uint64_t *pl3 = NULL;
 
 	atomic_clearbits_int(&pg->pg_flags, PG_PMAP_MOD);
 
 	mtx_enter(&pg->mdpage.pv_mtx);
 	LIST_FOREACH(pted, &(pg->mdpage.pv_list), pted_pv_list) {
-		if (pmap_vp_lookup(pted->pted_pmap, pted->pted_va & ~PAGE_MASK, &pl3) == NULL)
-			panic("failed to look up pte\n");
-		*pl3  |= ATTR_AP(2);
 		pted->pted_pte &= ~PROT_WRITE;
-
+		pmap_pte_insert(pted);
 		ttlb_flush(pted->pted_pmap, pted->pted_va & ~PAGE_MASK);
 	}
 	mtx_leave(&pg->mdpage.pv_mtx);
@@ -1926,7 +2047,7 @@ void
 pmap_virtual_space(vaddr_t *start, vaddr_t *end)
 {
 	*start = virtual_avail;
-	*end = virtual_end;
+	*end = VM_MAX_KERNEL_ADDRESS;
 
 	/* Prevent further KVA stealing. */
 	pmap_virtual_space_called = 1;
@@ -2232,57 +2353,8 @@ pmap_map_early(paddr_t spa, psize_t len)
 		    ATTR_IDX(PTE_ATTR_WB) | ATTR_SH(SH_INNER) |
 		    ATTR_nG | ATTR_UXN | ATTR_AF | ATTR_AP(0);
 	}
-	__asm volatile("dsb sy");
+	__asm volatile("dsb sy" ::: "memory");
 	__asm volatile("isb");
-}
-
-/*
- * We allocate ASIDs in pairs.  The first ASID is used to run the
- * kernel and has both userland and the full kernel mapped.  The
- * second ASID is used for running userland and has only the
- * trampoline page mapped in addition to userland.
- */
-
-#define NUM_ASID (1 << 16)
-uint32_t pmap_asid[NUM_ASID / 32];
-
-void
-pmap_allocate_asid(pmap_t pm)
-{
-	uint32_t bits;
-	int asid, bit;
-
-	for (;;) {
-		do {
-			asid = arc4random() & (NUM_ASID - 2);
-			bit = (asid & (32 - 1));
-			bits = pmap_asid[asid / 32];
-		} while (asid == 0 || (bits & (3U << bit)));
-
-		if (atomic_cas_uint(&pmap_asid[asid / 32], bits,
-		    bits | (3U << bit)) == bits)
-			break;
-	}
-	pm->pm_asid = asid;
-}
-
-void
-pmap_free_asid(pmap_t pm)
-{
-	uint32_t bits;
-	int bit;
-
-	KASSERT(pm != curcpu()->ci_curpm);
-	cpu_tlb_flush_asid_all((uint64_t)pm->pm_asid << 48);
-	cpu_tlb_flush_asid_all((uint64_t)(pm->pm_asid | ASID_USER) << 48);
-
-	bit = (pm->pm_asid & (32 - 1));
-	for (;;) {
-		bits = pmap_asid[pm->pm_asid / 32];
-		if (atomic_cas_uint(&pmap_asid[pm->pm_asid / 32], bits,
-		    bits & ~(3U << bit)) == bits)
-			break;
-	}
 }
 
 void
@@ -2291,9 +2363,19 @@ pmap_setttb(struct proc *p)
 	struct cpu_info *ci = curcpu();
 	pmap_t pm = p->p_vmspace->vm_map.pmap;
 
+	SCHED_ASSERT_LOCKED();
+
+	/*
+	 * If the generation of the ASID for the new pmap doesn't
+	 * match the current generation, allocate a new ASID.
+	 */
+	if (pm != pmap_kernel() &&
+	    (pm->pm_asid & ~PMAP_ASID_MASK) != pmap_asid_gen)
+		pmap_allocate_asid(pm);
+
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");
 	cpu_setttb(pm->pm_asid, pm->pm_pt0pa);
-	ci->ci_flush_bp();
 	ci->ci_curpm = pm;
+	ci->ci_flush_bp();
 }

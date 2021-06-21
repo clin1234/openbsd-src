@@ -1,4 +1,4 @@
-/*	$OpenBSD: systm.h,v 1.148 2020/08/26 03:29:07 visa Exp $	*/
+/*	$OpenBSD: systm.h,v 1.154 2021/06/02 00:39:25 cheloha Exp $	*/
 /*	$NetBSD: systm.h,v 1.50 1996/06/09 04:55:09 briggs Exp $	*/
 
 /*-
@@ -72,7 +72,6 @@
  */
 extern int securelevel;		/* system security level */
 extern const char *panicstr;	/* panic message */
-extern const char *faultstr;	/* fault message */
 extern const char version[];		/* system version */
 extern const char copyright[];	/* system copyright */
 extern const char ostype[];
@@ -106,6 +105,8 @@ extern struct vnode *rootvp;	/* vnode equivalent to above */
 
 extern dev_t swapdev;		/* swapping device */
 extern struct vnode *swapdev_vp;/* vnode equivalent to above */
+
+extern int nowake;		/* dead wakeup(9) channel */
 
 struct proc;
 struct process;
@@ -149,11 +150,6 @@ int	enosys(void);
 int	enoioctl(void);
 int	enxio(void);
 int	eopnotsupp(void *);
-
-struct vnodeopv_desc;
-void vfs_opv_init_explicit(struct vnodeopv_desc *);
-void vfs_opv_init_default(struct vnodeopv_desc *);
-void vfs_op_init(void);
 
 int	seltrue(dev_t dev, int which, struct proc *);
 int	selfalse(dev_t dev, int which, struct proc *);
@@ -255,13 +251,8 @@ void	stop_periodic_resettodr(void);
 
 struct sleep_state;
 void	sleep_setup(struct sleep_state *, const volatile void *, int,
-	    const char *);
-void	sleep_setup_timeout(struct sleep_state *, int);
-void	sleep_setup_signal(struct sleep_state *);
-void	sleep_finish(struct sleep_state *, int);
-int	sleep_finish_timeout(struct sleep_state *);
-int	sleep_finish_signal(struct sleep_state *);
-int	sleep_finish_all(struct sleep_state *, int);
+	    const char *, int);
+int	sleep_finish(struct sleep_state *, int);
 void	sleep_queue_init(void);
 
 struct cond;
@@ -353,6 +344,8 @@ extern struct rwlock netlock;
 #define	NET_RLOCK_IN_IOCTL()	do { rw_enter_read(&netlock); } while (0)
 #define	NET_RUNLOCK_IN_IOCTL()	do { rw_exit_read(&netlock); } while (0)
 
+#ifdef DIAGNOSTIC
+
 #define	NET_ASSERT_UNLOCKED()						\
 do {									\
 	int _s = rw_status(&netlock);					\
@@ -366,6 +359,19 @@ do {									\
 	if ((splassert_ctl > 0) && (_s != RW_WRITE && _s != RW_READ))	\
 		splassert_fail(RW_READ, _s, __func__);			\
 } while (0)
+
+#define	NET_ASSERT_WLOCKED()						\
+do {									\
+	int _s = rw_status(&netlock);					\
+	if ((splassert_ctl > 0) && (_s != RW_WRITE))			\
+		splassert_fail(RW_WRITE, _s, __func__);			\
+} while (0)
+
+#else /* DIAGNOSTIC */
+#define	NET_ASSERT_UNLOCKED()	do {} while (0)
+#define	NET_ASSERT_LOCKED()	do {} while (0)
+#define	NET_ASSERT_WLOCKED()	do {} while (0)
+#endif /* !DIAGNOSTIC */
 
 __returns_twice int	setjmp(label_t *);
 __dead void	longjmp(label_t *);

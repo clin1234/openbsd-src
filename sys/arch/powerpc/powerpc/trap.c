@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.118 2020/10/27 19:18:05 deraadt Exp $	*/
+/*	$OpenBSD: trap.c,v 1.121 2021/05/20 12:34:35 bluhm Exp $	*/
 /*	$NetBSD: trap.c,v 1.3 1996/10/13 03:31:37 christos Exp $	*/
 
 /*
@@ -78,7 +78,7 @@ void trap(struct trapframe *frame);
  * and the contents of that register are not used to optimize the save.
  *
  * This can lead to VRSAVE corruption, data passing between processes,
- * because this register is accessable without the MSR[VEC] bit set.
+ * because this register is accessible without the MSR[VEC] bit set.
  * To store/restore this cleanly a processor identifier bit would need
  * to be saved and this register saved on every context switch.
  * Since we do not use the information, we may be able to get by
@@ -235,7 +235,7 @@ trap(struct trapframe *frame)
 	faultbuf *fb;
 	struct vm_map *map;
 	vaddr_t va;
-	int ftype, vftype;
+	int access_type;
 	struct sysent *callp;
 	size_t argsize;
 	register_t code, error;
@@ -278,14 +278,11 @@ trap(struct trapframe *frame)
 				return;
 		}
 		if (frame->dsisr & DSISR_STORE)
-			ftype = PROT_READ | PROT_WRITE;
+			access_type = PROT_WRITE;
 		else
-			ftype = PROT_READ;
+			access_type = PROT_READ;
 
-		KERNEL_LOCK();
-		error = uvm_fault(map, trunc_page(va), 0, ftype);
-		KERNEL_UNLOCK();
-
+		error = uvm_fault(map, trunc_page(va), 0, access_type);
 		if (error == 0)
 			return;
 
@@ -312,17 +309,13 @@ trap(struct trapframe *frame)
 		    uvm_map_inentry_sp, p->p_vmspace->vm_map.sserial))
 			goto out;
 
-		if (frame->dsisr & DSISR_STORE) {
-			ftype = PROT_READ | PROT_WRITE;
-			vftype = PROT_WRITE;
-		} else
-			vftype = ftype = PROT_READ;
+		if (frame->dsisr & DSISR_STORE)
+			access_type = PROT_WRITE;
+		else
+			access_type = PROT_READ;
 
-		KERNEL_LOCK();
 		error = uvm_fault(&p->p_vmspace->vm_map,
-		    trunc_page(frame->dar), 0, ftype);
-		KERNEL_UNLOCK();
-
+		    trunc_page(frame->dar), 0, access_type);
 		if (error == 0) {
 			uvm_grow(p, frame->dar);
 			break;
@@ -330,9 +323,9 @@ trap(struct trapframe *frame)
 
 		/*
 		 * keep this for later in case we want it later.
-		*/
+		 */
 		sv.sival_int = frame->dar;
-		trapsignal(p, SIGSEGV, vftype, SEGV_MAPERR, sv);
+		trapsignal(p, SIGSEGV, access_type, SEGV_MAPERR, sv);
 		break;
 
 	case EXC_ISI|EXC_USER:
@@ -341,12 +334,10 @@ trap(struct trapframe *frame)
 		    frame->srr0, 0, 1))
 			break;
 
-		ftype = PROT_READ | PROT_EXEC;
+		access_type = PROT_READ | PROT_EXEC;
 
-		KERNEL_LOCK();
 		error = uvm_fault(&p->p_vmspace->vm_map,
-		    trunc_page(frame->srr0), 0, ftype);
-		KERNEL_UNLOCK();
+		    trunc_page(frame->srr0), 0, access_type);
 
 		if (error == 0) {
 			uvm_grow(p, frame->srr0);

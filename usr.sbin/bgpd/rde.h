@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde.h,v 1.234 2020/06/05 19:50:59 denis Exp $ */
+/*	$OpenBSD: rde.h,v 1.240 2021/06/17 16:05:26 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Claudio Jeker <claudio@openbsd.org> and
@@ -103,12 +103,16 @@ struct rde_peer {
 	u_int32_t			 up_nlricnt;
 	u_int32_t			 up_wcnt;
 	enum peer_state			 state;
+	enum export_type		 export_type;
 	u_int16_t			 loc_rib_id;
 	u_int16_t			 short_as;
 	u_int16_t			 mrt_idx;
+	u_int8_t			 recv_eor;	/* bitfield per AID */
+	u_int8_t			 sent_eor;	/* bitfield per AID */
 	u_int8_t			 reconf_out;	/* out filter changed */
 	u_int8_t			 reconf_rib;	/* rib changed */
 	u_int8_t			 throttled;
+	u_int8_t			 flags;
 };
 
 #define AS_SET			1
@@ -368,18 +372,20 @@ void		 rde_update_log(const char *, u_int16_t,
 void		rde_send_kroute_flush(struct rib *);
 void		rde_send_kroute(struct rib *, struct prefix *, struct prefix *);
 void		rde_send_nexthop(struct bgpd_addr *, int);
-void		rde_send_pftable(u_int16_t, struct bgpd_addr *,
-		    u_int8_t, int);
-void		rde_send_pftable_commit(void);
+void		rde_pftable_add(u_int16_t, struct prefix *);
+void		rde_pftable_del(u_int16_t, struct prefix *);
 
+int		rde_evaluate_all(void);
 void		rde_generate_updates(struct rib *, struct prefix *,
-		    struct prefix *);
+		    struct prefix *, int);
 u_int32_t	rde_local_as(void);
 int		rde_decisionflags(void);
-int		rde_as4byte(struct rde_peer *);
+void		rde_peer_send_rrefresh(struct rde_peer *, u_int8_t, u_int8_t);
 int		rde_match_peer(struct rde_peer *, struct ctl_neighbor *);
 
 /* rde_peer.c */
+int		 peer_has_as4byte(struct rde_peer *);
+int		 peer_accept_no_as_set(struct rde_peer *);
 void		 peer_init(u_int32_t);
 void		 peer_shutdown(void);
 void		 peer_foreach(void (*)(struct rde_peer *, void *), void *);
@@ -392,6 +398,7 @@ void		 peer_down(struct rde_peer *, void *);
 void		 peer_flush(struct rde_peer *, u_int8_t, time_t);
 void		 peer_stale(struct rde_peer *, u_int8_t);
 void		 peer_dump(struct rde_peer *, u_int8_t);
+void		 peer_begin_rrefresh(struct rde_peer *, u_int8_t);
 
 void		 peer_imsg_push(struct rde_peer *, struct imsg *);
 int		 peer_imsg_pop(struct rde_peer *, struct imsg *);
@@ -484,10 +491,11 @@ communities_unref(struct rde_community *comm)
 		communities_unlink(comm);
 }
 
-int	 community_to_rd(struct community *, u_int64_t *);
+int	community_to_rd(struct community *, u_int64_t *);
 
 /* rde_decide.c */
-void		 prefix_evaluate(struct prefix *, struct rib_entry *);
+int	prefix_eligible(struct prefix *);
+void	prefix_evaluate(struct rib_entry *, struct prefix *, struct prefix *);
 
 /* rde_filter.c */
 void	rde_apply_set(struct filter_set_head *, struct rde_peer *,

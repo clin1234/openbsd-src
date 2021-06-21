@@ -1,4 +1,4 @@
-/*	$Id: test-roa.c,v 1.7 2020/11/09 16:13:02 tb Exp $ */
+/*	$Id: test-roa.c,v 1.11 2021/05/06 17:03:57 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -30,6 +30,16 @@
 
 #include "extern.h"
 
+#include "test-common.c"
+
+#ifndef ASN1error
+void
+ASN1error(int err)
+{
+	ASN1err(0, err);
+}
+#endif
+
 int verbose;
 
 static void
@@ -40,8 +50,9 @@ roa_print(const struct roa *p)
 
 	assert(p != NULL);
 
-	printf("Subject key identifier: %s\n", p->ski);
-	printf("Authority key identifier: %s\n", p->aki);
+	printf("Subject key identifier: %s\n", pretty_key_id(p->ski));
+	printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
+	printf("Authority info access: %s\n", p->aia);
 	printf("asID: %" PRIu32 "\n", p->asid);
 	for (i = 0; i < p->ipsz; i++) {
 		ip_addr_print(&p->ips[i].addr,
@@ -87,7 +98,7 @@ main(int argc, char *argv[])
 		errx(1, "argument missing");
 
 	for (i = 0; i < argc; i++) {
-		if ((p = roa_parse(&xp, argv[i], NULL)) == NULL)
+		if ((p = roa_parse(&xp, argv[i])) == NULL)
 			break;
 		if (verb)
 			roa_print(p);

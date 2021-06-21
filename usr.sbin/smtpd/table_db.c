@@ -1,4 +1,4 @@
-/*	$OpenBSD: table_db.c,v 1.21 2019/06/28 13:32:51 deraadt Exp $	*/
+/*	$OpenBSD: table_db.c,v 1.24 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2011 Gilles Chehade <gilles@poolp.org>
@@ -16,28 +16,15 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #include <db.h>
-#include <ctype.h>
-#include <err.h>
-#include <event.h>
 #include <fcntl.h>
-#include <imsg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "smtpd.h"
 #include "log.h"
-
 
 /* db(3) backend */
 static int table_db_config(struct table *);
@@ -255,18 +242,17 @@ static char *
 table_db_get_entry(void *hdl, const char *key, size_t *len)
 {
 	struct dbhandle	*handle = hdl;
-	int ret;
 	DBT dbk;
 	DBT dbv;
 	char pkey[LINE_MAX];
 
 	/* workaround the stupidity of the DB interface */
 	if (strlcpy(pkey, key, sizeof pkey) >= sizeof pkey)
-		errx(1, "table_db_get_entry: key too long");
+		fatalx("table_db_get_entry: key too long");
 	dbk.data = pkey;
 	dbk.size = strlen(pkey) + 1;
 
-	if ((ret = handle->db->get(handle->db, &dbk, &dbv, 0)) != 0)
+	if (handle->db->get(handle->db, &dbk, &dbv, 0) != 0)
 		return NULL;
 
 	*len = dbv.size;

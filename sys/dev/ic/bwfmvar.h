@@ -1,4 +1,4 @@
-/* $OpenBSD: bwfmvar.h,v 1.20 2020/05/15 14:09:14 patrick Exp $ */
+/* $OpenBSD: bwfmvar.h,v 1.23 2021/02/26 00:07:41 patrick Exp $ */
 /*
  * Copyright (c) 2010-2016 Broadcom Corporation
  * Copyright (c) 2016,2017 Patrick Wildt <patrick@blueri.se>
@@ -48,6 +48,7 @@
 #define BRCM_CC_4365_CHIP_ID		0x4365
 #define BRCM_CC_4366_CHIP_ID		0x4366
 #define BRCM_CC_4371_CHIP_ID		0x4371
+#define BRCM_CC_4378_CHIP_ID		0x4378
 #define CY_CC_4373_CHIP_ID		0x4373
 
 /* Defaults */
@@ -172,6 +173,7 @@ struct bwfm_softc {
 
 	u_char			*sc_clm;
 	size_t			 sc_clmsize;
+	int			 sc_key_tasks;
 };
 
 void bwfm_attach(struct bwfm_softc *);
@@ -188,3 +190,5 @@ void bwfm_rx(struct bwfm_softc *, struct mbuf *, struct mbuf_list *);
 void bwfm_do_async(struct bwfm_softc *, void (*)(struct bwfm_softc *, void *),
     void *, int);
 int bwfm_nvram_convert(u_char *, size_t, size_t *);
+int bwfm_loadfirmware(struct bwfm_softc *, const char *, const char *,
+    u_char **, size_t *, u_char **, size_t *, size_t *);

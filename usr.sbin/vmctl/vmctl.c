@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmctl.c,v 1.75 2020/09/02 19:57:33 tb Exp $	*/
+/*	$OpenBSD: vmctl.c,v 1.79 2021/06/10 19:50:05 dv Exp $	*/
 
 /*
  * Copyright (c) 2014 Mike Larkin <mlarkin@openbsd.org>
@@ -48,6 +48,8 @@ uint32_t info_id;
 char info_name[VMM_MAX_NAME_LEN];
 enum actions info_action;
 unsigned int info_flags;
+
+struct imsgbuf *ibuf;
 
 /*
  * vm_start
@@ -458,9 +460,10 @@ terminate_vm(uint32_t terminate_id, const char *name, unsigned int flags)
 /*
  * terminate_vm_complete
  *
- * Callback function invoked when we are expecting an
- * IMSG_VMDOP_TERMINATE_VM_RESPONSE message indicating the completion of
- * a terminate vm operation.
+ * Callback function invoked when we are waiting for the response from an
+ * IMSG_VMDOP_TERMINATE_VM_REQUEST. We expect a reply of either an
+ * IMSG_VMDOP_TERMINATE_VM_EVENT indicating the termination of a vm or an
+ * IMSG_VMDOP_TERMINATE_VM_RESPONSE with a success/failure result.
  *
  * Parameters:
  *  imsg : response imsg received from vmd
@@ -482,41 +485,50 @@ terminate_vm_complete(struct imsg *imsg, int *ret, unsigned int flags)
 	struct vmop_result *vmr;
 	int res;
 
-	if (imsg->hdr.type == IMSG_VMDOP_TERMINATE_VM_RESPONSE) {
+	switch (imsg->hdr.type) {
+	case IMSG_VMDOP_TERMINATE_VM_RESPONSE:
+		IMSG_SIZE_CHECK(imsg, &vmr);
 		vmr = (struct vmop_result *)imsg->data;
 		res = vmr->vmr_result;
-		if (res) {
-			switch (res) {
-			case VMD_VM_STOP_INVALID:
-				fprintf(stderr,
-				    "cannot stop vm that is not running\n");
-				*ret = EINVAL;
-				break;
-			case ENOENT:
-				fprintf(stderr, "vm not found\n");
-				*ret = EIO;
-				break;
-			case EINTR:
-				fprintf(stderr, "interrupted call\n");
-				*ret = EIO;
-				break;
-			default:
-				errno = res;
-				fprintf(stderr, "failed: %s\n",
-				    strerror(res));
-				*ret = EIO;
-			}
-		} else if (flags & VMOP_WAIT) {
+
+		switch (res) {
+		case 0:
+			fprintf(stderr, "requested to shutdown vm %d\n",
+			    vmr->vmr_id);
+			*ret = 0;
+			break;
+		case VMD_VM_STOP_INVALID:
+			fprintf(stderr,
+			    "cannot stop vm that is not running\n");
+			*ret = EINVAL;
+			break;
+		case ENOENT:
+			fprintf(stderr, "vm not found\n");
+			*ret = EIO;
+			break;
+		case EINTR:
+			fprintf(stderr, "interrupted call\n");
+			*ret = EIO;
+			break;
+		default:
+			errno = res;
+			fprintf(stderr, "failed: %s\n",
+			    strerror(res));
+			*ret = EIO;
+		}
+		break;
+	case IMSG_VMDOP_TERMINATE_VM_EVENT:
+		IMSG_SIZE_CHECK(imsg, &vmr);
+		vmr = (struct vmop_result *)imsg->data;
+		if (flags & VMOP_WAIT) {
 			fprintf(stderr, "terminated vm %d\n", vmr->vmr_id);
 		} else if (flags & VMOP_FORCE) {
 			fprintf(stderr, "forced to terminate vm %d\n",
 			    vmr->vmr_id);
-		} else {
-			fprintf(stderr, "requested to shutdown vm %d\n",
-			    vmr->vmr_id);
-			*ret = 0;
 		}
-	} else {
+		*ret = 0;
+		break;
+	default:
 		fprintf(stderr, "unexpected response received from vmd\n");
 		*ret = EINVAL;
 	}
@@ -706,7 +718,7 @@ add_info(struct imsg *imsg, int *ret)
  *
  * Returns a string representing the current VM state, note that the order
  * matters. A paused VM does have the VM_STATE_RUNNING bit set, but
- * VM_STATE_PAUSED is more significant to report.
+ * VM_STATE_PAUSED is more significant to report. Same goes for stopping VMs.
  *
  * Parameters
  *  vm_state: mask indicating the vm state
@@ -718,10 +730,10 @@ vm_state(unsigned int mask)
 		return "paused";
 	else if (mask & VM_STATE_WAITING)
 		return "waiting";
-	else if (mask & VM_STATE_RUNNING)
-		return "running";
 	else if (mask & VM_STATE_SHUTDOWN)
 		return "stopping";
+	else if (mask & VM_STATE_RUNNING)
+		return "running";
 	/* Presence of absence of other flags */
 	else if (!mask || (mask & VM_STATE_DISABLED))
 		return "stopped";
@@ -883,14 +895,6 @@ open_imagefile(int type, const char *imgfile_path, int flags,
 			} else if (ret == 0)
 				break;
 
-			/*
-			 * This might be called after unveil is already
-			 * locked but it is save to ignore the EPERM error
-			 * here as the subsequent open would fail as well.
-			 */
-			if ((ret = unveil(path, "r")) != 0 &&
-			    (ret != EPERM))
-				err(1, "unveil");
 			if ((basefd[i + 1] = open(path, O_RDONLY)) == -1) {
 				log_warn("%s: failed to open base %s",
 				    __func__, path);
@@ -949,4 +953,3 @@ create_imagefile(int type, const char *imgfile_path, const char *base_path,
 
 	return (ret);
 }
-

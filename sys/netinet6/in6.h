@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6.h,v 1.107 2020/08/24 16:40:07 gnezdo Exp $	*/
+/*	$OpenBSD: in6.h,v 1.109 2021/06/02 00:20:50 dlg Exp $	*/
 /*	$KAME: in6.h,v 1.83 2001/03/29 02:55:07 jinmei Exp $	*/
 
 /*
@@ -327,7 +327,7 @@ struct route_in6 {
 #define IPV6_HOPLIMIT		47 /* int; send hop limit */
 #define IPV6_NEXTHOP		48 /* sockaddr; next hop addr */
 #define IPV6_HOPOPTS		49 /* ip6_hbh; send hop-by-hop option */
-#define IPV6_DSTOPTS		50 /* ip6_dest; send dst option befor rthdr */
+#define IPV6_DSTOPTS		50 /* ip6_dest; send dst option before rthdr */
 #define IPV6_RTHDR		51 /* ip6_rthdr; send routing header */
 
 #define IPV6_AUTH_LEVEL		53   /* int; authentication used */
@@ -415,6 +415,8 @@ struct in6_ifaddr;
 struct ifnet;
 
 void	ipv6_input(struct ifnet *, struct mbuf *);
+struct mbuf *
+	ipv6_check(struct ifnet *, struct mbuf *);
 
 int	in6_cksum(struct mbuf *, uint8_t, uint32_t, uint32_t);
 void	in6_proto_cksum_out(struct mbuf *, struct ifnet *);

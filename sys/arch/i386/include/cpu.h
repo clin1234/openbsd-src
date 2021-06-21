@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.172 2020/09/24 20:30:41 deraadt Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.174 2021/06/02 00:39:26 cheloha Exp $	*/
 /*	$NetBSD: cpu.h,v 1.35 1996/05/05 19:29:26 christos Exp $	*/
 
 /*-
@@ -170,12 +170,13 @@ struct cpu_info {
 #if defined(GPROF) || defined(DDBPROF)
 	struct gmonparam	*ci_gmon;
 #endif
+	char			ci_panicbuf[512];
 };
 
 /*
  * Processor flag notes: The "primary" CPU has certain MI-defined
  * roles (mostly relating to hardclock handling); we distinguish
- * betwen the processor which booted us, and the processor currently
+ * between the processor which booted us, and the processor currently
  * holding the "primary" role just to give us the flexibility later to
  * change primaries should we be sufficiently twisted.  
  */

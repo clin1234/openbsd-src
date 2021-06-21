@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.91 2020/09/01 02:22:52 gnezdo Exp $ */
+/*	$OpenBSD: machdep.c,v 1.96 2021/05/16 15:10:19 deraadt Exp $ */
 
 /*
  * Copyright (c) 2009, 2010, 2014 Miodrag Vallat.
@@ -93,7 +93,7 @@ char	pmon_bootp[80];
 
 /*
  * Even though the system is 64bit, 2E- and 2F-based hardware is constrained
- * to up to 2G of contigous physical memory (direct 2GB DMA area). 2Gq- and
+ * to up to 2G of contiguous physical memory (direct 2GB DMA area). 2Gq- and
  * 3A-based hardware only supports 32-bit DMA addresses, even though
  * physical memory may exist beyond 4GB.
  */
@@ -207,6 +207,10 @@ const struct bonito_flavour bonito_flavours[] = {
 	{ "LM8101",	&yeeloong_platform },
 	/* Lemote Lynloong all-in-one computer */
 	{ "LM9001",	&lynloong_platform },
+	{ "LM9002",	&lynloong_platform },
+	{ "LM9003",	&lynloong_platform },
+	/* Lemote Lynloong all-in-one computer, Xueloong edition */
+	{ "LM9013",	&lynloong_platform },
 #endif
 #ifdef CPU_LOONGSON3
 	/* Laptops */
@@ -352,9 +356,9 @@ loongson_identify(const char *version, int envtype)
 int
 loongson_efi_setup(void)
 {
+	struct pmon_env_mem_entry entry;
 	const struct pmon_env_cpu *cpuenv;
 	const struct pmon_env_mem *mem;
-	const struct pmon_env_mem_entry *entry;
 	paddr_t fp, lp;
 	uint32_t i, ncpus, seg = 0;
 
@@ -385,13 +389,13 @@ loongson_efi_setup(void)
 	mem = pmon_get_env_mem();
 	physmem = 0;
 	for (i = 0; i < mem->nentries && seg < MAXMEMSEGS; i++) {
-		entry = &mem->mem_map[i];
-		if (entry->node != 0 ||
-		    (entry->type != PMON_MEM_SYSTEM_LOW &&
-		     entry->type != PMON_MEM_SYSTEM_HIGH))
+		memcpy(&entry, &mem->mem_map[i], sizeof(entry));
+		if (entry.node != 0 ||
+		    (entry.type != PMON_MEM_SYSTEM_LOW &&
+		     entry.type != PMON_MEM_SYSTEM_HIGH))
 			continue;
-		fp = atop(entry->address);
-		lp = atop(entry->address + (entry->size << 20));
+		fp = atop(entry.address);
+		lp = atop(entry.address + ((uint64_t)entry.size << 20));
 		if (lp > atop(pfn_to_pad(PG_FRAME)) + 1)
 			lp = atop(pfn_to_pad(PG_FRAME)) + 1;
 		if (fp >= lp)
@@ -1292,7 +1296,7 @@ hw_cpu_hatch(struct cpu_info *ci)
 		break;
 #endif
 	default:
-		panic("%s: unhandled Loongson version %x\n", __func__,
+		panic("%s: unhandled Loongson version %x", __func__,
 		    loongson_ver);
 	}
 

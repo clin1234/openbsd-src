@@ -1,4 +1,4 @@
-/*	$OpenBSD: sxie.c,v 1.29 2020/07/10 13:26:36 patrick Exp $	*/
+/*	$OpenBSD: sxie.c,v 1.32 2021/03/25 04:12:01 jsg Exp $	*/
 /*
  * Copyright (c) 2012-2013 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2013 Artturi Alm
@@ -16,17 +16,13 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/* TODO this should use dedicated dma for RX, atleast */
+/* TODO this should use dedicated dma for RX, at least */
 
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/queue.h>
-#include <sys/malloc.h>
 #include <sys/device.h>
-#include <sys/evcount.h>
-#include <sys/socket.h>
-#include <sys/timeout.h>
 #include <sys/mbuf.h>
 #include <machine/intr.h>
 #include <machine/bus.h>
@@ -43,7 +39,6 @@
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 
-#include <dev/mii/mii.h>
 #include <dev/mii/miivar.h>
 
 #include <dev/fdt/sunxireg.h>
@@ -524,7 +519,7 @@ sxie_start(struct ifnet *ifp)
 		SXIWRITE4(sc, SXIE_TXPKTLEN0 + (fifo * 4), m->m_pkthdr.len);
 
 		/* copy the actual packet to fifo XXX through 'align buffer' */
-		m_copydata(m, 0, m->m_pkthdr.len, (caddr_t)td);
+		m_copydata(m, 0, m->m_pkthdr.len, td);
 		bus_space_write_multi_4(sc->sc_iot, sc->sc_ioh,
 		    SXIE_TXIO0,
 		    (uint32_t *)td, SXIE_ROUNDUP(m->m_pkthdr.len, 4) >> 2);

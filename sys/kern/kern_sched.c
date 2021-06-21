@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sched.c,v 1.67 2020/06/11 00:00:01 dlg Exp $	*/
+/*	$OpenBSD: kern_sched.c,v 1.69 2021/02/08 08:18:45 mpi Exp $	*/
 /*
  * Copyright (c) 2007, 2008 Artur Grabowski <art@openbsd.org>
  *
@@ -674,7 +674,7 @@ sched_stop_secondary_cpus(void)
 		if (CPU_IS_PRIMARY(ci))
 			continue;
 		while ((spc->spc_schedflags & SPCF_HALTED) == 0) {
-			sleep_setup(&sls, spc, PZERO, "schedstate");
+			sleep_setup(&sls, spc, PZERO, "schedstate", 0);
 			sleep_finish(&sls,
 			    (spc->spc_schedflags & SPCF_HALTED) == 0);
 		}
@@ -861,13 +861,9 @@ sysctl_hwsmt(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 	int err, newsmt;
 
 	newsmt = sched_smt;
-	err = sysctl_int(oldp, oldlenp, newp, newlen, &newsmt);
+	err = sysctl_int_bounded(oldp, oldlenp, newp, newlen, &newsmt, 0, 1);
 	if (err)
 		return err;
-	if (newsmt > 1)
-		newsmt = 1;
-	if (newsmt < 0)
-		newsmt = 0;
 	if (newsmt == sched_smt)
 		return 0;
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: amdisplay.c,v 1.12 2020/05/25 09:55:48 jsg Exp $ */
+/* $OpenBSD: amdisplay.c,v 1.15 2021/03/25 04:12:01 jsg Exp $ */
 /*
  * Copyright (c) 2016 Ian Sutton <ians@openbsd.org>
  *
@@ -20,10 +20,8 @@
 #include <sys/device.h>
 #include <sys/malloc.h>
 
-#include <dev/cons.h>
 #include <dev/wscons/wsconsio.h>
 #include <dev/wscons/wsdisplayvar.h>
-#include <dev/wscons/wscons_callbacks.h>
 #include <dev/rasops/rasops.h>
 #include <dev/videomode/videomode.h>
 #include <dev/videomode/edidvar.h>
@@ -47,7 +45,7 @@ int lcd_dbg_thresh = 20;
 
 #define DEVNAME(_s) ((_s)->sc_dev.dv_xname)
 
-#define LCD_MAX_PELCLK	170000		/* KHz */
+#define LCD_MAX_PELCLK	170000		/* kHz */
 #define LCD_MASTER_OSC	24000000	/* Hz */
 #define LCD_M1_MAX	2048
 #define LCD_M2_MAX	31
@@ -236,7 +234,7 @@ amdisplay_attach(struct device *parent, struct device *self, void *args)
 	}
 
 	i = 0;
-	printf("%s: %s :: %d KHz pclk\n", DEVNAME(sc),
+	printf("%s: %s :: %d kHz pclk\n", DEVNAME(sc),
 	    sc->sc_active_mode->name, sc->sc_active_mode->dot_clock);
 
 	pel_clk *= 2000;
@@ -290,7 +288,7 @@ amdisplay_attach(struct device *parent, struct device *self, void *args)
 	reg |= LCD_CTRL_MODESEL;
 	HWRITE4(sc, LCD_CTRL, reg);
 
-	/* set stn565 + active matrix + pallete loading only mode, delay */
+	/* set stn565 + active matrix + palette loading only mode, delay */
 	reg = HREAD4(sc, LCD_RASTER_CTRL);
 	reg &= 0xF8000C7C;
 	reg |= (LCD_RASTER_CTRL_LCDTFT)

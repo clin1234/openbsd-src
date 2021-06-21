@@ -1,4 +1,4 @@
-/*	$OpenBSD: re.c,v 1.207 2020/08/26 03:29:06 visa Exp $	*/
+/*	$OpenBSD: re.c,v 1.211 2021/05/17 11:59:53 visa Exp $	*/
 /*	$FreeBSD: if_re.c,v 1.31 2004/09/04 07:54:05 ru Exp $	*/
 /*
  * Copyright (c) 1997, 1998-2003
@@ -248,6 +248,7 @@ static const struct re_revision {
 	{ RL_HWREV_8168E,       "RTL8168E/8111E" },
 	{ RL_HWREV_8168E_VL,	"RTL8168E/8111E-VL" },
 	{ RL_HWREV_8168EP,	"RTL8168EP/8111EP" },
+	{ RL_HWREV_8168FP,	"RTL8168FP/8111FP" },
 	{ RL_HWREV_8169,	"RTL8169" },
 	{ RL_HWREV_8169_8110SB,	"RTL8169/8110SB" },
 	{ RL_HWREV_8169_8110SBL, "RTL8169SBL" },
@@ -754,6 +755,7 @@ re_attach(struct rl_softc *sc, const char *intrstr)
 		sc->rl_max_mtu = RL_JUMBO_MTU_9K;
 		break;
 	case RL_HWREV_8168EP:
+	case RL_HWREV_8168FP:
 	case RL_HWREV_8168G:
 	case RL_HWREV_8168GU:
 	case RL_HWREV_8168H:
@@ -1125,7 +1127,7 @@ re_newbuf(struct rl_softc *sc)
 	u_int32_t	cmdstat;
 	int		error, idx;
 
-	m = MCLGETI(NULL, M_DONTWAIT, NULL, RL_FRAMELEN(sc->rl_max_mtu));
+	m = MCLGETL(NULL, M_DONTWAIT, RL_FRAMELEN(sc->rl_max_mtu));
 	if (!m)
 		return (ENOBUFS);
 
@@ -1278,6 +1280,8 @@ re_rxeof(struct rl_softc *sc)
 		if ((sc->rl_flags & RL_FLAG_JUMBOV2) != 0 &&
 		    (rxstat & (RL_RDESC_STAT_SOF | RL_RDESC_STAT_EOF)) !=
 		    (RL_RDESC_STAT_SOF | RL_RDESC_STAT_EOF)) {
+			ifp->if_ierrors++;
+			m_freem(m);
 			continue;
 		} else if (!(rxstat & RL_RDESC_STAT_EOF)) {
 			m->m_len = RL_FRAMELEN(sc->rl_max_mtu);
@@ -1326,6 +1330,7 @@ re_rxeof(struct rl_softc *sc)
 				m_freem(sc->rl_head);
 				sc->rl_head = sc->rl_tail = NULL;
 			}
+			m_freem(m);
 			continue;
 		}
 
@@ -1660,7 +1665,7 @@ re_encap(struct rl_softc *sc, unsigned int idx, struct mbuf *m)
 	pad = 0;
 
 	/*
-	 * With some of the RealTek chips, using the checksum offload
+	 * With some of the Realtek chips, using the checksum offload
 	 * support in conjunction with the autopadding feature results
 	 * in the transmission of corrupt frames. For example, if we
 	 * need to send a really small IP fragment that's less than 60

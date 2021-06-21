@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofw_misc.c,v 1.26 2020/11/14 14:07:53 kettenis Exp $	*/
+/*	$OpenBSD: ofw_misc.c,v 1.32 2021/04/07 17:12:22 kettenis Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis
  *
@@ -661,6 +661,22 @@ device_ports_register(struct device_ports *ports,
 		device_port_register(node, ports, type);
 }
 
+struct device_ports *
+device_ports_byphandle(uint32_t phandle)
+{
+	struct endpoint *ep;
+
+	if (phandle == 0)
+		return NULL;
+
+	LIST_FOREACH(ep, &endpoints, ep_list) {
+		if (ep->ep_port->dp_phandle == phandle)
+			return ep->ep_port->dp_ports;
+	}
+
+	return NULL;
+}
+
 struct endpoint *
 endpoint_byphandle(uint32_t phandle)
 {
@@ -771,14 +787,23 @@ device_port_activate(uint32_t phandle, void *arg)
 LIST_HEAD(, dai_device) dai_devices =
 	LIST_HEAD_INITIALIZER(dai_devices);
 
+void *
+dai_ep_get_cookie(void *cookie, struct endpoint *ep)
+{
+	return cookie;
+}
+
 void
 dai_register(struct dai_device *dd)
 {
 	dd->dd_phandle = OF_getpropint(dd->dd_node, "phandle", 0);
-	if (dd->dd_phandle == 0)
-		return;
+	if (dd->dd_phandle != 0)
+		LIST_INSERT_HEAD(&dai_devices, dd, dd_list);
 
-	LIST_INSERT_HEAD(&dai_devices, dd, dd_list);
+	dd->dd_ports.dp_node = dd->dd_node;
+	dd->dd_ports.dp_cookie = dd;
+	dd->dd_ports.dp_ep_get_cookie = dai_ep_get_cookie;
+	device_ports_register(&dd->dd_ports, EP_DAI_DEVICE);
 }
 
 struct dai_device *
@@ -809,9 +834,21 @@ mii_register(struct mii_bus *md)
 }
 
 struct mii_bus *
-mii_byphandle(uint32_t phandle)
+mii_bynode(int node)
 {
 	struct mii_bus *md;
+
+	LIST_FOREACH(md, &mii_busses, md_list) {
+		if (md->md_node == node)
+			return md;
+	}
+
+	return NULL;
+}
+
+struct mii_bus *
+mii_byphandle(uint32_t phandle)
+{
 	int node;
 
 	if (phandle == 0)
@@ -825,10 +862,131 @@ mii_byphandle(uint32_t phandle)
 	if (node == 0)
 		return NULL;
 
-	LIST_FOREACH(md, &mii_busses, md_list) {
-		if (md->md_node == node)
-			return md;
+	return mii_bynode(node);
+}
+
+/* IOMMU support */
+
+LIST_HEAD(, iommu_device) iommu_devices =
+	LIST_HEAD_INITIALIZER(iommu_devices);
+
+void
+iommu_device_register(struct iommu_device *id)
+{
+	id->id_phandle = OF_getpropint(id->id_node, "phandle", 0);
+	if (id->id_phandle == 0)
+		return;
+
+	LIST_INSERT_HEAD(&iommu_devices, id, id_list);
+}
+
+bus_dma_tag_t
+iommu_device_do_map(uint32_t phandle, uint32_t *cells, bus_dma_tag_t dmat)
+{
+	struct iommu_device *id;
+
+	if (phandle == 0)
+		return dmat;
+
+	LIST_FOREACH(id, &iommu_devices, id_list) {
+		if (id->id_phandle == phandle)
+			return id->id_map(id->id_cookie, cells, dmat);
 	}
 
-	return NULL;
+	return dmat;
+}
+
+bus_dma_tag_t
+iommu_device_map(int node, bus_dma_tag_t dmat)
+{
+	uint32_t sid = 0;
+	uint32_t phandle = 0;
+	uint32_t *cell;
+	uint32_t *map;
+	int len, icells, ncells;
+
+	len = OF_getproplen(node, "iommus");
+	if (len <= 0)
+		return dmat;
+
+	map = malloc(len, M_TEMP, M_WAITOK);
+	OF_getpropintarray(node, "iommus", map, len);
+
+	cell = map;
+	ncells = len / sizeof(uint32_t);
+	while (ncells > 1) {
+		node = OF_getnodebyphandle(cell[0]);
+		if (node == 0)
+			goto out;
+
+		icells = OF_getpropint(node, "#iommu-cells", 1);
+		if (ncells < icells + 1)
+			goto out;
+
+		KASSERT(icells == 1);
+
+		phandle = cell[0];
+		sid = cell[1];
+		break;
+
+		cell += (1 + icells);
+		ncells -= (1 + icells);
+	}
+
+out:
+	free(map, M_TEMP, len);
+
+	return iommu_device_do_map(phandle, &sid, dmat);
+}
+
+bus_dma_tag_t
+iommu_device_map_pci(int node, uint32_t rid, bus_dma_tag_t dmat)
+{
+	uint32_t sid_base, sid = 0;
+	uint32_t phandle = 0;
+	uint32_t *cell;
+	uint32_t *map;
+	uint32_t mask, rid_base;
+	int len, length, icells, ncells;
+
+	len = OF_getproplen(node, "iommu-map");
+	if (len <= 0)
+		return dmat;
+
+	map = malloc(len, M_TEMP, M_WAITOK);
+	OF_getpropintarray(node, "iommu-map", map, len);
+
+	mask = OF_getpropint(node, "iommu-map-mask", 0xffff);
+	rid = rid & mask;
+
+	cell = map;
+	ncells = len / sizeof(uint32_t);
+	while (ncells > 1) {
+		node = OF_getnodebyphandle(cell[1]);
+		if (node == 0)
+			goto out;
+
+		icells = OF_getpropint(node, "#iommu-cells", 1);
+		if (ncells < icells + 3)
+			goto out;
+
+		KASSERT(icells == 1);
+
+		rid_base = cell[0];
+		sid_base = cell[2];
+		length = cell[3];
+		if (rid >= rid_base && rid < rid_base + length) {
+			sid = sid_base + (rid - rid_base);
+			phandle = cell[1];
+			break;
+		}
+
+		cell += 4;
+		ncells -= 4;
+	}
+
+out:
+	free(map, M_TEMP, len);
+
+	return iommu_device_do_map(phandle, &sid, dmat);
 }

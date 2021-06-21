@@ -1,8 +1,12 @@
-#	$OpenBSD: test-exec.sh,v 1.76 2020/04/04 23:04:41 dtucker Exp $
+#	$OpenBSD: test-exec.sh,v 1.82 2021/06/10 09:37:59 dtucker Exp $
 #	Placed in the Public Domain.
 
 USER=`id -un`
 #SUDO=sudo
+
+if [ ! -x "$TEST_SSH_ELAPSED_TIMES" ]; then
+	STARTTIME=`date '+%s'`
+fi
 
 if [ ! -z "$TEST_SSH_PORT" ]; then
 	PORT="$TEST_SSH_PORT"
@@ -56,6 +60,7 @@ CONCH=/usr/local/bin/conch
 
 # Tools used by multiple tests
 NC=nc
+OPENSSL="${OPENSSL:-openssl}"
 
 if [ "x$TEST_SSH_SSH" != "x" ]; then
 	SSH="${TEST_SSH_SSH}"
@@ -98,6 +103,9 @@ if [ "x$TEST_SSH_PKCS11_HELPER" != "x" ]; then
 fi
 if [ "x$TEST_SSH_SK_HELPER" != "x" ]; then
 	SSH_SK_HELPER="${TEST_SSH_SK_HELPER}"
+fi
+if [ "x$TEST_SSH_OPENSSL" != "x" ]; then
+	OPENSSL="${TEST_SSH_OPENSSL}"
 fi
 
 # Path to sshd must be absolute for rexec
@@ -205,6 +213,11 @@ cleanup ()
 		fi
 	fi
 	stop_sshd
+	if [ ! -z "$TEST_SSH_ELAPSED_TIMES" ]; then
+		now=`date '+%s'`
+		elapsed=$(($now - $STARTTIME))
+		echo elapsed $elapsed `basename $SCRIPT .sh`
+	fi
 }
 
 start_debug_log ()
@@ -284,7 +297,7 @@ EOF
 # but if you aren't careful with permissions then the unit tests could
 # be abused to locally escalate privileges.
 if [ ! -z "$TEST_SSH_UNSAFE_PERMISSIONS" ]; then
-	echo "StrictModes no" >> $OBJ/sshd_config
+	echo "	StrictModes no" >> $OBJ/sshd_config
 else
 	# check and warn if excessive permissions are likely to cause failures.
 	unsafe=""
@@ -310,6 +323,11 @@ bypass this check by setting TEST_SSH_UNSAFE_PERMISSIONS=1
 
 EOD
 	fi
+fi
+
+if [ ! -z "$TEST_SSH_MODULI_FILE" ]; then
+	trace "adding modulifile='$TEST_SSH_MODULI_FILE' to sshd_config"
+	echo "	ModuliFile '$TEST_SSH_MODULI_FILE'" >> $OBJ/sshd_config
 fi
 
 if [ ! -z "$TEST_SSH_SSHD_CONFOPTS" ]; then
@@ -399,7 +417,7 @@ for t in ${SSH_HOSTKEY_TYPES}; do
 	) >> $OBJ/known_hosts
 
 	# use key as host key, too
-	$SUDO cp $OBJ/$t $OBJ/host.$t
+	(umask 077; $SUDO cp $OBJ/$t $OBJ/host.$t)
 	echo HostKey $OBJ/host.$t >> $OBJ/sshd_config
 
 	# don't use SUDO for proxy connect
@@ -413,10 +431,11 @@ if test -x "$CONCH" ; then
 	REGRESS_INTEROP_CONCH=yes
 fi
 
-# If PuTTY is present and we are running a PuTTY test, prepare keys and
-# configuration
+# If PuTTY is present, new enough and we are running a PuTTY test, prepare
+# keys and configuration.
 REGRESS_INTEROP_PUTTY=no
-if test -x "$PUTTYGEN" -a -x "$PLINK" ; then
+if test -x "$PUTTYGEN" -a -x "$PLINK" &&
+    "$PUTTYGEN" --help 2>&1 | grep -- --new-passphrase >/dev/null; then
 	REGRESS_INTEROP_PUTTY=yes
 fi
 case "$SCRIPT" in
@@ -429,13 +448,13 @@ if test "$REGRESS_INTEROP_PUTTY" = "yes" ; then
 
 	# Add a PuTTY key to authorized_keys
 	rm -f ${OBJ}/putty.rsa2
-	if ! puttygen -t rsa -o ${OBJ}/putty.rsa2 \
+	if ! "$PUTTYGEN" -t rsa -o ${OBJ}/putty.rsa2 \
 	    --random-device=/dev/urandom \
 	    --new-passphrase /dev/null < /dev/null > /dev/null; then
-		echo "Your installed version of PuTTY is too old to support --new-passphrase; trying without (may require manual interaction) ..." >&2
-		puttygen -t rsa -o ${OBJ}/putty.rsa2 < /dev/null > /dev/null
+		echo "Your installed version of PuTTY is too old to support --new-passphrase, skipping test" >&2
+		exit 1
 	fi
-	puttygen -O public-openssh ${OBJ}/putty.rsa2 \
+	"$PUTTYGEN" -O public-openssh ${OBJ}/putty.rsa2 \
 	    >> $OBJ/authorized_keys_$USER
 
 	# Convert rsa2 host key to PuTTY format
@@ -456,8 +475,6 @@ if test "$REGRESS_INTEROP_PUTTY" = "yes" ; then
 	echo "ProxyMethod=5" >> ${OBJ}/.putty/sessions/localhost_proxy
 	echo "ProxyTelnetCommand=sh ${SRC}/sshd-log-wrapper.sh ${TEST_SSHD_LOGFILE} ${SSHD} -i -f $OBJ/sshd_proxy" >> ${OBJ}/.putty/sessions/localhost_proxy
 	echo "ProxyLocalhost=1" >> ${OBJ}/.putty/sessions/localhost_proxy
-
-	REGRESS_INTEROP_PUTTY=yes
 fi
 
 # create a proxy version of the client config

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.137 2020/06/03 06:54:04 dlg Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.139 2021/06/18 06:17:28 guenther Exp $	*/
 /*	$NetBSD: cpu.h,v 1.1 2003/04/26 18:39:39 fvdl Exp $	*/
 
 /*-
@@ -121,6 +121,7 @@ struct cpu_info {
 	char		ci_mds_tmp[32];		/* 32byte aligned */
 	void		*ci_mds_buf;
 
+	struct pmap *ci_proc_pmap;	/* last userspace pmap */
 	struct pcb *ci_curpcb;
 	struct pcb *ci_idle_pcb;
 
@@ -208,6 +209,8 @@ struct cpu_info {
 	struct vmxon_region *ci_vmxon_region;
 
 	int64_t		ci_tsc_skew;		/* counter skew vs cpu0 */
+
+	char		ci_panicbuf[512];
 };
 
 #define CPUF_BSP	0x0001		/* CPU is the original BSP */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pcf8563.c,v 1.2 2019/10/06 15:45:37 kettenis Exp $	*/
+/*	$OpenBSD: pcf8563.c,v 1.4 2021/04/24 10:15:15 mpi Exp $	*/
 
 /*
  * Copyright (c) 2005 Kimihiro Nonaka
@@ -43,8 +43,6 @@
 /*
  * PCF8563 Real-Time Clock
  */
-
-#define PCF8563_ADDR		0x51	/* Fixed I2C Slave Address */
 
 #define PCF8563_CONTROL1	0x00
 #define PCF8563_CONTROL2	0x01
@@ -98,16 +96,14 @@ int pcxrtc_clock_read(struct pcxrtc_softc *, struct clock_ymdhms *);
 int pcxrtc_clock_write(struct pcxrtc_softc *, struct clock_ymdhms *);
 int pcxrtc_gettime(struct todr_chip_handle *, struct timeval *);
 int pcxrtc_settime(struct todr_chip_handle *, struct timeval *);
-int pcxrtc_getcal(struct todr_chip_handle *, int *);
-int pcxrtc_setcal(struct todr_chip_handle *, int);
 
 int
 pcxrtc_match(struct device *parent, void *v, void *arg)
 {
 	struct i2c_attach_args *ia = arg;
 
-	if (strcmp(ia->ia_name, "nxp,pcf8563") == 0 &&
-	    ia->ia_addr == PCF8563_ADDR)
+	if (strcmp(ia->ia_name, "nxp,pcf8563") == 0 ||
+	    strcmp(ia->ia_name, "haoyu,hym8563") == 0)
 		return (1);
 
 	return (0);
@@ -125,8 +121,6 @@ pcxrtc_attach(struct device *parent, struct device *self, void *arg)
 	sc->sc_todr.cookie = sc;
 	sc->sc_todr.todr_gettime = pcxrtc_gettime;
 	sc->sc_todr.todr_settime = pcxrtc_settime;
-	sc->sc_todr.todr_getcal = pcxrtc_getcal;
-	sc->sc_todr.todr_setcal = pcxrtc_setcal;
 	sc->sc_todr.todr_setwen = NULL;
 
 #if 0
@@ -175,18 +169,6 @@ pcxrtc_settime(struct todr_chip_handle *ch, struct timeval *tv)
 	if (pcxrtc_clock_write(sc, &dt) == 0)
 		return (-1);
 	return (0);
-}
-
-int
-pcxrtc_setcal(struct todr_chip_handle *ch, int cal)
-{
-	return (EOPNOTSUPP);
-}
-
-int
-pcxrtc_getcal(struct todr_chip_handle *ch, int *cal)
-{
-	return (EOPNOTSUPP);
 }
 
 uint8_t

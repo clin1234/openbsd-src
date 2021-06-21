@@ -1,4 +1,4 @@
-/* $OpenBSD: gptimer.c,v 1.9 2020/07/12 20:36:37 naddy Exp $ */
+/* $OpenBSD: gptimer.c,v 1.14 2021/05/16 03:39:28 jsg Exp $ */
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  *
@@ -24,17 +24,14 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/time.h>
 #include <sys/evcount.h>
 #include <sys/device.h>
 #include <sys/timetc.h>
-#include <dev/clock_subr.h>
 #include <machine/bus.h>
 #include <armv7/armv7/armv7var.h>
 #include <armv7/omap/prcmvar.h>
 
 #include <machine/intr.h>
-#include <arm/cpufunc.h>
 
 /* registers */
 #define	GP_TIDR		0x000
@@ -98,10 +95,6 @@
 
 static struct evcount clk_count;
 static struct evcount stat_count;
-#define GPT1_IRQ  38
-#define GPTIMER0_IRQ	38
-
-//static int clk_irq = GPT1_IRQ; /* XXX 37 */
 
 void gptimer_attach(struct device *parent, struct device *self, void *args);
 int gptimer_intr(void *frame);
@@ -117,7 +110,14 @@ int gptimer_irq = 0;
 u_int gptimer_get_timecount(struct timecounter *);
 
 static struct timecounter gptimer_timecounter = {
-	gptimer_get_timecount, NULL, 0xffffffff, 0, "gptimer", 0, NULL, 0
+	.tc_get_timecount = gptimer_get_timecount,
+	.tc_poll_pps = NULL,
+	.tc_counter_mask = 0xffffffff,
+	.tc_frequency = 0,
+	.tc_name = "gptimer",
+	.tc_quality = 0,
+	.tc_priv = NULL,
+	.tc_user = 0,
 };
 
 volatile u_int32_t nexttickevent;
@@ -274,14 +274,13 @@ gptimer_intr(void *frame)
 
 /*
  * would be interesting to play with trigger mode while having one timer
- * in 32KHz mode, and the other timer running in sysclk mode and use
+ * in 32kHz mode, and the other timer running in sysclk mode and use
  * the high resolution speeds (matters more for delay than tick timer
  */
 
 void
-gptimer_cpu_initclocks()
+gptimer_cpu_initclocks(void)
 {
-//	u_int32_t now;
 	stathz = 128;
 	profhz = 1024;
 

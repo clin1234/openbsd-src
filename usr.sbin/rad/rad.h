@@ -1,4 +1,4 @@
-/*	$OpenBSD: rad.h,v 1.18 2020/03/30 17:47:48 florian Exp $	*/
+/*	$OpenBSD: rad.h,v 1.21 2021/02/27 10:35:20 florian Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -18,8 +18,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#define	CONF_FILE		"/etc/rad.conf"
-#define	RAD_SOCKET		"/var/run/rad.sock"
+#define	_PATH_CONF_FILE		"/etc/rad.conf"
+#define	_PATH_RAD_SOCKET	"/var/run/rad.sock"
 #define	RAD_USER		"_rad"
 
 #define	OPT_VERBOSE	0x00000001
@@ -35,18 +35,6 @@
 #define	DEFAULT_RDNS_LIFETIME	600 * 1.5
 
 #define	IMSG_DATA_SIZE(imsg)	((imsg).hdr.len - IMSG_HEADER_SIZE)
-
-enum {
-	PROC_MAIN,
-	PROC_ENGINE,
-	PROC_FRONTEND
-} rad_process;
-
-static const char * const log_procnames[] = {
-	"main",
-	"engine",
-	"frontend",
-};
 
 struct imsgev {
 	struct imsgbuf	 ibuf;
@@ -67,10 +55,10 @@ enum imsg_type {
 	IMSG_RECONF_RA_DNSSL,
 	IMSG_RECONF_END,
 	IMSG_ICMP6SOCK,
+	IMSG_OPEN_ICMP6SOCK,
 	IMSG_ROUTESOCK,
 	IMSG_CONTROLFD,
 	IMSG_STARTUP,
-	IMSG_STARTUP_DONE,
 	IMSG_RA_RS,
 	IMSG_SEND_RA,
 	IMSG_UPDATE_IF,
@@ -145,9 +133,7 @@ struct imsg_send_ra {
 extern uint32_t	 cmd_opts;
 
 /* rad.c */
-void	main_imsg_compose_frontend(int, pid_t, void *, uint16_t);
-void	main_imsg_compose_frontend_fd(int, pid_t, int);
-
+int	main_imsg_compose_frontend(int, int, void *, uint16_t);
 void	main_imsg_compose_engine(int, pid_t, void *, uint16_t);
 void	merge_config(struct rad_conf *, struct rad_conf *);
 void	imsg_event_add(struct imsgev *);

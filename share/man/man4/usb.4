@@ -1,4 +1,4 @@
-.\"	$OpenBSD: usb.4,v 1.203 2020/08/21 20:38:56 mglocker Exp $
+.\"	$OpenBSD: usb.4,v 1.207 2021/05/07 09:13:19 jsg Exp $
 .\"	$NetBSD: usb.4,v 1.15 1999/07/29 14:20:32 augustss Exp $
 .\"
 .\" Copyright (c) 1999 The NetBSD Foundation, Inc.
@@ -28,7 +28,7 @@
 .\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: August 21 2020 $
+.Dd $Mdocdate: May 7 2021 $
 .Dt USB 4
 .Os
 .Sh NAME
@@ -128,7 +128,7 @@ SMSC LAN95xx 10/100 USB Ethernet device
 .It Xr udav 4
 Davicom DM9601 10/100 USB Ethernet device
 .It Xr ure 4
-RealTek RTL8152/RTL8153/RTL8153B/RTL8156 10/100/Gigabit/2.5Gb USB Ethernet device
+Realtek RTL8152/RTL8153/RTL8153B/RTL8156 10/100/Gigabit/2.5Gb USB Ethernet device
 .It Xr url 4
 Realtek RTL8150L 10/100 USB Ethernet device
 .It Xr urndis 4
@@ -255,6 +255,10 @@ TEMPer gold HID thermometer and hygrometer
 Generic driver for Human Interface Devices
 .It Xr uhidev 4
 Base driver for all Human Interface Devices
+.It Xr uhidpp 4
+Logitech HID++ devices
+.It Xr ujoy 4
+USB joysticks/gamecontrollers
 .It Xr ukbd 4
 USB keyboards that follow the boot protocol
 .It Xr ums 4
@@ -427,18 +431,16 @@ struct usb_device_info {
 	u_int8_t	udi_protocol;
 	u_int8_t	udi_config;
 	u_int8_t	udi_speed;
-#define USB_SPEED_LOW  1
-#define USB_SPEED_FULL 2
-#define USB_SPEED_HIGH 3
+#define USB_SPEED_LOW	1
+#define USB_SPEED_FULL	2
+#define USB_SPEED_HIGH	3
+#define USB_SPEED_SUPER	4
+	u_int8_t	udi_port;
 	int		udi_power;	/* power consumption */
 	int		udi_nports;
 	char		udi_devnames[USB_MAX_DEVNAMES]
 			    [USB_MAX_DEVNAMELEN];
-	u_int8_t	udi_ports[16];	/* hub only */
-#define USB_PORT_ENABLED 0xff
-#define USB_PORT_SUSPENDED 0xfe
-#define USB_PORT_POWERED 0xfd
-#define USB_PORT_DISABLED 0xfc
+	u_int32_t	udi_ports[16];	/* hub only */
 	char		udi_serial[USB_MAX_STRING_LEN];
 };
 .Ed

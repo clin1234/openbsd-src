@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpc.c,v 1.11 2020/09/14 18:32:11 millert Exp $	*/
+/*	$OpenBSD: smtpc.c,v 1.18 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2018 Eric Faurot <eric@openbsd.org>
@@ -16,25 +16,19 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
 #include <sys/socket.h>
 
 #include <event.h>
-#include <limits.h>
 #include <netdb.h>
 #include <pwd.h>
-#include <resolv.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <tls.h>
 #include <unistd.h>
 
-#include <openssl/ssl.h>
-
 #include "smtp.h"
-#include "ssl.h"
 #include "log.h"
 
 static void parse_server(char *);
@@ -48,26 +42,93 @@ static struct addrinfo *res0, *ai;
 static struct smtp_params params;
 static struct smtp_mail mail;
 static const char *servname = NULL;
+static struct tls_config *tls_config;
 
-static SSL_CTX *ssl_ctx;
+static int nosni = 0;
+static const char *cafile = NULL;
+static const char *protocols = NULL;
+static const char *ciphers = NULL;
 
 static void
 usage(void)
 {
 	extern char *__progname;
 
-	fprintf(stderr,
-	    "usage: %s [-Chnv] [-F from] [-H helo] [-s server] [-S name] rcpt ...\n",
-	    __progname);
+	fprintf(stderr, "usage: %s [-Chnv] [-a authfile] [-F from] [-H helo] "
+	    "[-s server] [-T params] [recipient ...]\n", __progname);
 	exit(1);
+}
+
+static void
+parse_tls_options(char *opt)
+{
+	static char * const tokens[] = {
+#define CAFILE 0
+		"cafile",
+#define CIPHERS 1
+		"ciphers",
+#define NOSNI 2
+		"nosni",
+#define NOVERIFY 3
+		"noverify",
+#define PROTOCOLS 4
+		"protocols",
+#define SERVERNAME 5
+		"servername",
+		NULL };
+	char *value;
+
+	while (*opt) {
+		switch (getsubopt(&opt, tokens, &value)) {
+		case CAFILE:
+			if (value == NULL)
+				fatalx("missing value for cafile");
+			cafile = value;
+			break;
+		case CIPHERS:
+			if (value == NULL)
+				fatalx("missing value for ciphers");
+			ciphers = value;
+			break;
+		case NOSNI:
+			if (value != NULL)
+				fatalx("no value expected for nosni");
+			nosni = 1;
+			break;
+		case NOVERIFY:
+			if (value != NULL)
+				fatalx("no value expected for noverify");
+			params.tls_verify = 0;
+			break;
+		case PROTOCOLS:
+			if (value == NULL)
+				fatalx("missing value for protocols");
+			protocols = value;
+			break;
+		case SERVERNAME:
+			if (value == NULL)
+				fatalx("missing value for servername");
+			servname = value;
+			break;
+		case -1:
+			if (suboptarg)
+				fatalx("invalid TLS option \"%s\"", suboptarg);
+			fatalx("missing TLS option");
+		}
+	}
 }
 
 int
 main(int argc, char **argv)
 {
 	char hostname[256];
+	FILE *authfile;
 	int ch, i;
+	uint32_t protos;
 	char *server = "localhost";
+	char *authstr = NULL;
+	size_t alloc = 0;
+	ssize_t len;
 	struct passwd *pw;
 
 	log_init(1, 0);
@@ -91,7 +152,7 @@ main(int argc, char **argv)
 	memset(&mail, 0, sizeof(mail));
 	mail.from = pw->pw_name;
 
-	while ((ch = getopt(argc, argv, "CF:H:S:hns:v")) != -1) {
+	while ((ch = getopt(argc, argv, "CF:H:S:T:a:hns:v")) != -1) {
 		switch (ch) {
 		case 'C':
 			params.tls_verify = 0;
@@ -104,6 +165,26 @@ main(int argc, char **argv)
 			break;
 		case 'S':
 			servname = optarg;
+			break;
+		case 'T':
+			parse_tls_options(optarg);
+			break;
+		case 'a':
+			if ((authfile = fopen(optarg, "r")) == NULL)
+				fatal("%s: open", optarg);
+			if ((len = getline(&authstr, &alloc, authfile)) == -1)
+				fatal("%s: Failed to read username", optarg);
+			if (authstr[len - 1] == '\n')
+				authstr[len - 1] = '\0';
+			params.auth_user = authstr;
+			authstr = NULL;
+			len = 0;
+			if ((len = getline(&authstr, &alloc, authfile)) == -1)
+				fatal("%s: Failed to read password", optarg);
+			if (authstr[len - 1] == '\n')
+				authstr[len - 1] = '\0';
+			params.auth_pass = authstr;
+			fclose(authfile);
 			break;
 		case 'h':
 			usage();
@@ -136,16 +217,34 @@ main(int argc, char **argv)
 		mail.rcptcount = argc;
 	}
 
-	ssl_init();
+	tls_init();
 	event_init();
 
-	ssl_ctx = ssl_ctx_create(NULL, NULL, 0, NULL);
-	if (!SSL_CTX_load_verify_locations(ssl_ctx,
-	    X509_get_default_cert_file(), NULL))
-		fatal("SSL_CTX_load_verify_locations");
-	if (!SSL_CTX_set_ssl_version(ssl_ctx, SSLv23_client_method()))
-		fatal("SSL_CTX_set_ssl_version");
-	SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE , NULL);
+	tls_config = tls_config_new();
+	if (tls_config == NULL)
+		fatal("tls_config_new");
+
+	if (protocols) {
+		if (tls_config_parse_protocols(&protos, protocols) == -1)
+			fatalx("failed to parse protocol '%s'", protocols);
+		if (tls_config_set_protocols(tls_config, protos) == -1)
+			fatalx("tls_config_set_protocols: %s",
+			    tls_config_error(tls_config));
+	}
+	if (ciphers && tls_config_set_ciphers(tls_config, ciphers) == -1)
+		fatalx("tls_config_set_ciphers: %s",
+		    tls_config_error(tls_config));
+
+	if (cafile == NULL)
+		cafile = tls_default_ca_cert_file();
+	if (tls_config_set_ca_file(tls_config, cafile) == -1)
+		fatal("tls_set_ca_file");
+	if (!params.tls_verify) {
+		tls_config_insecure_noverifycert(tls_config);
+		tls_config_insecure_noverifyname(tls_config);
+		tls_config_insecure_noverifytime(tls_config);
+	} else
+		tls_config_verify(tls_config);
 
 	if (pledge("stdio inet dns tmppath", NULL) == -1)
 		fatal("pledge");
@@ -262,6 +361,8 @@ parse_server(char *server)
 
 	if (servname == NULL)
 		servname = host;
+	if (nosni == 0)
+		params.tls_servname = servname;
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
@@ -346,44 +447,18 @@ log_trace(int lvl, const char *emsg, ...)
 }
 
 void
-smtp_verify_server_cert(void *tag, struct smtp_client *proto, void *ctx)
-{
-	SSL *ssl = ctx;
-	X509 *cert;
-	long res;
-	int match;
-
-	if ((cert = SSL_get_peer_certificate(ssl))) {
-		(void)ssl_check_name(cert, servname, &match);
-		X509_free(cert);
-		res = SSL_get_verify_result(ssl);
-		if (res == X509_V_OK) {
-			if (match) {
-				log_debug("valid certificate");
-				smtp_cert_verified(proto, CERT_OK);
-			}
-			else {
-				log_debug("certificate does not match hostname");
-				smtp_cert_verified(proto, CERT_INVALID);
-			}
-			return;
-		}
-		log_debug("certificate validation error %ld", res);
-	}
-	else
-		log_debug("no certificate provided");
-
-	smtp_cert_verified(proto, CERT_INVALID);
-}
-
-void
 smtp_require_tls(void *tag, struct smtp_client *proto)
 {
-	SSL *ssl = NULL;
+	struct tls *tls;
 
-	if ((ssl = SSL_new(ssl_ctx)) == NULL)
-		fatal("SSL_new");
-	smtp_set_tls(proto, ssl);
+	tls = tls_client();
+	if (tls == NULL)
+		fatal("tls_client");
+
+	if (tls_configure(tls, tls_config) == -1)
+		fatal("tls_configure");
+
+	smtp_set_tls(proto, tls);
 }
 
 void

@@ -18,10 +18,8 @@
 #define nitems(_a) (sizeof((_a)) / sizeof((_a)[0]))
 #endif
 
-#include <sys/types.h>
 #include <sys/stat.h>
 
-#include <ctype.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -30,7 +28,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <sysexits.h>
 #include <unistd.h>
 
@@ -129,7 +126,6 @@ maildir_engine(const char *dirname, int junk)
 	FILE    *fp;
 	char	*line = NULL;
 	size_t	linesize = 0;
-	ssize_t	linelen;
 	struct stat	sb;
 	char	*home;
 	char	*extension;
@@ -186,7 +182,7 @@ maildir_engine(const char *dirname, int junk)
 	if ((fp = fdopen(fd, "w")) == NULL)
 		err(EX_TEMPFAIL, NULL);
 
-	while ((linelen = getline(&line, &linesize, stdin)) != -1) {
+	while (getline(&line, &linesize, stdin) != -1) {
 		line[strcspn(line, "\n")] = '\0';
 		if (line[0] == '\0')
 			in_hdr = 0;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_iwxreg.h,v 1.17 2020/08/01 16:14:05 stsp Exp $	*/
+/*	$OpenBSD: if_iwxreg.h,v 1.19 2021/04/25 15:32:21 stsp Exp $	*/
 
 /*-
  * Based on BSD-licensed source modules in the Linux iwlwifi driver,
@@ -425,6 +425,7 @@ struct iwx_context_info {
 #define IWX_CSR_HW_REV_STEP(_val)          (((_val) & 0x000000C) >> 2)
 
 #define IWX_CSR_HW_REV_TYPE_MSK		(0x000FFF0)
+#define IWX_CSR_HW_REV_TYPE_QUZ		(0x0000354)
 
 /* CSR GIO */
 #define IWX_CSR_GIO_REG_VAL_L0S_DISABLED	(0x00000002)
@@ -3074,6 +3075,9 @@ struct iwx_rx_mpdu_res_start {
 #define	IWX_RX_MPDU_MFLG2_PAD			0x20
 #define IWX_RX_MPDU_MFLG2_AMSDU			0x40
 
+#define IWX_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK	0x7f
+#define IWX_RX_MPDU_AMSDU_LAST_SUBFRAME		0x80
+
 #define IWX_RX_MPDU_PHY_AMPDU			(1 << 5)
 #define IWX_RX_MPDU_PHY_AMPDU_TOGGLE		(1 << 6)
 #define IWX_RX_MPDU_PHY_SHORT_PREAMBLE		(1 << 7)
@@ -3103,6 +3107,15 @@ struct iwx_rx_mpdu_desc_v1 {
 		};
 	};
 } __packed;
+
+#define IWX_RX_REORDER_DATA_INVALID_BAID	0x7f
+
+#define IWX_RX_MPDU_REORDER_NSSN_MASK		0x00000fff
+#define IWX_RX_MPDU_REORDER_SN_MASK		0x00fff000
+#define IWX_RX_MPDU_REORDER_SN_SHIFT		12
+#define IWX_RX_MPDU_REORDER_BAID_MASK		0x7f000000
+#define IWX_RX_MPDU_REORDER_BAID_SHIFT		24
+#define IWX_RX_MPDU_REORDER_BA_OLD_SN		0x80000000
 
 struct iwx_rx_mpdu_desc {
 	uint16_t mpdu_len;
@@ -4719,6 +4732,7 @@ struct iwx_tlc_update_notif {
 /*
  * TID for non QoS frames - to be written in tid_tspec
  */
+#define IWX_MAX_TID_COUNT	8
 #define IWX_TID_NON_QOS	0
 
 /*

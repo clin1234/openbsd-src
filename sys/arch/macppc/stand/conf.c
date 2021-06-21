@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.12 2020/10/03 06:22:20 gkoehler Exp $	*/
+/*	$OpenBSD: conf.c,v 1.14 2021/01/30 14:37:01 deraadt Exp $	*/
 /*
  * Copyright (c) 2007 Dale Rahn <drahn@openbsd.org>
  *
@@ -21,8 +21,8 @@
 #include <lib/libsa/stand.h>
 
 
-const char version[] = "1.10";
-int     debug = 0;
+const char version[] = "1.11";
+extern int     debug;
 
 void ofc_probe(struct consdev *);
 void ofc_init(struct consdev *);

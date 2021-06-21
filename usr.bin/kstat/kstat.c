@@ -1,4 +1,4 @@
-/* $OpenBSD: kstat.c,v 1.6 2020/08/13 12:37:16 schwarze Exp $ */
+/* $OpenBSD: kstat.c,v 1.8 2021/01/25 06:55:59 dlg Exp $ */
 
 /*
  * Copyright (c) 2020 David Gwynne <dlg@openbsd.org>
@@ -231,11 +231,11 @@ kstat_filter_parse(char *arg)
 			kf->kf_unit =
 			    strtonum(argv[3], 0, 0xffffffffU, &errstr);
 			if (errstr != NULL) {
-				errx(1, "%s:%s:%s:%s: instance %s: %s",
+				errx(1, "%s:%s:%s:%s: unit %s: %s",
 				    argv[0], argv[1], argv[2], argv[3],
-				    argv[1], errstr);
+				    argv[3], errstr);
 			}
-			SET(kf->kf_flags, KSTAT_FILTER_F_INST);
+			SET(kf->kf_flags, KSTAT_FILTER_F_UNIT);
 		}
 		break;
 	default:
@@ -525,6 +525,8 @@ kstat_print(struct kstat_tree *kt)
 			break;
 		}
 	}
+
+	fflush(stdout);
 }
 
 static void

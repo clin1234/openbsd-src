@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.16 2018/09/10 10:36:01 bluhm Exp $	*/
+/*	$OpenBSD: proc.h,v 1.20 2021/06/16 16:55:02 dv Exp $	*/
 
 /*
  * Copyright (c) 2010-2015 Reyk Floeter <reyk@openbsd.org>
@@ -16,12 +16,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/socket.h>
 #include <sys/queue.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 
-#include <imsg.h>
 #include <event.h>
+#include <imsg.h>
 
 #ifndef _PROC_H
 #define _PROC_H
@@ -32,7 +32,6 @@ enum {
 	IMSG_CTL_FAIL,
 	IMSG_CTL_VERBOSE,
 	IMSG_CTL_END,
-	IMSG_CTL_NOTIFY,
 	IMSG_CTL_RESET,
 	IMSG_CTL_PROCFD,
 	IMSG_PROC_MAX
@@ -71,15 +70,10 @@ TAILQ_HEAD(control_socks, control_sock);
 
 struct ctl_conn {
 	TAILQ_ENTRY(ctl_conn)	 entry;
-	uint8_t			 flags;
-	unsigned int		 waiting;
-#define CTL_CONN_NOTIFY		 0x01
 	struct imsgev		 iev;
 	struct sockpeercred	 peercred;
-
 };
 TAILQ_HEAD(ctl_connlist, ctl_conn);
-extern  struct ctl_connlist ctl_conns;
 
 /* privsep */
 enum privsep_procid {
@@ -88,7 +82,8 @@ enum privsep_procid {
 	PROC_VMM,
 	PROC_PRIV,
 	PROC_MAX,
-} privsep_process;
+};
+extern enum privsep_procid privsep_process;
 
 #define CONFIG_RELOAD		0x00
 #define CONFIG_VMS		0x01

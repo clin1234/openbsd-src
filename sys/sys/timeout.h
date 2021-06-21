@@ -1,4 +1,4 @@
-/*	$OpenBSD: timeout.h,v 1.40 2020/10/15 20:03:44 cheloha Exp $	*/
+/*	$OpenBSD: timeout.h,v 1.42 2021/06/19 02:05:33 cheloha Exp $	*/
 /*
  * Copyright (c) 2000-2001 Artur Grabowski <art@openbsd.org>
  * All rights reserved. 
@@ -26,30 +26,6 @@
 
 #ifndef _SYS_TIMEOUT_H_
 #define _SYS_TIMEOUT_H_
-
-/*
- * Interface for handling time driven events in the kernel.
- *
- * The basic component of this API is the struct timeout. The user should not
- * touch the internals of this structure, but it's the users responsibility
- * to allocate and deallocate timeouts.
- *
- * The functions used to manipulate timeouts are:
- *  - timeout_set(timeout, function, argument)
- *      Initializes a timeout struct to call the function with the argument.
- *      A timeout only needs to be initialized once.
- *  - timeout_add(timeout, ticks)
- *      Schedule this timeout to run in "ticks" ticks (there are hz ticks in
- *      one second). You may not touch the timeout with timeout_set once the
- *      timeout is scheduled. A second call to timeout_add with an already
- *      scheduled timeout will cause the old timeout to be canceled and the
- *      new will be scheduled.
- *  - timeout_del(timeout)
- *      Remove the timeout from the timeout queue. It's legal to remove
- *      a timeout that has already happened.
- *
- * These functions may be called in interrupt context (anything below splhigh).
- */
 
 #include <sys/time.h>
 
@@ -112,24 +88,24 @@ int timeout_sysctl(void *, size_t *, void *, size_t);
 #define KCLOCK_UPTIME	0		/* uptime clock; time since boot */
 #define KCLOCK_MAX	1
 
-#define __TIMEOUT_INITIALIZER(fn, arg, flags, kclock) {			\
+#define __TIMEOUT_INITIALIZER(_fn, _arg, _kclock, _flags) {		\
 	.to_list = { NULL, NULL },					\
 	.to_abstime = { .tv_sec = 0, .tv_nsec = 0 },			\
-	.to_func = (fn),						\
-	.to_arg = (arg),						\
+	.to_func = (_fn),						\
+	.to_arg = (_arg),						\
 	.to_time = 0,							\
-	.to_flags = (flags) | TIMEOUT_INITIALIZED,			\
-	.to_kclock = (kclock)						\
+	.to_flags = (_flags) | TIMEOUT_INITIALIZED,			\
+	.to_kclock = (_kclock)						\
 }
 
-#define TIMEOUT_INITIALIZER_KCLOCK(fn, arg, flags, kclock)		\
-    __TIMEOUT_INITIALIZER((fn), (args), (flags) | TIMEOUT_KCLOCK, (kclock))
+#define TIMEOUT_INITIALIZER_KCLOCK(_fn, _arg, _kclock, _flags)		\
+    __TIMEOUT_INITIALIZER((_fn), (_args), (_kclock), (_flags) | TIMEOUT_KCLOCK)
 
-#define TIMEOUT_INITIALIZER_FLAGS(fn, arg, flags)			\
-    __TIMEOUT_INITIALIZER((fn), (args), (flags), KCLOCK_NONE)
+#define TIMEOUT_INITIALIZER_FLAGS(_fn, _arg, _flags)			\
+    __TIMEOUT_INITIALIZER((_fn), (_args), KCLOCK_NONE, (_flags))
 
 #define TIMEOUT_INITIALIZER(_f, _a)					\
-    __TIMEOUT_INITIALIZER((_f), (_a), 0, KCLOCK_NONE)
+    __TIMEOUT_INITIALIZER((_f), (_a), KCLOCK_NONE, 0)
 
 void timeout_set(struct timeout *, void (*)(void *), void *);
 void timeout_set_flags(struct timeout *, void (*)(void *), void *, int);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: rtable.c,v 1.72 2020/11/07 09:51:40 denis Exp $ */
+/*	$OpenBSD: rtable.c,v 1.75 2021/05/25 22:45:09 bluhm Exp $ */
 
 /*
  * Copyright (c) 2014-2016 Martin Pieuchot
@@ -90,8 +90,8 @@ void		  *rtable_get(unsigned int, sa_family_t);
 void
 rtmap_init(void)
 {
-	struct domain	*dp;
-	int		 i;
+	const struct domain	*dp;
+	int			 i;
 
 	/* Start with a single table for every domain that requires it. */
 	for (i = 0; (dp = domains[i]) != NULL; i++) {
@@ -142,7 +142,7 @@ rtmap_dtor(void *null, void *xmap)
 	struct rtmap	*map = xmap;
 
 	/*
-	 * doesnt need to be serialized since this is the last reference
+	 * doesn't need to be serialized since this is the last reference
 	 * to this map. there's nothing to race against.
 	 */
 	free(map->tbl, M_RTABLE, map->limit * sizeof(*map[0].tbl));
@@ -152,8 +152,8 @@ rtmap_dtor(void *null, void *xmap)
 void
 rtable_init(void)
 {
-	struct domain	*dp;
-	int		 i;
+	const struct domain	*dp;
+	int			 i;
 
 	KASSERT(sizeof(struct rtmap) == sizeof(struct dommp));
 
@@ -189,21 +189,21 @@ rtable_init(void)
 int
 rtable_add(unsigned int id)
 {
-	struct domain	*dp;
-	void		*tbl;
-	struct rtmap	*map;
-	struct dommp	*dmm;
-	sa_family_t	 af;
-	unsigned int	 off, alen;
-	int		 i;
-
-	KERNEL_ASSERT_LOCKED();
+	const struct domain	*dp;
+	void			*tbl;
+	struct rtmap		*map;
+	struct dommp		*dmm;
+	sa_family_t		 af;
+	unsigned int		 off, alen;
+	int			 i, error = 0;
 
 	if (id > RT_TABLEID_MAX)
 		return (EINVAL);
 
+	KERNEL_LOCK();
+
 	if (rtable_exists(id))
-		return (EEXIST);
+		goto out;
 
 	for (i = 0; (dp = domains[i]) != NULL; i++) {
 		if (dp->dom_rtoffset == 0)
@@ -217,8 +217,10 @@ rtable_add(unsigned int id)
 			rtmap_grow(id + 1, af);
 
 		tbl = rtable_alloc(id, alen, off);
-		if (tbl == NULL)
-			return (ENOMEM);
+		if (tbl == NULL) {
+			error = ENOMEM;
+			goto out;
+		}
 
 		map = srp_get_locked(&afmap[af2idx[af]]);
 		map->tbl[id] = tbl;
@@ -233,8 +235,10 @@ rtable_add(unsigned int id)
 	/* Use main rtable/rdomain by default. */
 	dmm = srp_get_locked(&afmap[0]);
 	dmm->value[id] = 0;
+out:
+	KERNEL_UNLOCK();
 
-	return (0);
+	return (error);
 }
 
 void *
@@ -258,9 +262,9 @@ rtable_get(unsigned int rtableid, sa_family_t af)
 int
 rtable_exists(unsigned int rtableid)
 {
-	struct domain	*dp;
-	void		*tbl;
-	int		 i;
+	const struct domain	*dp;
+	void			*tbl;
+	int			 i;
 
 	for (i = 0; (dp = domains[i]) != NULL; i++) {
 		if (dp->dom_rtoffset == 0)
@@ -277,9 +281,9 @@ rtable_exists(unsigned int rtableid)
 int
 rtable_empty(unsigned int rtableid)
 {
-	struct domain	*dp;
-	int		 i;
-	struct art_root	*tbl;
+	const struct domain	*dp;
+	int			 i;
+	struct art_root		*tbl;
 
 	for (i = 0; (dp = domains[i]) != NULL; i++) {
 		if (dp->dom_rtoffset == 0)
@@ -898,10 +902,10 @@ satoaddr(struct art_root *at, struct sockaddr *sa)
 int
 rtable_satoplen(sa_family_t af, struct sockaddr *mask)
 {
-	struct domain	*dp;
-	uint8_t		*ap, *ep;
-	int		 mlen, plen = 0;
-	int		 i;
+	const struct domain	*dp;
+	uint8_t			*ap, *ep;
+	int			 mlen, plen = 0;
+	int			 i;
 
 	for (i = 0; (dp = domains[i]) != NULL; i++) {
 		if (dp->dom_rtoffset == 0)

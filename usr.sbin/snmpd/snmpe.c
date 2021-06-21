@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpe.c,v 1.67 2020/09/06 17:29:35 martijn Exp $	*/
+/*	$OpenBSD: snmpe.c,v 1.72 2021/06/20 19:55:48 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -41,6 +41,7 @@
 #include "mib.h"
 
 void	 snmpe_init(struct privsep *, struct privsep_proc *, void *);
+const char *snmpe_pdutype2string(enum snmp_pdutype);
 int	 snmpe_parse(struct snmp_message *);
 void	 snmpe_tryparse(int, struct snmp_message *);
 int	 snmpe_parsevarbinds(struct snmp_message *);
@@ -57,6 +58,8 @@ void	 snmp_msgfree(struct snmp_message *);
 
 struct imsgev	*iev_parent;
 static const struct timeval	snmpe_tcp_timeout = { 10, 0 }; /* 10s */
+
+struct snmp_messages snmp_messages = RB_INITIALIZER(&snmp_messages);
 
 static struct privsep_proc procs[] = {
 	{ "parent",	PROC_PARENT }
@@ -108,7 +111,7 @@ snmpe_init(struct privsep *ps, struct privsep_proc *p, void *arg)
 			evtimer_set(&h->evt, snmpe_acceptcb, h);
 		} else {
 			event_set(&h->ev, h->fd, EV_READ|EV_PERSIST,
-			    snmpe_recvmsg, env);
+			    snmpe_recvmsg, h);
 		}
 		event_add(&h->ev, NULL);
 	}
@@ -192,6 +195,36 @@ snmpe_bind(struct address *addr)
 	return (-1);
 }
 
+const char *
+snmpe_pdutype2string(enum snmp_pdutype pdutype)
+{
+	static char unknown[sizeof("Unknown (4294967295)")];
+
+	switch (pdutype) {
+	case SNMP_C_GETREQ:
+		return "GetRequest";
+	case SNMP_C_GETNEXTREQ:
+		return "GetNextRequest";
+	case SNMP_C_GETRESP:
+		return "Response";
+	case SNMP_C_SETREQ:
+		return "SetRequest";
+	case SNMP_C_TRAP:
+		return "Trap";
+	case SNMP_C_GETBULKREQ:
+		return "GetBulkRequest";
+	case SNMP_C_INFORMREQ:
+		return "InformRequest";
+	case SNMP_C_TRAPV2:
+		return "SNMPv2-Trap";
+	case SNMP_C_REPORT:
+		return "Report";
+	}
+
+	snprintf(unknown, sizeof(unknown), "Unknown (%u)", pdutype);
+	return unknown;
+}
+
 int
 snmpe_parse(struct snmp_message *msg)
 {
@@ -200,7 +233,6 @@ snmpe_parse(struct snmp_message *msg)
 	struct ber_element	*a;
 	long long		 ver, req;
 	long long		 errval, erridx;
-	unsigned int		 type;
 	u_int			 class;
 	char			*comn;
 	char			*flagstr, *ctxname;
@@ -210,6 +242,11 @@ snmpe_parse(struct snmp_message *msg)
 
 	msg->sm_errstr = "invalid message";
 
+	do {
+		msg->sm_transactionid = arc4random();
+	} while (msg->sm_transactionid == 0 ||
+	    RB_INSERT(snmp_messages, &snmp_messages, msg) != NULL);
+
 	if (ober_scanf_elements(root, "{ie", &ver, &a) != 0)
 		goto parsefail;
 
@@ -217,20 +254,32 @@ snmpe_parse(struct snmp_message *msg)
 	msg->sm_version = ver;
 	switch (msg->sm_version) {
 	case SNMP_V1:
-	case SNMP_V2:
-		if (env->sc_min_seclevel != 0)
+		if (!(msg->sm_aflags & ADDRESS_FLAG_SNMPV1)) {
+			msg->sm_errstr = "SNMPv1 disabled";
 			goto badversion;
-		if (ober_scanf_elements(a, "se", &comn, &msg->sm_pdu) != 0)
+		}
+	case SNMP_V2:
+		if (msg->sm_version == SNMP_V2 &&
+		    !(msg->sm_aflags & ADDRESS_FLAG_SNMPV2)) {
+			msg->sm_errstr = "SNMPv2c disabled";
+			goto badversion;
+		}
+		if (ober_scanf_elements(a, "seS$", &comn, &msg->sm_pdu) != 0)
 			goto parsefail;
 		if (strlcpy(msg->sm_community, comn,
-		    sizeof(msg->sm_community)) >= sizeof(msg->sm_community)) {
+		    sizeof(msg->sm_community)) >= sizeof(msg->sm_community) ||
+		    msg->sm_community[0] == '\0') {
 			stats->snmp_inbadcommunitynames++;
-			msg->sm_errstr = "community name too long";
+			msg->sm_errstr = "invalid community name";
 			goto fail;
 		}
 		break;
 	case SNMP_V3:
-		if (ober_scanf_elements(a, "{iisi}e",
+		if (!(msg->sm_aflags & ADDRESS_FLAG_SNMPV3)) {
+			msg->sm_errstr = "SNMPv3 disabled";
+			goto badversion;
+		}
+		if (ober_scanf_elements(a, "{iisi$}e",
 		    &msg->sm_msgid, &msg->sm_max_msg_size, &flagstr,
 		    &msg->sm_secmodel, &a) != 0)
 			goto parsefail;
@@ -248,7 +297,7 @@ snmpe_parse(struct snmp_message *msg)
 			goto parsefail;
 		}
 
-		if (ober_scanf_elements(a, "{xxe",
+		if (ober_scanf_elements(a, "{xxeS$}$",
 		    &msg->sm_ctxengineid, &msg->sm_ctxengineid_len,
 		    &ctxname, &len, &msg->sm_pdu) != 0)
 			goto parsefail;
@@ -258,20 +307,21 @@ snmpe_parse(struct snmp_message *msg)
 		msg->sm_ctxname[len] = '\0';
 		break;
 	default:
-	badversion:
+		msg->sm_errstr = "unsupported snmp version";
+badversion:
 		stats->snmp_inbadversions++;
-		msg->sm_errstr = "bad snmp version";
 		goto fail;
 	}
 
-	if (ober_scanf_elements(msg->sm_pdu, "t{e", &class, &type, &a) != 0)
+	if (ober_scanf_elements(msg->sm_pdu, "t{e", &class, &(msg->sm_pdutype),
+	    &a) != 0)
 		goto parsefail;
 
 	/* SNMP PDU context */
 	if (class != BER_CLASS_CONTEXT)
 		goto parsefail;
 
-	switch (type) {
+	switch (msg->sm_pdutype) {
 	case SNMP_C_GETBULKREQ:
 		if (msg->sm_version == SNMP_V1) {
 			stats->snmp_inbadversions++;
@@ -286,24 +336,29 @@ snmpe_parse(struct snmp_message *msg)
 		/* FALLTHROUGH */
 
 	case SNMP_C_GETNEXTREQ:
-		if (type == SNMP_C_GETNEXTREQ)
+		if (msg->sm_pdutype == SNMP_C_GETNEXTREQ)
 			stats->snmp_ingetnexts++;
+		if (!(msg->sm_aflags & ADDRESS_FLAG_READ)) {
+			msg->sm_errstr = "read requests disabled";
+			goto fail;
+		}
 		if (msg->sm_version != SNMP_V3 &&
 		    strcmp(env->sc_rdcommunity, msg->sm_community) != 0 &&
-		    (env->sc_readonly ||
-		    strcmp(env->sc_rwcommunity, msg->sm_community) != 0)) {
+		    strcmp(env->sc_rwcommunity, msg->sm_community) != 0) {
 			stats->snmp_inbadcommunitynames++;
 			msg->sm_errstr = "wrong read community";
 			goto fail;
 		}
-		msg->sm_context = type;
 		break;
 
 	case SNMP_C_SETREQ:
 		stats->snmp_insetrequests++;
+		if (!(msg->sm_aflags & ADDRESS_FLAG_WRITE)) {
+			msg->sm_errstr = "write requests disabled";
+			goto fail;
+		}
 		if (msg->sm_version != SNMP_V3 &&
-		    (env->sc_readonly ||
-		    strcmp(env->sc_rwcommunity, msg->sm_community) != 0)) {
+		    strcmp(env->sc_rwcommunity, msg->sm_community) != 0) {
 			if (strcmp(env->sc_rdcommunity, msg->sm_community) != 0)
 				stats->snmp_inbadcommunitynames++;
 			else
@@ -311,7 +366,6 @@ snmpe_parse(struct snmp_message *msg)
 			msg->sm_errstr = "wrong write community";
 			goto fail;
 		}
-		msg->sm_context = type;
 		break;
 
 	case SNMP_C_GETRESP:
@@ -320,33 +374,51 @@ snmpe_parse(struct snmp_message *msg)
 		goto parsefail;
 
 	case SNMP_C_TRAP:
+		if (msg->sm_version != SNMP_V1) {
+			msg->sm_errstr = "trapv1 request on !SNMPv1 message";
+			goto parsefail;
+		}
 	case SNMP_C_TRAPV2:
-		if (msg->sm_version != SNMP_V3 &&
-		    strcmp(env->sc_trcommunity, msg->sm_community) != 0) {
+		if (msg->sm_pdutype == SNMP_C_TRAPV2 &&
+		    !(msg->sm_version == SNMP_V2 ||
+		    msg->sm_version != SNMP_V3)) {
+			msg->sm_errstr = "trapv2 request on !SNMPv2C or "
+			    "!SNMPv3 message";
+			goto parsefail;
+		}
+		if (!(msg->sm_aflags & ADDRESS_FLAG_NOTIFY)) {
+			msg->sm_errstr = "notify requests disabled";
+			goto fail;
+		}
+		if (msg->sm_version == SNMP_V3) {
+			msg->sm_errstr = "SNMPv3 doesn't support traps yet";
+			goto fail;
+		}
+		if (strcmp(env->sc_trcommunity, msg->sm_community) != 0) {
 			stats->snmp_inbadcommunitynames++;
 			msg->sm_errstr = "wrong trap community";
 			goto fail;
 		}
 		stats->snmp_intraps++;
-		msg->sm_errstr = "received trap";
-		goto fail;
-
+		/*
+		 * This should probably go into parsevarbinds, but that's for a
+		 * next refactor
+		 */
+		if (traphandler_parse(msg) == -1)
+			goto fail;
+		/* Shortcircuit */
+		return 0;
 	default:
 		msg->sm_errstr = "invalid context";
 		goto parsefail;
 	}
 
 	/* SNMP PDU */
-	if (ober_scanf_elements(a, "iiie{et",
+	if (ober_scanf_elements(a, "iiie{e{}}$",
 	    &req, &errval, &erridx, &msg->sm_pduend,
-	    &msg->sm_varbind, &class, &type) != 0) {
+	    &msg->sm_varbind) != 0) {
 		stats->snmp_silentdrops++;
 		msg->sm_errstr = "invalid PDU";
-		goto fail;
-	}
-	if (class != BER_CLASS_UNIVERSAL || type != BER_TYPE_SEQUENCE) {
-		stats->snmp_silentdrops++;
-		msg->sm_errstr = "invalid varbind";
 		goto fail;
 	}
 
@@ -356,16 +428,18 @@ snmpe_parse(struct snmp_message *msg)
 
 	print_host(ss, msg->sm_host, sizeof(msg->sm_host));
 	if (msg->sm_version == SNMP_V3)
-		log_debug("%s: %s: SNMPv3 context %d, flags %#x, "
+		log_debug("%s: %s:%hd: SNMPv3 pdutype %s, flags %#x, "
 		    "secmodel %lld, user '%s', ctx-engine %s, ctx-name '%s', "
-		    "request %lld", __func__, msg->sm_host, msg->sm_context,
-		    msg->sm_flags, msg->sm_secmodel, msg->sm_username,
+		    "request %lld", __func__, msg->sm_host, msg->sm_port,
+		    snmpe_pdutype2string(msg->sm_pdutype), msg->sm_flags,
+		    msg->sm_secmodel, msg->sm_username,
 		    tohexstr(msg->sm_ctxengineid, msg->sm_ctxengineid_len),
 		    msg->sm_ctxname, msg->sm_request);
 	else
-		log_debug("%s: %s: SNMPv%d '%s' context %d request %lld",
-		    __func__, msg->sm_host, msg->sm_version + 1,
-		    msg->sm_community, msg->sm_context, msg->sm_request);
+		log_debug("%s: %s:%hd: SNMPv%d '%s' pdutype %s request %lld",
+		    __func__, msg->sm_host, msg->sm_port, msg->sm_version + 1,
+		    msg->sm_community, snmpe_pdutype2string(msg->sm_pdutype),
+		    msg->sm_request);
 
 	return (0);
 
@@ -373,7 +447,8 @@ snmpe_parse(struct snmp_message *msg)
 	stats->snmp_inasnparseerrs++;
  fail:
 	print_host(ss, msg->sm_host, sizeof(msg->sm_host));
-	log_debug("%s: %s: %s", __func__, msg->sm_host, msg->sm_errstr);
+	log_debug("%s: %s:%hd: %s", __func__, msg->sm_host, msg->sm_port,
+	    msg->sm_errstr);
 	return (-1);
 }
 
@@ -395,7 +470,7 @@ snmpe_parsevarbinds(struct snmp_message *msg)
 
 	for (i = 1; varbind != NULL && i < SNMPD_MAXVARBIND;
 	    varbind = varbind->be_next, i++) {
-		if (ober_scanf_elements(varbind, "{oe}", &o, &value) == -1) {
+		if (ober_scanf_elements(varbind, "{oeS$}", &o, &value) == -1) {
 			stats->snmp_inasnparseerrs++;
 			msg->sm_errstr = "invalid varbind";
 			goto varfail;
@@ -403,14 +478,14 @@ snmpe_parsevarbinds(struct snmp_message *msg)
 		if (o.bo_n < BER_MIN_OID_LEN || o.bo_n > BER_MAX_OID_LEN)
 			goto varfail;
 
-		log_debug("%s: %s: oid %s", __func__, msg->sm_host,
-		    smi_oid2string(&o, buf, sizeof(buf), 0));
+		log_debug("%s: %s:%hd: oid %s", __func__, msg->sm_host,
+		    msg->sm_port, smi_oid2string(&o, buf, sizeof(buf), 0));
 
 		/*
 		 * XXX intotalreqvars should only be incremented after all are
 		 * succeeded
 		 */
-		switch (msg->sm_context) {
+		switch (msg->sm_pdutype) {
 		case SNMP_C_GETNEXTREQ:
 			if ((rvarbind = ober_add_sequence(NULL)) == NULL)
 				goto varfail;
@@ -433,16 +508,13 @@ snmpe_parsevarbinds(struct snmp_message *msg)
 			stats->snmp_intotalreqvars++;
 			break;
 		case SNMP_C_SETREQ:
-			if (snmpd_env->sc_readonly == 0) {
-				/*
-				 * XXX A set varbind should only be committed if
-				 * all variables are staged
-				 */
-				if (mps_setreq(msg, value, &o) == 0) {
-					/* XXX Adjust after fixing staging */
-					stats->snmp_intotalsetvars++;
-					break;
-				}
+			/*
+			 * XXX A set varbind should only be committed if
+			 * all variables are staged
+			 */
+			if (mps_setreq(msg, value, &o) == 0) {
+				stats->snmp_intotalsetvars++;
+				break;
 			}
 			msg->sm_error = SNMP_ERROR_READONLY;
 			goto varfail;
@@ -479,8 +551,8 @@ snmpe_parsevarbinds(struct snmp_message *msg)
 
 	return 0;
  varfail:
-	log_debug("%s: %s: %s, error index %d", __func__,
-	    msg->sm_host, msg->sm_errstr, i);
+	log_debug("%s: %s:%hd: %s, error index %d", __func__,
+	    msg->sm_host, msg->sm_port, msg->sm_errstr, i);
 	if (msg->sm_error == 0)
 		msg->sm_error = SNMP_ERROR_GENERR;
 	msg->sm_errorindex = i;
@@ -515,6 +587,10 @@ snmpe_acceptcb(int fd, short type, void *arg)
 	if ((msg = calloc(1, sizeof(*msg))) == NULL)
 		goto fail;
 
+	memcpy(&(msg->sm_ss), &ss, len);
+	msg->sm_slen = len;
+	msg->sm_aflags = h->flags;
+	msg->sm_port = h->port;
 	snmpe_prepare_read(msg, afd);
 	return;
 fail:
@@ -635,6 +711,10 @@ snmpe_writecb(int fd, short type, void *arg)
 
 	if ((nmsg = calloc(1, sizeof(*nmsg))) == NULL)
 		goto fail;
+	memcpy(&(nmsg->sm_ss), &(msg->sm_ss), msg->sm_slen);
+	nmsg->sm_slen = msg->sm_slen;
+	nmsg->sm_aflags = msg->sm_aflags;
+	nmsg->sm_port = msg->sm_port;
 
 	/*
 	 * Reuse the connection.
@@ -662,16 +742,18 @@ snmpe_writecb(int fd, short type, void *arg)
 void
 snmpe_recvmsg(int fd, short sig, void *arg)
 {
-	struct snmpd		*env = arg;
-	struct snmp_stats	*stats = &env->sc_stats;
+	struct address		*h = arg;
+	struct snmp_stats	*stats = &snmpd_env->sc_stats;
 	ssize_t			 len;
 	struct snmp_message	*msg;
 
 	if ((msg = calloc(1, sizeof(*msg))) == NULL)
 		return;
 
+	msg->sm_aflags = h->flags;
 	msg->sm_sock = fd;
 	msg->sm_slen = sizeof(msg->sm_ss);
+	msg->sm_port = h->port;
 	if ((len = recvfromto(fd, msg->sm_data, sizeof(msg->sm_data), 0,
 	    (struct sockaddr *)&msg->sm_ss, &msg->sm_slen,
 	    (struct sockaddr *)&msg->sm_local_ss, &msg->sm_local_slen)) < 1) {
@@ -715,12 +797,17 @@ snmpe_recvmsg(int fd, short sig, void *arg)
 void
 snmpe_dispatchmsg(struct snmp_message *msg)
 {
+	if (msg->sm_pdutype == SNMP_C_TRAP ||
+	    msg->sm_pdutype == SNMP_C_TRAPV2) {
+		snmp_msgfree(msg);
+		return;
+	}
 	/* dispatched to subagent */
 	/* XXX Do proper error handling */
 	(void) snmpe_parsevarbinds(msg);
 
 	/* respond directly */
-	msg->sm_context = SNMP_C_GETRESP;
+	msg->sm_pdutype = SNMP_C_GETRESP;
 	snmpe_response(msg);
 }
 
@@ -785,6 +872,8 @@ snmpe_response(struct snmp_message *msg)
 void
 snmp_msgfree(struct snmp_message *msg)
 {
+	if (msg->sm_transactionid != 0)
+		RB_REMOVE(snmp_messages, &snmp_messages, msg);
 	event_del(&msg->sm_sockev);
 	ober_free(&msg->sm_ber);
 	if (msg->sm_req != NULL)
@@ -830,7 +919,7 @@ snmpe_encode(struct snmp_message *msg)
 	}
 
 	if (!ober_printf_elements(epdu, "tiii{e}", BER_CLASS_CONTEXT,
-	    msg->sm_context, msg->sm_request,
+	    msg->sm_pdutype, msg->sm_request,
 	    msg->sm_error, msg->sm_errorindex,
 	    msg->sm_varbindresp)) {
 		ober_free_elements(pdu);
@@ -847,3 +936,12 @@ snmpe_encode(struct snmp_message *msg)
 #endif
 	return 0;
 }
+
+int
+snmp_messagecmp(struct snmp_message *m1, struct snmp_message *m2)
+{
+	return (m1->sm_transactionid < m2->sm_transactionid ? -1 :
+	    m1->sm_transactionid > m2->sm_transactionid);
+}
+
+RB_GENERATE(snmp_messages, snmp_message, sm_entry, snmp_messagecmp)

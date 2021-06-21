@@ -1,4 +1,4 @@
-/*	$OpenBSD: queue_fs.c,v 1.20 2020/02/25 17:03:13 millert Exp $	*/
+/*	$OpenBSD: queue_fs.c,v 1.22 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2011 Gilles Chehade <gilles@poolp.org>
@@ -18,25 +18,16 @@
 
 #include <sys/types.h>
 #include <sys/mount.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 
-#include <ctype.h>
 #include <dirent.h>
-#include <err.h>
 #include <errno.h>
-#include <event.h>
 #include <fcntl.h>
 #include <fts.h>
-#include <imsg.h>
 #include <inttypes.h>
 #include <pwd.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "smtpd.h"
@@ -565,7 +556,7 @@ fsqueue_qwalk_new(void)
 	    FTS_PHYSICAL | FTS_NOCHDIR, NULL);
 
 	if (q->fts == NULL)
-		err(1, "fsqueue_qwalk_new: fts_open: %s", path);
+		fatal("fsqueue_qwalk_new: fts_open: %s", path);
 
 	return (q);
 }
@@ -651,13 +642,13 @@ queue_fs_init(struct passwd *pw, int server, const char *conf)
 	for (n = 0; n < nitems(paths); n++) {
 		(void)strlcpy(path, PATH_SPOOL, sizeof(path));
 		if (strlcat(path, paths[n], sizeof(path)) >= sizeof(path))
-			errx(1, "path too long %s%s", PATH_SPOOL, paths[n]);
+			fatalx("path too long %s%s", PATH_SPOOL, paths[n]);
 		if (ckdir(path, 0700, pw->pw_uid, 0, server) == 0)
 			ret = 0;
 	}
 
 	if (clock_gettime(CLOCK_REALTIME, &startup))
-		err(1, "clock_gettime");
+		fatal("clock_gettime");
 
 	tree_init(&evpcount);
 

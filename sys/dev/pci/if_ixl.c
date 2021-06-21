@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ixl.c,v 1.69 2020/11/02 00:25:49 dlg Exp $ */
+/*	$OpenBSD: if_ixl.c,v 1.74 2021/03/26 08:02:34 jan Exp $ */
 
 /*
  * Copyright (c) 2013-2015, Intel Corporation
@@ -837,7 +837,8 @@ struct ixl_rx_rd_desc_32 {
 } __packed __aligned(16);
 
 struct ixl_rx_wb_desc_16 {
-	uint64_t		qword0;
+	uint32_t		_reserved1;
+	uint32_t		filter_status;
 	uint64_t		qword1;
 #define IXL_RX_DESC_DD			(1 << 0)
 #define IXL_RX_DESC_EOP			(1 << 1)
@@ -1610,6 +1611,7 @@ struct ixl_device {
 
 static const struct ixl_device ixl_devices[] = {
 	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_X710_10G_SFP },
+	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_X710_10G_SFP_2 },
 	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_XL710_40G_BP },
 	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_X710_10G_BP, },
 	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_XL710_QSFP_1 },
@@ -1621,6 +1623,7 @@ static const struct ixl_device ixl_devices[] = {
 	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_X710_T4_10G },
 	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_XXV710_25G_BP },
 	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_XXV710_25G_SFP28, },
+	{ &ixl_710, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_X710_10G_T, },
 	{ &ixl_722, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_X722_10G_KX },
 	{ &ixl_722, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_X722_10G_QSFP },
 	{ &ixl_722, PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_X722_10G_SFP_1 },
@@ -3180,6 +3183,13 @@ ixl_rxeof(struct ixl_softc *sc, struct ixl_rx_ring *rxr)
 		if (ISSET(word, IXL_RX_DESC_EOP)) {
 			if (!ISSET(word,
 			    IXL_RX_DESC_RXE | IXL_RX_DESC_OVERSIZE)) {
+				if ((word & IXL_RX_DESC_FLTSTAT_MASK) ==
+				    IXL_RX_DESC_FLTSTAT_RSS) {
+					m->m_pkthdr.ph_flowid =
+					    lemtoh32(&rxd->filter_status);
+					m->m_pkthdr.csum_flags |= M_FLOWID;
+				}
+
 				ml_enqueue(&ml, m);
 			} else {
 				ifp->if_ierrors++; /* XXX */
@@ -3234,7 +3244,7 @@ ixl_rxfill(struct ixl_softc *sc, struct ixl_rx_ring *rxr)
 	do {
 		rxm = &rxr->rxr_maps[prod];
 
-		m = MCLGETI(NULL, M_DONTWAIT, NULL, MCLBYTES + ETHER_ALIGN);
+		m = MCLGETL(NULL, M_DONTWAIT, MCLBYTES + ETHER_ALIGN);
 		if (m == NULL)
 			break;
 		m->m_data += (m->m_ext.ext_size - (MCLBYTES + ETHER_ALIGN));
@@ -3302,6 +3312,7 @@ ixl_rxrinfo(struct ixl_softc *sc, struct if_rxrinfo *ifri)
 	for (i = 0; i < ixl_nqueues(sc); i++) {
 		ring = ifp->if_iqs[i]->ifiq_softc;
 		ifr[i].ifr_size = MCLBYTES;
+		snprintf(ifr[i].ifr_name, sizeof(ifr[i].ifr_name), "%d", i);
 		ifr[i].ifr_info = ring->rxr_acct;
 	}
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: fifo_vnops.c,v 1.77 2020/06/15 15:29:40 mpi Exp $	*/
+/*	$OpenBSD: fifo_vnops.c,v 1.79 2021/01/17 05:23:34 visa Exp $	*/
 /*	$NetBSD: fifo_vnops.c,v 1.18 1996/03/16 23:52:42 christos Exp $	*/
 
 /*
@@ -532,8 +532,7 @@ fifo_kqfilter(void *v)
 
 	ap->a_kn->kn_hook = so;
 
-	klist_insert(&sb->sb_sel.si_note, ap->a_kn);
-	sb->sb_flagsintr |= SB_KNOTE;
+	klist_insert_locked(&sb->sb_sel.si_note, ap->a_kn);
 
 	return (0);
 }
@@ -543,9 +542,7 @@ filt_fifordetach(struct knote *kn)
 {
 	struct socket *so = (struct socket *)kn->kn_hook;
 
-	klist_remove(&so->so_rcv.sb_sel.si_note, kn);
-	if (klist_empty(&so->so_rcv.sb_sel.si_note))
-		so->so_rcv.sb_flagsintr &= ~SB_KNOTE;
+	klist_remove_locked(&so->so_rcv.sb_sel.si_note, kn);
 }
 
 int
@@ -579,9 +576,7 @@ filt_fifowdetach(struct knote *kn)
 {
 	struct socket *so = (struct socket *)kn->kn_hook;
 
-	klist_remove(&so->so_snd.sb_sel.si_note, kn);
-	if (klist_empty(&so->so_snd.sb_sel.si_note))
-		so->so_snd.sb_flagsintr &= ~SB_KNOTE;
+	klist_remove_locked(&so->so_snd.sb_sel.si_note, kn);
 }
 
 int

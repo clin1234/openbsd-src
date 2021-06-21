@@ -1,4 +1,4 @@
-/*	$OpenBSD: uhid.c,v 1.80 2020/05/13 08:13:42 mpi Exp $ */
+/*	$OpenBSD: uhid.c,v 1.84 2021/03/08 14:35:57 jcs Exp $ */
 /*	$NetBSD: uhid.c,v 1.57 2003/03/11 16:44:00 augustss Exp $	*/
 
 /*
@@ -32,10 +32,11 @@
  */
 
 /*
- * HID spec: http://www.usb.org/developers/devclass_docs/HID1_11.pdf
+ * HID spec: https://www.usb.org/sites/default/files/hid1_11.pdf
  */
 
 #include "fido.h"
+#include "ujoy.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -97,6 +98,10 @@ uhid_lookup(dev_t dev)
 	else if (cdev->d_open == fidoopen)
 		cd = &fido_cd;
 #endif
+#if NUJOY > 0
+	else if (cdev->d_open == ujoyopen)
+    		cd = &ujoy_cd;
+#endif
 	else
 		return (NULL);
 	if (UHIDUNIT(dev) < cd->cd_ndevs)
@@ -110,7 +115,7 @@ uhid_match(struct device *parent, void *match, void *aux)
 {
 	struct uhidev_attach_arg *uha = aux;
 
-	if (uha->reportid == UHIDEV_CLAIM_ALLREPORTID)
+	if (uha->reportid == UHIDEV_CLAIM_MULTIPLE_REPORTID)
 		return (UMATCH_NONE);
 
 	return (UMATCH_IFACECLASS_GENERIC);
@@ -447,7 +452,7 @@ filt_uhidrdetach(struct knote *kn)
 	int s;
 
 	s = splusb();
-	klist_remove(&sc->sc_rsel.si_note, kn);
+	klist_remove_locked(&sc->sc_rsel.si_note, kn);
 	splx(s);
 }
 
@@ -496,7 +501,7 @@ uhidkqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = (void *)sc;
 
 	s = splusb();
-	klist_insert(klist, kn);
+	klist_insert_locked(klist, kn);
 	splx(s);
 
 	return (0);

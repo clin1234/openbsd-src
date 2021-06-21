@@ -1,6 +1,7 @@
-#	$OpenBSD: Makefile,v 1.9 2019/08/05 07:08:57 jsg Exp $
+#	$OpenBSD: Makefile,v 1.16 2021/05/29 08:37:53 kettenis Exp $
 
-MAN=	agtimer.4 ampintc.4 apm.4 efi.4 intro.4 smbios.4
+MAN=	agtimer.4 ampintc.4 apldart.4 apldog.4 aplintc.4 aplns.4 aplpcie.4 \
+	aplpmu.4 aplspmi.4 apm.4 efi.4 intro.4 smbios.4
 
 MANSUBDIR=arm64
 

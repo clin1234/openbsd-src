@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_icmp.c,v 1.183 2020/08/22 17:55:54 gnezdo Exp $	*/
+/*	$OpenBSD: ip_icmp.c,v 1.186 2021/03/30 08:37:10 sashan Exp $	*/
 /*	$NetBSD: ip_icmp.c,v 1.19 1996/02/13 23:42:22 christos Exp $	*/
 
 /*
@@ -259,7 +259,7 @@ icmp_do_error(struct mbuf *n, int type, int code, u_int32_t dest, int destmtu)
 	}
 
 	icp->icmp_code = code;
-	m_copydata(n, 0, icmplen, (caddr_t)&icp->icmp_ip);
+	m_copydata(n, 0, icmplen, &icp->icmp_ip);
 
 	/*
 	 * Now, copy old ip header (without options)
@@ -846,10 +846,21 @@ icmp_send(struct mbuf *m, struct mbuf *opts)
 		printf("icmp_send dst %s src %s\n", dst, src);
 	}
 #endif
-	if (opts != NULL)
+	/*
+	 * ip_send() cannot handle IP options properly. So in case we have
+	 * options fill out the IP header here and use ip_send_raw() instead.
+	 */
+	if (opts != NULL) {
 		m = ip_insertoptions(m, opts, &hlen);
-
-	ip_send(m);
+		ip = mtod(m, struct ip *);
+		ip->ip_hl = (hlen >> 2);
+		ip->ip_v = IPVERSION;
+		ip->ip_off &= htons(IP_DF);
+		ip->ip_id = htons(ip_randomid());
+		ipstat_inc(ips_localout);
+		ip_send_raw(m);
+	} else
+		ip_send(m);
 }
 
 u_int32_t
@@ -928,7 +939,7 @@ icmp_sysctl_icmpstat(void *oldp, size_t *oldlenp, void *newp)
 }
 
 struct rtentry *
-icmp_mtudisc_clone(struct in_addr dst, u_int rtableid)
+icmp_mtudisc_clone(struct in_addr dst, u_int rtableid, int ipsec)
 {
 	struct sockaddr_in sin;
 	struct rtentry *rt;
@@ -942,7 +953,10 @@ icmp_mtudisc_clone(struct in_addr dst, u_int rtableid)
 	rt = rtalloc(sintosa(&sin), RT_RESOLVE, rtableid);
 
 	/* Check if the route is actually usable */
-	if (!rtisvalid(rt) || (rt->rt_flags & (RTF_REJECT|RTF_BLACKHOLE)))
+	if (!rtisvalid(rt))
+		goto bad;
+	/* IPsec needs the route only for PMTU, it can use reject for that */
+	if (!ipsec && (rt->rt_flags & (RTF_REJECT|RTF_BLACKHOLE)))
 		goto bad;
 
 	/*
@@ -1000,7 +1014,7 @@ icmp_mtudisc(struct icmp *icp, u_int rtableid)
 	struct ifnet *ifp;
 	u_long mtu = ntohs(icp->icmp_nextmtu);  /* Why a long?  IPv6 */
 
-	rt = icmp_mtudisc_clone(icp->icmp_ip.ip_dst, rtableid);
+	rt = icmp_mtudisc_clone(icp->icmp_ip.ip_dst, rtableid, 0);
 	if (rt == NULL)
 		return;
 

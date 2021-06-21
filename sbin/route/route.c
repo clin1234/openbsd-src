@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.c,v 1.249 2020/10/29 21:15:26 denis Exp $	*/
+/*	$OpenBSD: route.c,v 1.254 2021/03/12 19:35:43 florian Exp $	*/
 /*	$NetBSD: route.c,v 1.16 1996/04/15 18:27:05 cgd Exp $	*/
 
 /*
@@ -506,7 +506,8 @@ setsource(int argc, char **argv)
 		for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
 			if (if_nametoindex(ifa->ifa_name) != ifindex)
 				continue;
-			if (!(ifa->ifa_addr->sa_family == AF_INET ||
+			if (ifa->ifa_addr == NULL ||
+			    !(ifa->ifa_addr->sa_family == AF_INET ||
 			    ifa->ifa_addr->sa_family == AF_INET6))
 				continue;
 			if ((af != AF_UNSPEC) &&
@@ -973,6 +974,7 @@ getaddr(int which, int af, char *s, struct hostent **hpp)
 			errx(1, "%s: resolved to multiple values", s);
 		memcpy(&su->sin6, res->ai_addr, sizeof(su->sin6));
 		freeaddrinfo(res);
+#ifdef __KAME__
 		if ((IN6_IS_ADDR_LINKLOCAL(&su->sin6.sin6_addr) ||
 		     IN6_IS_ADDR_MC_LINKLOCAL(&su->sin6.sin6_addr) ||
 		     IN6_IS_ADDR_MC_INTFACELOCAL(&su->sin6.sin6_addr)) &&
@@ -981,6 +983,7 @@ getaddr(int which, int af, char *s, struct hostent **hpp)
 				htons(su->sin6.sin6_scope_id);
 			su->sin6.sin6_scope_id = 0;
 		}
+#endif
 		if (hints.ai_flags == AI_NUMERICHOST) {
 			if (which == RTA_DST) {
 				if (sep == NULL && su->sin6.sin6_scope_id == 0 &&
@@ -1246,9 +1249,16 @@ char routeflags[] =
 char ifnetflags[] =
 "\1UP\2BROADCAST\3DEBUG\4LOOPBACK\5PTP\6STATICARP\7RUNNING\010NOARP\011PPROMISC"
 "\012ALLMULTI\013OACTIVE\014SIMPLEX\015LINK0\016LINK1\017LINK2\020MULTICAST"
-"\23INET6_NOPRIVACY\24MPLS\25WOL\26AUTOCONF6\27INET6_NOSOII\30AUTOCONF4";
+"\23AUTOCONF6TEMP\24MPLS\25WOL\26AUTOCONF6\27INET6_NOSOII\30AUTOCONF4";
 char addrnames[] =
 "\1DST\2GATEWAY\3NETMASK\4GENMASK\5IFP\6IFA\7AUTHOR\010BRD\011SRC\012SRCMASK\013LABEL\014BFD\015DNS\016STATIC\017SEARCH";
+char ieee80211flags[] =
+    "\1ASCAN\2SIBSS\011WEPON\012IBSSON\013PMGTON\014DESBSSID\016ROAMING"
+    "\020TXPOW_FIXED\021TXPOW_AUTO\022SHSLOT\023SHPREAMBLE\024QOS"
+    "\025USEPROT\026RSNON\027PSK\030COUNTERM\031MFPR\032HTON\033PBAR"
+    "\034BGSCAN\035AUTO_JOIN\036VHTON";
+char ieee80211xflags[] =
+    "\1TX_MGMT_ONLY";
 
 const char *
 get_linkstate(int mt, int link_state)
@@ -2027,9 +2037,9 @@ print_rtdns(struct sockaddr_rtdns *rtdns)
 		    sizeof(rtdns->sr_dns));
 		return;
 	}
-	printf(" [");
 	switch (rtdns->sr_family) {
 	case AF_INET:
+		printf(" INET [");
 		/* An array of IPv4 addresses. */
 		servercnt = srclen / sizeof(struct in_addr);
 		if (servercnt * sizeof(struct in_addr) != srclen) {
@@ -2044,6 +2054,7 @@ print_rtdns(struct sockaddr_rtdns *rtdns)
 		}
 		break;
 	case AF_INET6:
+		printf(" INET6 [");
 		servercnt = srclen / sizeof(struct in6_addr);
 		if (servercnt * sizeof(struct in6_addr) != srclen) {
 			printf("<invalid server count>\n");
@@ -2057,6 +2068,7 @@ print_rtdns(struct sockaddr_rtdns *rtdns)
 		}
 		break;
 	default:
+		printf(" UNKNOWN [");
 		break;
 	}
 	printf("]");
@@ -2205,9 +2217,12 @@ print_80211info(struct if_ieee80211_msghdr *ifim)
 	}
 	printf("channel %u, ", ifim->ifim_ifie.ifie_channel);
 	bssid = ifim->ifim_ifie.ifie_addr;
-	printf("bssid %02x:%02x:%02x:%02x:%02x:%02x, ",
+	printf("bssid %02x:%02x:%02x:%02x:%02x:%02x\n",
 	    bssid[0], bssid[1], bssid[2],
 	    bssid[3], bssid[4], bssid[5]);
-	printf("flags: 0x%x, xflags: 0x%x\n", ifim->ifim_ifie.ifie_flags,
-	    ifim->ifim_ifie.ifie_xflags);
+	printf("flags:");
+	bprintf(stdout, ifim->ifim_ifie.ifie_flags, ieee80211flags);
+	printf("\nxflags:");
+	bprintf(stdout, ifim->ifim_ifie.ifie_xflags, ieee80211xflags);
+	printf("\n");
 }

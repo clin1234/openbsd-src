@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.101 2020/11/05 11:28:11 claudio Exp $ */
+/*	$OpenBSD: control.c,v 1.105 2021/04/27 15:34:18 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -280,6 +280,8 @@ control_dispatch_msg(struct pollfd *pfd, struct peer_head *peers)
 			case IMSG_CTL_SHOW_NETWORK:
 			case IMSG_CTL_SHOW_RIB:
 			case IMSG_CTL_SHOW_RIB_PREFIX:
+			case IMSG_CTL_SHOW_SET:
+			case IMSG_CTL_SHOW_RTR:
 				break;
 			default:
 				/* clear imsg type to prevent processing */
@@ -333,7 +335,8 @@ control_dispatch_msg(struct pollfd *pfd, struct peer_head *peers)
 					    IMSG_CTL_SHOW_NEIGHBOR,
 					    0, 0, -1, p, sizeof(*p));
 					for (i = 1; i < Timer_Max; i++) {
-						if (!timer_running(p, i, &d))
+						if (!timer_running(&p->timers,
+						    i, &d))
 							continue;
 						ct.type = i;
 						ct.val = d;
@@ -403,7 +406,8 @@ control_dispatch_msg(struct pollfd *pfd, struct peer_head *peers)
 					if (!p->conf.down) {
 						session_stop(p,
 						    ERR_CEASE_ADMIN_RESET);
-						timer_set(p, Timer_IdleHold,
+						timer_set(&p->timers,
+						    Timer_IdleHold,
 						    SESSION_CLEAR_DELAY);
 					} else {
 						session_stop(p,
@@ -445,6 +449,7 @@ control_dispatch_msg(struct pollfd *pfd, struct peer_head *peers)
 		case IMSG_CTL_RELOAD:
 		case IMSG_CTL_SHOW_INTERFACE:
 		case IMSG_CTL_SHOW_FIB_TABLES:
+		case IMSG_CTL_SHOW_RTR:
 			c->ibuf.pid = imsg.hdr.pid;
 			imsg_ctl_parent(imsg.hdr.type, 0, imsg.hdr.pid,
 			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);
@@ -496,6 +501,7 @@ control_dispatch_msg(struct pollfd *pfd, struct peer_head *peers)
 			c->terminate = 1;
 			/* FALLTHROUGH */
 		case IMSG_CTL_SHOW_RIB_MEM:
+		case IMSG_CTL_SHOW_SET:
 			c->ibuf.pid = imsg.hdr.pid;
 			imsg_ctl_rde(imsg.hdr.type, imsg.hdr.pid,
 			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE);

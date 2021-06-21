@@ -1,4 +1,4 @@
-/*	$OpenBSD: compress_gzip.c,v 1.10 2015/12/28 22:08:30 jung Exp $	*/
+/*	$OpenBSD: compress_gzip.c,v 1.13 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2012 Gilles Chehade <gilles@poolp.org>
@@ -17,28 +17,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-
-#include <ctype.h>
-#include <err.h>
-#include <fcntl.h>
-#include <imsg.h>
-#include <pwd.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <limits.h>
-
 #include <zlib.h>
 
 #include "smtpd.h"
-#include "log.h"
-
 
 #define	GZIP_BUFFER_SIZE	16384
 
@@ -129,7 +111,7 @@ compress_gzip_file(FILE *in, FILE *out)
 {
 	gzFile  gzf;
 	char  ibuf[GZIP_BUFFER_SIZE];
-	int  r, w;
+	int  r;
 	int  ret = 0;
 
 	if (in == NULL || out == NULL)
@@ -140,7 +122,7 @@ compress_gzip_file(FILE *in, FILE *out)
 		return (0);
 
 	while ((r = fread(ibuf, 1, GZIP_BUFFER_SIZE, in)) != 0) {
-		if ((w = gzwrite(gzf, ibuf, r)) != r)
+		if (gzwrite(gzf, ibuf, r) != r)
 			goto end;
 	}
 	if (!feof(in))
@@ -159,7 +141,7 @@ uncompress_gzip_file(FILE *in, FILE *out)
 {
 	gzFile  gzf;
 	char  obuf[GZIP_BUFFER_SIZE];
-	int  r, w;
+	int  r;
 	int  ret = 0;
 
 	if (in == NULL || out == NULL)
@@ -170,7 +152,7 @@ uncompress_gzip_file(FILE *in, FILE *out)
 		return (0);
 
 	while ((r = gzread(gzf, obuf, sizeof(obuf))) > 0) {
-		if  ((w = fwrite(obuf, r, 1, out)) != 1)
+		if  (fwrite(obuf, r, 1, out) != 1)
 			goto end;
 	}
 	if (!gzeof(gzf))

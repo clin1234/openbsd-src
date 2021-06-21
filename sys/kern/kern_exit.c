@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exit.c,v 1.190 2020/10/15 16:31:11 cheloha Exp $	*/
+/*	$OpenBSD: kern_exit.c,v 1.199 2021/03/12 10:13:28 mpi Exp $	*/
 /*	$NetBSD: kern_exit.c,v 1.39 1996/04/22 01:38:25 christos Exp $	*/
 
 /*
@@ -124,6 +124,7 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 {
 	struct process *pr, *qr, *nqr;
 	struct rusage *rup;
+	int s;
 
 	atomic_setbits_int(&p->p_flag, P_WEXIT);
 
@@ -135,12 +136,12 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 	} else {
 		/* nope, multi-threaded */
 		if (flags == EXIT_NORMAL)
-			single_thread_set(p, SINGLE_EXIT, 0);
+			single_thread_set(p, SINGLE_EXIT, 1);
 		else if (flags == EXIT_THREAD)
 			single_thread_check(p, 0);
 	}
 
-	if (flags == EXIT_NORMAL) {
+	if (flags == EXIT_NORMAL && !(pr->ps_flags & PS_EXITING)) {
 		if (pr->ps_pid == 1)
 			panic("init died (signal %d, exit %d)", xsig, xexit);
 
@@ -161,7 +162,9 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 	}
 
 	/* unlink ourselves from the active threads */
+	SCHED_LOCK(s);
 	TAILQ_REMOVE(&pr->ps_threads, p, p_thr_link);
+	SCHED_UNLOCK(s);
 	if ((p->p_flag & P_THREAD) == 0) {
 		/* main thread gotta wait because it has the pid, et al */
 		while (pr->ps_refcnt > 1)
@@ -183,6 +186,8 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 	p->p_siglist = 0;
 	if ((p->p_flag & P_THREAD) == 0)
 		pr->ps_siglist = 0;
+
+	kqpoll_exit();
 
 #if NKCOV > 0
 	kcov_exit(p);
@@ -691,6 +696,7 @@ process_reparent(struct process *child, struct process *parent)
 	}
 
 	child->ps_pptr = parent;
+	child->ps_ppid = parent->ps_pid;
 }
 
 void

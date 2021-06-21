@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_input.c,v 1.229 2020/08/24 16:40:07 gnezdo Exp $	*/
+/*	$OpenBSD: ip6_input.c,v 1.237 2021/06/03 04:47:54 dlg Exp $	*/
 /*	$KAME: ip6_input.c,v 1.188 2001/03/29 05:34:31 itojun Exp $	*/
 
 /*
@@ -172,28 +172,16 @@ ipv6_input(struct ifnet *ifp, struct mbuf *m)
 	KASSERT(nxt == IPPROTO_DONE);
 }
 
-int
-ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
+struct mbuf *
+ipv6_check(struct ifnet *ifp, struct mbuf *m)
 {
-	struct mbuf *m = *mp;
 	struct ip6_hdr *ip6;
-	struct sockaddr_in6 sin6;
-	struct rtentry *rt = NULL;
-	int ours = 0;
-	u_int16_t src_scope, dst_scope;
-#if NPF > 0
-	struct in6_addr odst;
-#endif
-	int srcrt = 0;
 
-	KASSERT(*offp == 0);
-
-	ip6stat_inc(ip6s_total);
-
-	if (m->m_len < sizeof(struct ip6_hdr)) {
-		if ((m = *mp = m_pullup(m, sizeof(struct ip6_hdr))) == NULL) {
+	if (m->m_len < sizeof(*ip6)) {
+		m = m_pullup(m, sizeof(*ip6));
+		if (m == NULL) {
 			ip6stat_inc(ip6s_toosmall);
-			goto bad;
+			return (NULL);
 		}
 	}
 
@@ -203,13 +191,6 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 		ip6stat_inc(ip6s_badvers);
 		goto bad;
 	}
-
-#if NCARP > 0
-	if (carp_lsdrop(ifp, m, AF_INET6, ip6->ip6_src.s6_addr32,
-	    ip6->ip6_dst.s6_addr32, (ip6->ip6_nxt == IPPROTO_ICMPV6 ? 0 : 1)))
-		goto bad;
-#endif
-	ip6stat_inc(ip6s_nxthist + ip6->ip6_nxt);
 
 	/*
 	 * Check against address spoofing/corruption.
@@ -225,8 +206,8 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 	if ((IN6_IS_ADDR_LOOPBACK(&ip6->ip6_src) ||
 	    IN6_IS_ADDR_LOOPBACK(&ip6->ip6_dst)) &&
 	    (ifp->if_flags & IFF_LOOPBACK) == 0) {
-		    ip6stat_inc(ip6s_badscope);
-		    goto bad;
+		ip6stat_inc(ip6s_badscope);
+		goto bad;
 	}
 	/* Drop packets if interface ID portion is already filled. */
 	if (((IN6_IS_SCOPE_EMBED(&ip6->ip6_src) && ip6->ip6_src.s6_addr16[1]) ||
@@ -275,6 +256,43 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 		ip6stat_inc(ip6s_badscope);
 		goto bad;
 	}
+
+	return (m);
+bad:
+	m_freem(m);
+	return (NULL);
+}
+
+int
+ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
+{
+	struct mbuf *m;
+	struct ip6_hdr *ip6;
+	struct sockaddr_in6 sin6;
+	struct rtentry *rt = NULL;
+	int ours = 0;
+	u_int16_t src_scope, dst_scope;
+#if NPF > 0
+	struct in6_addr odst;
+#endif
+	int srcrt = 0;
+
+	KASSERT(*offp == 0);
+
+	ip6stat_inc(ip6s_total);
+
+	m = *mp = ipv6_check(ifp, *mp);
+	if (m == NULL)
+		goto bad;
+
+	ip6 = mtod(m, struct ip6_hdr *);
+
+#if NCARP > 0
+	if (carp_lsdrop(ifp, m, AF_INET6, ip6->ip6_src.s6_addr32,
+	    ip6->ip6_dst.s6_addr32, (ip6->ip6_nxt == IPPROTO_ICMPV6 ? 0 : 1)))
+		goto bad;
+#endif
+	ip6stat_inc(ip6s_nxthist + ip6->ip6_nxt);
 
 	/*
 	 * If the packet has been received on a loopback interface it
@@ -531,7 +549,7 @@ ip6_ours(struct mbuf **mp, int *offp, int nxt, int af)
 	if (ip6_hbhchcheck(*mp, offp, &nxt, NULL))
 		return IPPROTO_DONE;
 
-	/* Check wheter we are already in a IPv4/IPv6 local deliver loop. */
+	/* Check whether we are already in a IPv4/IPv6 local deliver loop. */
 	if (af == AF_UNSPEC)
 		nxt = ip_deliver(mp, offp, nxt, AF_INET6);
 	return nxt;
@@ -650,7 +668,7 @@ ip6_check_rh0hdr(struct mbuf *m, int *offp)
 				return (1);
 			}
 
-			m_copydata(m, off, sizeof(rthdr), (caddr_t)&rthdr);
+			m_copydata(m, off, sizeof(rthdr), &rthdr);
 
 			if (rthdr.ip6r_type == IPV6_RTHDR_TYPE_0) {
 				*offp += offsetof(struct ip6_rthdr, ip6r_type);
@@ -673,7 +691,7 @@ ip6_check_rh0hdr(struct mbuf *m, int *offp)
 				return (0);
 			}
 
-			m_copydata(m, off, sizeof(opt6), (caddr_t)&opt6);
+			m_copydata(m, off, sizeof(opt6), &opt6);
 
 			if (proto == IPPROTO_AH)
 				off += (opt6.ip6e_len + 2) * 4;
@@ -1143,7 +1161,7 @@ ip6_pullexthdr(struct mbuf *m, size_t off, int nxt)
 	if (off + sizeof(ip6e) > m->m_pkthdr.len)
 		return NULL;
 
-	m_copydata(m, off, sizeof(ip6e), (caddr_t)&ip6e);
+	m_copydata(m, off, sizeof(ip6e), &ip6e);
 	if (nxt == IPPROTO_AH)
 		elen = (ip6e.ip6e_len + 2) << 2;
 	else
@@ -1195,7 +1213,7 @@ ip6_get_prevhdr(struct mbuf *m, int off)
 		len = sizeof(struct ip6_hdr);
 		nlen = 0;
 		while (len < off) {
-			m_copydata(m, len, sizeof(ip6e), (caddr_t)&ip6e);
+			m_copydata(m, len, sizeof(ip6e), &ip6e);
 
 			switch (nxt) {
 			case IPPROTO_FRAGMENT:
@@ -1236,7 +1254,7 @@ ip6_nexthdr(struct mbuf *m, int off, int proto, int *nxtp)
 	case IPPROTO_IPV6:
 		if (m->m_pkthdr.len < off + sizeof(ip6))
 			return -1;
-		m_copydata(m, off, sizeof(ip6), (caddr_t)&ip6);
+		m_copydata(m, off, sizeof(ip6), &ip6);
 		if (nxtp)
 			*nxtp = ip6.ip6_nxt;
 		off += sizeof(ip6);
@@ -1249,7 +1267,7 @@ ip6_nexthdr(struct mbuf *m, int off, int proto, int *nxtp)
 		 */
 		if (m->m_pkthdr.len < off + sizeof(fh))
 			return -1;
-		m_copydata(m, off, sizeof(fh), (caddr_t)&fh);
+		m_copydata(m, off, sizeof(fh), &fh);
 		if ((fh.ip6f_offlg & IP6F_OFF_MASK) != 0)
 			return -1;
 		if (nxtp)
@@ -1260,7 +1278,7 @@ ip6_nexthdr(struct mbuf *m, int off, int proto, int *nxtp)
 	case IPPROTO_AH:
 		if (m->m_pkthdr.len < off + sizeof(ip6e))
 			return -1;
-		m_copydata(m, off, sizeof(ip6e), (caddr_t)&ip6e);
+		m_copydata(m, off, sizeof(ip6e), &ip6e);
 		if (nxtp)
 			*nxtp = ip6e.ip6e_nxt;
 		off += (ip6e.ip6e_len + 2) << 2;
@@ -1273,7 +1291,7 @@ ip6_nexthdr(struct mbuf *m, int off, int proto, int *nxtp)
 	case IPPROTO_DSTOPTS:
 		if (m->m_pkthdr.len < off + sizeof(ip6e))
 			return -1;
-		m_copydata(m, off, sizeof(ip6e), (caddr_t)&ip6e);
+		m_copydata(m, off, sizeof(ip6e), &ip6e);
 		if (nxtp)
 			*nxtp = ip6e.ip6e_nxt;
 		off += (ip6e.ip6e_len + 1) << 3;
@@ -1334,7 +1352,15 @@ const u_char inet6ctlerrmap[PRC_NCMDS] = {
 	ENOPROTOOPT
 };
 
+#ifdef MROUTING
+extern int ip6_mrtproto;
+#endif
+
 const struct sysctl_bounded_args ipv6ctl_vars[] = {
+	{ IPV6CTL_DAD_PENDING, &ip6_dad_pending, SYSCTL_INT_READONLY },
+#ifdef MROUTING
+	{ IPV6CTL_MRTPROTO, &ip6_mrtproto, SYSCTL_INT_READONLY },
+#endif
 	{ IPV6CTL_FORWARDING, &ip6_forwarding, 0, 1 },
 	{ IPV6CTL_SENDREDIRECTS, &ip6_sendredirects, 0, 1 },
 	{ IPV6CTL_DEFHLIM, &ip6_defhlim, 0, 255 },
@@ -1393,7 +1419,6 @@ ip6_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     void *newp, size_t newlen)
 {
 #ifdef MROUTING
-	extern int ip6_mrtproto;
 	extern struct mrt6stat mrt6stat;
 #endif
 	int error;
@@ -1403,8 +1428,6 @@ ip6_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		return (ENOTDIR);
 
 	switch (name[0]) {
-	case IPV6CTL_DAD_PENDING:
-		return sysctl_rdint(oldp, oldlenp, newp, ip6_dad_pending);
 	case IPV6CTL_STATS:
 		return (ip6_sysctl_ip6stat(oldp, oldlenp, newp));
 #ifdef MROUTING
@@ -1416,8 +1439,6 @@ ip6_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		    &mrt6stat, sizeof(mrt6stat));
 		NET_UNLOCK();
 		return (error);
-	case IPV6CTL_MRTPROTO:
-		return sysctl_rdint(oldp, oldlenp, newp, ip6_mrtproto);
 	case IPV6CTL_MRTMIF:
 		if (newp)
 			return (EPERM);
@@ -1475,14 +1496,7 @@ ip6_send_dispatch(void *xmq)
 
 	NET_LOCK();
 	while ((m = ml_dequeue(&ml)) != NULL) {
-		/*
-		 * To avoid a "too big" situation at an intermediate router and
-		 * the path MTU discovery process, specify the IPV6_MINMTU
-		 * flag.  Note that only echo and node information replies are
-		 * affected, since the length of ICMP6 errors is limited to the
-		 * minimum MTU.
-		 */
-		ip6_output(m, NULL, NULL, IPV6_MINMTU, NULL, NULL);
+		ip6_output(m, NULL, NULL, 0, NULL, NULL);
 	}
 	NET_UNLOCK();
 }

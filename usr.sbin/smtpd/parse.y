@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.281 2020/09/23 19:11:50 martijn Exp $	*/
+/*	$OpenBSD: parse.y,v 1.289 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -22,36 +22,21 @@
  */
 
 %{
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 
 #include <net/if.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 
+#include <arpa/inet.h>
 #include <ctype.h>
-#include <err.h>
 #include <errno.h>
-#include <event.h>
 #include <ifaddrs.h>
-#include <imsg.h>
 #include <inttypes.h>
-#include <limits.h>
-#include <netdb.h>
-#include <pwd.h>
 #include <resolv.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <syslog.h>
 #include <unistd.h>
 #include <util.h>
-
-#include <openssl/ssl.h>
 
 #include "smtpd.h"
 #include "ssl.h"
@@ -103,7 +88,7 @@ struct mta_limits	*limits;
 static struct pki	*pki;
 static struct ca	*sca;
 
-struct dispatcher	*dispatcher;
+struct dispatcher	*dsp;
 struct rule		*rule;
 struct filter_proc	*processor;
 struct filter_config	*filter_config;
@@ -128,13 +113,17 @@ enum listen_options {
 	LO_PROXY       	= 0x008000,
 };
 
+#define PKI_MAX	32
 static struct listen_opts {
 	char	       *ifx;
 	int		family;
 	in_port_t	port;
 	uint16_t	ssl;
 	char	       *filtername;
-	char	       *pki;
+	char	       *pki[PKI_MAX];
+	int		pkicount;
+	char	       *tls_ciphers;
+	char	       *tls_protocols;
 	char	       *ca;
 	uint16_t       	auth;
 	struct table   *authtable;
@@ -188,7 +177,7 @@ typedef struct {
 %token	MAIL_FROM MAILDIR MASK_SRC MASQUERADE MATCH MAX_MESSAGE_SIZE MAX_DEFERRED MBOX MDA MTA MX
 %token	NO_DSN NO_VERIFY NOOP
 %token	ON
-%token	PHASE PKI PORT PROC PROC_EXEC PROXY_V2
+%token	PHASE PKI PORT PROC PROC_EXEC PROTOCOLS PROXY_V2
 %token	QUEUE QUIT
 %token	RCPT_TO RDNS RECIPIENT RECEIVEDAUTH REGEX RELAY REJECT REPORT REWRITE RSET
 %token	SCHEDULER SENDER SENDERS SMTP SMTP_IN SMTP_OUT SMTPS SOCKET SRC SRS SUB_ADDR_DELIM
@@ -582,37 +571,37 @@ SRS KEY STRING {
 
 dispatcher_local_option:
 USER STRING {
-	if (dispatcher->u.local.is_mbox) {
+	if (dsp->u.local.is_mbox) {
 		yyerror("user may not be specified for this dispatcher");
 		YYERROR;
 	}
 
-	if (dispatcher->u.local.forward_only) {
+	if (dsp->u.local.forward_only) {
 		yyerror("user may not be specified for forward-only");
 		YYERROR;
 	}
 
-	if (dispatcher->u.local.expand_only) {
+	if (dsp->u.local.expand_only) {
 		yyerror("user may not be specified for expand-only");
 		YYERROR;
 	}
 
-	if (dispatcher->u.local.user) {
+	if (dsp->u.local.user) {
 		yyerror("user already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->u.local.user = $2;
+	dsp->u.local.user = $2;
 }
 | ALIAS tables {
 	struct table   *t = $2;
 
-	if (dispatcher->u.local.table_alias) {
+	if (dsp->u.local.table_alias) {
 		yyerror("alias mapping already specified for this dispatcher");
 		YYERROR;
 	}
 
-	if (dispatcher->u.local.table_virtual) {
+	if (dsp->u.local.table_virtual) {
 		yyerror("virtual mapping already specified for this dispatcher");
 		YYERROR;
 	}
@@ -623,17 +612,17 @@ USER STRING {
 		YYERROR;
 	}
 
-	dispatcher->u.local.table_alias = strdup(t->t_name);
+	dsp->u.local.table_alias = strdup(t->t_name);
 }
 | VIRTUAL tables {
 	struct table   *t = $2;
 
-	if (dispatcher->u.local.table_virtual) {
+	if (dsp->u.local.table_virtual) {
 		yyerror("virtual mapping already specified for this dispatcher");
 		YYERROR;
 	}
 
-	if (dispatcher->u.local.table_alias) {
+	if (dsp->u.local.table_alias) {
 		yyerror("alias mapping already specified for this dispatcher");
 		YYERROR;
 	}
@@ -644,12 +633,12 @@ USER STRING {
 		YYERROR;
 	}
 
-	dispatcher->u.local.table_virtual = strdup(t->t_name);
+	dsp->u.local.table_virtual = strdup(t->t_name);
 }
 | USERBASE tables {
 	struct table   *t = $2;
 
-	if (dispatcher->u.local.table_userbase) {
+	if (dsp->u.local.table_userbase) {
 		yyerror("userbase mapping already specified for this dispatcher");
 		YYERROR;
 	}
@@ -660,14 +649,14 @@ USER STRING {
 		YYERROR;
 	}
 
-	dispatcher->u.local.table_userbase = strdup(t->t_name);
+	dsp->u.local.table_userbase = strdup(t->t_name);
 }
 | WRAPPER STRING {
 	if (! dict_get(conf->sc_mda_wrappers, $2)) {
 		yyerror("no mda wrapper with that name: %s", $2);
 		YYERROR;
 	}
-	dispatcher->u.local.mda_wrapper = $2;
+	dsp->u.local.mda_wrapper = $2;
 }
 ;
 
@@ -678,67 +667,67 @@ dispatcher_local_option dispatcher_local_options
 
 dispatcher_local:
 MBOX {
-	dispatcher->u.local.is_mbox = 1;
-	asprintf(&dispatcher->u.local.command, "/usr/libexec/mail.local -f %%{mbox.from} -- %%{user.username}");
+	dsp->u.local.is_mbox = 1;
+	asprintf(&dsp->u.local.command, "/usr/libexec/mail.local -f %%{mbox.from} -- %%{user.username}");
 } dispatcher_local_options
 | MAILDIR {
-	asprintf(&dispatcher->u.local.command, "/usr/libexec/mail.maildir");
+	asprintf(&dsp->u.local.command, "/usr/libexec/mail.maildir");
 } dispatcher_local_options
 | MAILDIR JUNK {
-	asprintf(&dispatcher->u.local.command, "/usr/libexec/mail.maildir -j");
+	asprintf(&dsp->u.local.command, "/usr/libexec/mail.maildir -j");
 } dispatcher_local_options
 | MAILDIR STRING {
 	if (strncmp($2, "~/", 2) == 0)
-		asprintf(&dispatcher->u.local.command,
+		asprintf(&dsp->u.local.command,
 		    "/usr/libexec/mail.maildir \"%%{user.directory}/%s\"", $2+2);
 	else
-		asprintf(&dispatcher->u.local.command,
+		asprintf(&dsp->u.local.command,
 		    "/usr/libexec/mail.maildir \"%s\"", $2);
 } dispatcher_local_options
 | MAILDIR STRING JUNK {
 	if (strncmp($2, "~/", 2) == 0)
-		asprintf(&dispatcher->u.local.command,
+		asprintf(&dsp->u.local.command,
 		    "/usr/libexec/mail.maildir -j \"%%{user.directory}/%s\"", $2+2);
 	else
-		asprintf(&dispatcher->u.local.command,
+		asprintf(&dsp->u.local.command,
 		    "/usr/libexec/mail.maildir -j \"%s\"", $2);
 } dispatcher_local_options
 | LMTP STRING {
-	asprintf(&dispatcher->u.local.command,
+	asprintf(&dsp->u.local.command,
 	    "/usr/libexec/mail.lmtp -d %s -u", $2);
-	dispatcher->u.local.user = SMTPD_USER;
+	dsp->u.local.user = SMTPD_USER;
 } dispatcher_local_options
 | LMTP STRING RCPT_TO {
-	asprintf(&dispatcher->u.local.command,
+	asprintf(&dsp->u.local.command,
 	    "/usr/libexec/mail.lmtp -d %s -r", $2);
-	dispatcher->u.local.user = SMTPD_USER;
+	dsp->u.local.user = SMTPD_USER;
 } dispatcher_local_options
 | MDA STRING {
-	asprintf(&dispatcher->u.local.command,
+	asprintf(&dsp->u.local.command,
 	    "/usr/libexec/mail.mda \"%s\"", $2);
 } dispatcher_local_options
 | FORWARD_ONLY {
-	dispatcher->u.local.forward_only = 1;
+	dsp->u.local.forward_only = 1;
 } dispatcher_local_options
 | EXPAND_ONLY {
-	dispatcher->u.local.expand_only = 1;
+	dsp->u.local.expand_only = 1;
 } dispatcher_local_options
 
 ;
 
 dispatcher_remote_option:
 HELO STRING {
-	if (dispatcher->u.remote.helo) {
+	if (dsp->u.remote.helo) {
 		yyerror("helo already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.helo = $2;
+	dsp->u.remote.helo = $2;
 }
 | HELO_SRC tables {
 	struct table   *t = $2;
 
-	if (dispatcher->u.remote.helo_source) {
+	if (dsp->u.remote.helo_source) {
 		yyerror("helo-source mapping already specified for this dispatcher");
 		YYERROR;
 	}
@@ -748,28 +737,44 @@ HELO STRING {
 		YYERROR;
 	}
 
-	dispatcher->u.remote.helo_source = strdup(t->t_name);
+	dsp->u.remote.helo_source = strdup(t->t_name);
 }
 | PKI STRING {
-	if (dispatcher->u.remote.pki) {
+	if (dsp->u.remote.pki) {
 		yyerror("pki already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.pki = $2;
+	dsp->u.remote.pki = $2;
 }
 | CA STRING {
-	if (dispatcher->u.remote.ca) {
+	if (dsp->u.remote.ca) {
 		yyerror("ca already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.ca = $2;
+	dsp->u.remote.ca = $2;
+}
+| CIPHERS STRING {
+	if (dsp->u.remote.tls_ciphers) {
+		yyerror("ciphers already specified for this dispatcher");
+		YYERROR;
+	}
+
+	dsp->u.remote.tls_ciphers = $2;
+}
+| PROTOCOLS STRING {
+	if (dsp->u.remote.tls_protocols) {
+		yyerror("protocols already specified for this dispatcher");
+		YYERROR;
+	}
+
+	dsp->u.remote.tls_protocols = $2;
 }
 | SRC tables {
 	struct table   *t = $2;
 
-	if (dispatcher->u.remote.source) {
+	if (dsp->u.remote.source) {
 		yyerror("source mapping already specified for this dispatcher");
 		YYERROR;
 	}
@@ -780,49 +785,49 @@ HELO STRING {
 		YYERROR;
 	}
 
-	dispatcher->u.remote.source = strdup(t->t_name);
+	dsp->u.remote.source = strdup(t->t_name);
 }
 | MAIL_FROM STRING {
-	if (dispatcher->u.remote.mail_from) {
+	if (dsp->u.remote.mail_from) {
 		yyerror("mail-from already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.mail_from = $2;
+	dsp->u.remote.mail_from = $2;
 }
 | BACKUP MX STRING {
-	if (dispatcher->u.remote.backup) {
+	if (dsp->u.remote.backup) {
 		yyerror("backup already specified for this dispatcher");
 		YYERROR;
 	}
-	if (dispatcher->u.remote.smarthost) {
+	if (dsp->u.remote.smarthost) {
 		yyerror("backup and host are mutually exclusive");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.backup = 1;
-	dispatcher->u.remote.backupmx = $3;
+	dsp->u.remote.backup = 1;
+	dsp->u.remote.backupmx = $3;
 }
 | BACKUP {
-	if (dispatcher->u.remote.backup) {
+	if (dsp->u.remote.backup) {
 		yyerror("backup already specified for this dispatcher");
 		YYERROR;
 	}
-	if (dispatcher->u.remote.smarthost) {
+	if (dsp->u.remote.smarthost) {
 		yyerror("backup and host are mutually exclusive");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.backup = 1;
+	dsp->u.remote.backup = 1;
 }
 | HOST tables {
 	struct table   *t = $2;
 
-	if (dispatcher->u.remote.smarthost) {
+	if (dsp->u.remote.smarthost) {
 		yyerror("host mapping already specified for this dispatcher");
 		YYERROR;
 	}
-	if (dispatcher->u.remote.backup) {
+	if (dsp->u.remote.backup) {
 		yyerror("backup and host are mutually exclusive");
 		YYERROR;
 	}
@@ -833,16 +838,16 @@ HELO STRING {
 		YYERROR;
 	}
 
-	dispatcher->u.remote.smarthost = strdup(t->t_name);
+	dsp->u.remote.smarthost = strdup(t->t_name);
 }
 | DOMAIN tables {
 	struct table   *t = $2;
 
-	if (dispatcher->u.remote.smarthost) {
+	if (dsp->u.remote.smarthost) {
 		yyerror("host mapping already specified for this dispatcher");
 		YYERROR;
 	}
-	if (dispatcher->u.remote.backup) {
+	if (dsp->u.remote.backup) {
 		yyerror("backup and domain are mutually exclusive");
 		YYERROR;
 	}
@@ -853,35 +858,35 @@ HELO STRING {
 		YYERROR;
 	}
 
-	dispatcher->u.remote.smarthost = strdup(t->t_name);
-	dispatcher->u.remote.smarthost_domain = 1;
+	dsp->u.remote.smarthost = strdup(t->t_name);
+	dsp->u.remote.smarthost_domain = 1;
 }
 | TLS {
-	if (dispatcher->u.remote.tls_required == 1) {
+	if (dsp->u.remote.tls_required == 1) {
 		yyerror("tls already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.tls_required = 1;
+	dsp->u.remote.tls_required = 1;
 }
 | TLS NO_VERIFY {
-	if (dispatcher->u.remote.tls_required == 1) {
+	if (dsp->u.remote.tls_required == 1) {
 		yyerror("tls already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.tls_required = 1;
-	dispatcher->u.remote.tls_noverify = 1;
+	dsp->u.remote.tls_required = 1;
+	dsp->u.remote.tls_noverify = 1;
 }
 | AUTH tables {
 	struct table   *t = $2;
 
-	if (dispatcher->u.remote.smarthost == NULL) {
+	if (dsp->u.remote.smarthost == NULL) {
 		yyerror("auth may not be specified without host on a dispatcher");
 		YYERROR;
 	}
 
-	if (dispatcher->u.remote.auth) {
+	if (dsp->u.remote.auth) {
 		yyerror("auth mapping already specified for this dispatcher");
 		YYERROR;
 	}
@@ -892,12 +897,12 @@ HELO STRING {
 		YYERROR;
 	}
 
-	dispatcher->u.remote.auth = strdup(t->t_name);
+	dsp->u.remote.auth = strdup(t->t_name);
 }
 | FILTER STRING {
 	struct filter_config *fc;
 
-	if (dispatcher->u.remote.filtername) {
+	if (dsp->u.remote.filtername) {
 		yyerror("filter already specified for this dispatcher");
 		YYERROR;
 	}
@@ -908,13 +913,13 @@ HELO STRING {
 		YYERROR;
 	}
 	fc->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_OUT;
-	dispatcher->u.remote.filtername = $2;
+	dsp->u.remote.filtername = $2;
 }
 | FILTER {
 	char	buffer[128];
 	char	*filtername;
 
-	if (dispatcher->u.remote.filtername) {
+	if (dsp->u.remote.filtername) {
 		yyerror("filter already specified for this dispatcher");
 		YYERROR;
 	}
@@ -928,9 +933,9 @@ HELO STRING {
 	filter_config->filter_type = FILTER_TYPE_CHAIN;
 	filter_config->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_OUT;
 	dict_init(&filter_config->chain_procs);
-	dispatcher->u.remote.filtername = filtername;
+	dsp->u.remote.filtername = filtername;
 } '{' filter_list '}' {
-	dict_set(conf->sc_filters_dict, dispatcher->u.remote.filtername, filter_config);
+	dict_set(conf->sc_filters_dict, dsp->u.remote.filtername, filter_config);
 	filter_config = NULL;
 }
 | SRS {
@@ -938,12 +943,12 @@ HELO STRING {
 		yyerror("an srs key is required for srs to be specified in an action");
 		YYERROR;
 	}
-	if (dispatcher->u.remote.srs == 1) {
+	if (dsp->u.remote.srs == 1) {
 		yyerror("srs already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->u.remote.srs = 1;
+	dsp->u.remote.srs = 1;
 }
 ;
 
@@ -958,22 +963,22 @@ RELAY dispatcher_remote_options
 
 dispatcher_type:
 dispatcher_local {
-	dispatcher->type = DISPATCHER_LOCAL;
+	dsp->type = DISPATCHER_LOCAL;
 }
 | dispatcher_remote {
-	dispatcher->type = DISPATCHER_REMOTE;
+	dsp->type = DISPATCHER_REMOTE;
 }
 ;
 
 dispatcher_option:
 TTL STRING {
-	if (dispatcher->ttl) {
+	if (dsp->ttl) {
 		yyerror("ttl already specified for this dispatcher");
 		YYERROR;
 	}
 
-	dispatcher->ttl = delaytonum($2);
-	if (dispatcher->ttl == -1) {
+	dsp->ttl = delaytonum($2);
+	if (dsp->ttl == -1) {
 		yyerror("ttl delay \"%s\" is invalid", $2);
 		free($2);
 		YYERROR;
@@ -993,13 +998,13 @@ ACTION STRING {
 		yyerror("dispatcher already declared with that name: %s", $2);
 		YYERROR;
 	}
-	dispatcher = xcalloc(1, sizeof *dispatcher);
+	dsp = xcalloc(1, sizeof *dsp);
 } dispatcher_type dispatcher_options {
-	if (dispatcher->type == DISPATCHER_LOCAL)
-		if (dispatcher->u.local.table_userbase == NULL)
-			dispatcher->u.local.table_userbase = "<getpwnam>";
-	dict_set(conf->sc_dispatchers, $2, dispatcher);
-	dispatcher = NULL;
+	if (dsp->type == DISPATCHER_LOCAL)
+		if (dsp->u.local.table_userbase == NULL)
+			dsp->u.local.table_userbase = "<getpwnam>";
+	dict_set(conf->sc_dispatchers, $2, dsp);
+	dsp = NULL;
 }
 ;
 
@@ -1840,7 +1845,6 @@ filter_phase_connect
 filterel:
 STRING	{
 	struct filter_config   *fr;
-	struct filter_proc     *fp;
 	size_t			i;
 
 	if ((fr = dict_get(conf->sc_filters_dict, $1)) == NULL) {
@@ -1863,7 +1867,7 @@ STRING	{
 	}
 
 	if (fr->proc) {
-		if ((fp = dict_get(&filter_config->chain_procs, fr->proc))) {
+		if (dict_get(&filter_config->chain_procs, fr->proc)) {
 			yyerror("no proc allowed twice within a filter chain: %s", fr->proc);
 			free($1);
 			YYERROR;
@@ -1875,7 +1879,7 @@ STRING	{
 	filter_config->chain_size += 1;
 	filter_config->chain = reallocarray(filter_config->chain, filter_config->chain_size, sizeof(char *));
 	if (filter_config->chain == NULL)
-		err(1, NULL);
+		fatal("reallocarray");
 	filter_config->chain[filter_config->chain_size - 1] = $1;
 }
 ;
@@ -1887,7 +1891,6 @@ filterel
 
 filter:
 FILTER STRING PROC STRING {
-	struct filter_proc *fp;
 
 	if (dict_get(conf->sc_filters_dict, $2)) {
 		yyerror("filter already exists with that name: %s", $2);
@@ -1895,7 +1898,7 @@ FILTER STRING PROC STRING {
 		free($4);
 		YYERROR;
 	}
-	if ((fp = dict_get(conf->sc_filter_processes_dict, $4)) == NULL) {
+	if (dict_get(conf->sc_filter_processes_dict, $4) == NULL) {
 		yyerror("no processor exist with that name: %s", $4);
 		free($4);
 		YYERROR;
@@ -2317,13 +2320,26 @@ opt_if_listen : INET4 {
 			listen_opts.options |= LO_SSL;
 			listen_opts.ssl = F_STARTTLS|F_STARTTLS_REQUIRE|F_TLS_VERIFY;
 		}
-		| PKI STRING			{
-			if (listen_opts.options & LO_PKI) {
-				yyerror("pki already specified");
+		| CIPHERS STRING {
+			if (listen_opts.tls_ciphers) {
+				yyerror("ciphers already specified");
 				YYERROR;
 			}
-			listen_opts.options |= LO_PKI;
-			listen_opts.pki = $2;
+			listen_opts.tls_ciphers = $2;
+		}
+		| PROTOCOLS STRING {
+			if (listen_opts.tls_protocols) {
+				yyerror("protocols already specified");
+				YYERROR;
+			}
+			listen_opts.tls_protocols = $2;
+		}
+		| PKI STRING			{
+			if (listen_opts.pkicount == PKI_MAX) {
+				yyerror("too many pki specified");
+				YYERROR;
+			}
+			listen_opts.pki[listen_opts.pkicount++] = $2;
 		}
 		| CA STRING			{
 			if (listen_opts.options & LO_CA) {
@@ -2501,7 +2517,11 @@ listen		: LISTEN {
 			memset(&listen_opts, 0, sizeof listen_opts);
 			listen_opts.family = AF_UNSPEC;
 			listen_opts.flags |= F_EXT_DSN;
-		} ON listener_type
+		} ON listener_type {
+			free(listen_opts.tls_protocols);
+			free(listen_opts.tls_ciphers);
+			memset(&listen_opts, 0, sizeof listen_opts);
+		}
 		;
 
 table		: TABLE STRING STRING	{
@@ -2683,6 +2703,7 @@ lookup(char *s)
 		{ "port",		PORT },
 		{ "proc",		PROC },
 		{ "proc-exec",		PROC_EXEC },
+		{ "protocols",		PROTOCOLS },
 		{ "proxy-v2",		PROXY_V2 },
 		{ "queue",		QUEUE },
 		{ "quit",		QUIT },
@@ -2810,7 +2831,7 @@ lungetc(int c)
 	if (file->ungetpos >= file->ungetsize) {
 		void *p = reallocarray(file->ungetbuf, file->ungetsize, 2);
 		if (p == NULL)
-			err(1, "%s", __func__);
+			fatal("%s", __func__);
 		file->ungetbuf = p;
 		file->ungetsize *= 2;
 	}
@@ -2920,7 +2941,7 @@ top:
 		}
 		yylval.v.string = strdup(buf);
 		if (yylval.v.string == NULL)
-			err(1, "%s", __func__);
+			fatal("%s", __func__);
 		return (STRING);
 	}
 
@@ -2985,7 +3006,7 @@ nodigits:
 		*p = '\0';
 		if ((token = lookup(buf)) == STRING)
 			if ((yylval.v.string = strdup(buf)) == NULL)
-				err(1, "%s", __func__);
+				fatal("%s", __func__);
 		return (token);
 	}
 	if (c == '\n') {
@@ -3179,7 +3200,7 @@ cmdline_symset(char *s)
 		return (-1);
 	sym = strndup(s, val - s);
 	if (sym == NULL)
-		errx(1, "%s: strndup", __func__);
+		fatalx("%s: strndup", __func__);
 	ret = symset(sym, val + 1, 1);
 	free(sym);
 
@@ -3218,13 +3239,15 @@ create_if_listener(struct listen_opts *lo)
 	uint16_t	flags;
 
 	if (lo->port != 0 && lo->ssl == F_SSL)
-		errx(1, "invalid listen option: tls/smtps on same port");
+		fatalx("invalid listen option: tls/smtps on same port");
 
 	if (lo->auth != 0 && !lo->ssl)
-		errx(1, "invalid listen option: auth requires tls/smtps");
+		fatalx("invalid listen option: auth requires tls/smtps");
 
-	if (lo->pki && !lo->ssl)
-		errx(1, "invalid listen option: pki requires tls/smtps");
+	if (lo->pkicount && !lo->ssl)
+		fatalx("invalid listen option: pki requires tls/smtps");
+	if (lo->pkicount == 0 && lo->ssl)
+		fatalx("invalid listen option: pki required for tls/smtps");
 
 	flags = lo->flags;
 
@@ -3255,12 +3278,14 @@ create_if_listener(struct listen_opts *lo)
 	if (host_dns(lo))
 		return;
 
-	errx(1, "invalid virtual ip or interface: %s", lo->ifx);
+	fatalx("invalid virtual ip or interface: %s", lo->ifx);
 }
 
 static void
 config_listener(struct listener *h,  struct listen_opts *lo)
 {
+	int i;
+
 	h->fd = -1;
 	h->port = lo->port;
 	h->flags = lo->flags;
@@ -3275,19 +3300,31 @@ config_listener(struct listener *h,  struct listen_opts *lo)
 		    sizeof(h->filter_name));
 	}
 
-	h->pki_name[0] = '\0';
-
 	if (lo->authtable != NULL)
 		(void)strlcpy(h->authtable, lo->authtable->t_name, sizeof(h->authtable));
-	if (lo->pki != NULL) {
-		if (!lowercase(h->pki_name, lo->pki, sizeof(h->pki_name))) {
-			log_warnx("pki name too long: %s", lo->pki);
+
+	h->pkicount = lo->pkicount;
+	if (h->pkicount) {
+		h->pki = calloc(h->pkicount, sizeof(*h->pki));
+		if (h->pki == NULL)
+			fatal("calloc");
+	}
+	for (i = 0; i < lo->pkicount; i++) {
+		h->pki[i] = dict_get(conf->sc_pki_dict, lo->pki[i]);
+		if (h->pki[i] == NULL) {
+			log_warnx("pki name not found: %s", lo->pki[i]);
 			fatalx(NULL);
 		}
-		if (dict_get(conf->sc_pki_dict, h->pki_name) == NULL) {
-			log_warnx("pki name not found: %s", lo->pki);
-			fatalx(NULL);
-		}
+	}
+
+	if (lo->tls_ciphers != NULL &&
+	    (h->tls_ciphers = strdup(lo->tls_ciphers)) == NULL) {
+		fatal("strdup");
+	}
+
+	if (lo->tls_protocols != NULL &&
+	    (h->tls_protocols = strdup(lo->tls_protocols)) == NULL) {
+		fatal("strdup");
 	}
 
 	if (lo->ca != NULL) {
@@ -3472,6 +3509,17 @@ interface(struct listen_opts *lo)
 			*sin6 = *(struct sockaddr_in6 *)p->ifa_addr;
 			sin6->sin6_len = sizeof(struct sockaddr_in6);
 			sin6->sin6_port = lo->port;
+#ifdef __KAME__
+			if ((IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) ||
+			    IN6_IS_ADDR_MC_LINKLOCAL(&sin6->sin6_addr) ||
+			    IN6_IS_ADDR_MC_INTFACELOCAL(&sin6->sin6_addr)) &&
+			    sin6->sin6_scope_id == 0) {
+				sin6->sin6_scope_id = ntohs(
+				    *(u_int16_t *)&sin6->sin6_addr.s6_addr[2]);
+				sin6->sin6_addr.s6_addr[2] = 0;
+				sin6->sin6_addr.s6_addr[3] = 0;
+			}
+#endif
 			if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr))
 				h->local = 1;
 			break;
@@ -3546,23 +3594,23 @@ is_if_in_group(const char *ifname, const char *groupname)
 	int			 ret = 0;
 
 	if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == -1)
-		err(1, "socket");
+		fatal("socket");
 
         memset(&ifgr, 0, sizeof(ifgr));
         if (strlcpy(ifgr.ifgr_name, ifname, IFNAMSIZ) >= IFNAMSIZ)
-		errx(1, "interface name too large");
+		fatalx("interface name too large");
 
         if (ioctl(s, SIOCGIFGROUP, (caddr_t)&ifgr) == -1) {
                 if (errno == EINVAL || errno == ENOTTY)
 			goto end;
-		err(1, "SIOCGIFGROUP");
+		fatal("SIOCGIFGROUP");
         }
 
         len = ifgr.ifgr_len;
         ifgr.ifgr_groups = xcalloc(len/sizeof(struct ifg_req),
 		sizeof(struct ifg_req));
         if (ioctl(s, SIOCGIFGROUP, (caddr_t)&ifgr) == -1)
-                err(1, "SIOCGIFGROUP");
+                fatal("SIOCGIFGROUP");
 
         ifg = ifgr.ifgr_groups;
         for (; ifg && len >= sizeof(struct ifg_req); ifg++) {

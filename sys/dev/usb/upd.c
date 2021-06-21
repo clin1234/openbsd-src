@@ -1,4 +1,4 @@
-/*	$OpenBSD: upd.c,v 1.27 2020/02/28 12:13:55 mpi Exp $ */
+/*	$OpenBSD: upd.c,v 1.29 2021/03/08 14:35:57 jcs Exp $ */
 
 /*
  * Copyright (c) 2015 David Higgs <higgsd@gmail.com>
@@ -17,7 +17,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/* Driver for USB Power Devices sensors */
+/*
+ * Driver for USB Power Devices sensors
+ * https://usb.org/sites/default/files/pdcv10.pdf
+ */
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -152,7 +155,7 @@ upd_match(struct device *parent, void *match, void *aux)
 	int			  ret = UMATCH_NONE;
 	int			  i;
 
-	if (uha->reportid != UHIDEV_CLAIM_ALLREPORTID)
+	if (uha->reportid != UHIDEV_CLAIM_MULTIPLE_REPORTID)
 		return (ret);
 
 	DPRINTF(("upd: vendor=0x%04x, product=0x%04x\n", uha->uaa->vendor,

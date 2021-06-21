@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_lib.c,v 1.237 2020/10/14 16:57:33 jsing Exp $ */
+/* $OpenBSD: ssl_lib.c,v 1.261 2021/06/19 16:52:47 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -146,13 +146,12 @@
 
 #include <stdio.h>
 
-#include "ssl_locl.h"
-
 #include <openssl/bn.h>
 #include <openssl/dh.h>
 #include <openssl/lhash.h>
 #include <openssl/objects.h>
 #include <openssl/ocsp.h>
+#include <openssl/opensslconf.h>
 #include <openssl/x509v3.h>
 
 #ifndef OPENSSL_NO_ENGINE
@@ -160,6 +159,8 @@
 #endif
 
 #include "bytestring.h"
+#include "dtls_locl.h"
+#include "ssl_locl.h"
 #include "ssl_sigalgs.h"
 
 const char *SSL_version_str = OPENSSL_VERSION_TEXT;
@@ -185,8 +186,6 @@ SSL_clear(SSL *s)
 		SSLerror(s, ERR_R_INTERNAL_ERROR);
 		return (0);
 	}
-
-	s->internal->type = 0;
 
 	s->version = s->method->internal->version;
 	s->client_version = s->version;
@@ -254,8 +253,13 @@ SSL_new(SSL_CTX *ctx)
 	if ((s->internal = calloc(1, sizeof(*s->internal))) == NULL)
 		goto err;
 
-	s->internal->min_version = ctx->internal->min_version;
-	s->internal->max_version = ctx->internal->max_version;
+	if ((s->internal->rl = tls12_record_layer_new()) == NULL)
+		goto err;
+
+	s->internal->min_tls_version = ctx->internal->min_tls_version;
+	s->internal->max_tls_version = ctx->internal->max_tls_version;
+	s->internal->min_proto_version = ctx->internal->min_proto_version;
+	s->internal->max_proto_version = ctx->internal->max_proto_version;
 
 	s->internal->options = ctx->internal->options;
 	s->internal->mode = ctx->internal->mode;
@@ -341,11 +345,8 @@ SSL_new(SSL_CTX *ctx)
 	if (!s->method->internal->ssl_new(s))
 		goto err;
 
-	if ((s->internal->rl = tls12_record_layer_new()) == NULL)
-		goto err;
-
 	s->references = 1;
-	s->server = 0;
+	s->server = ctx->method->internal->server;
 
 	SSL_clear(s);
 
@@ -460,13 +461,19 @@ SSL_set1_host(SSL *s, const char *hostname)
 {
 	struct in_addr ina;
 	struct in6_addr in6a;
-	
+
 	if (hostname != NULL && *hostname != '\0' &&
 	    (inet_pton(AF_INET, hostname, &ina) == 1 ||
 	    inet_pton(AF_INET6, hostname, &in6a) == 1))
 		return X509_VERIFY_PARAM_set1_ip_asc(s->param, hostname);
 	else
 		return X509_VERIFY_PARAM_set1_host(s->param, hostname, 0);
+}
+
+void
+SSL_set_hostflags(SSL *s, unsigned int flags)
+{
+	X509_VERIFY_PARAM_set_hostflags(s->param, flags);
 }
 
 const char *
@@ -660,7 +667,7 @@ SSL_set_fd(SSL *s, int fd)
 	BIO_set_fd(bio, fd, BIO_NOCLOSE);
 	SSL_set_bio(s, bio, bio);
 	ret = 1;
-err:
+ err:
 	return (ret);
 }
 
@@ -683,7 +690,7 @@ SSL_set_wfd(SSL *s, int fd)
 	} else
 		SSL_set_bio(s, SSL_get_rbio(s), SSL_get_rbio(s));
 	ret = 1;
-err:
+ err:
 	return (ret);
 }
 
@@ -706,7 +713,7 @@ SSL_set_rfd(SSL *s, int fd)
 	} else
 		SSL_set_bio(s, SSL_get_wbio(s), SSL_get_wbio(s));
 	ret = 1;
-err:
+ err:
 	return (ret);
 }
 
@@ -717,10 +724,10 @@ SSL_get_finished(const SSL *s, void *buf, size_t count)
 {
 	size_t	ret;
 
-	ret = S3I(s)->tmp.finish_md_len;
+	ret = S3I(s)->hs.finished_len;
 	if (count > ret)
 		count = ret;
-	memcpy(buf, S3I(s)->tmp.finish_md, count);
+	memcpy(buf, S3I(s)->hs.finished, count);
 	return (ret);
 }
 
@@ -730,10 +737,10 @@ SSL_get_peer_finished(const SSL *s, void *buf, size_t count)
 {
 	size_t	ret;
 
-	ret = S3I(s)->tmp.peer_finish_md_len;
+	ret = S3I(s)->hs.peer_finished_len;
 	if (count > ret)
 		count = ret;
-	memcpy(buf, S3I(s)->tmp.peer_finish_md, count);
+	memcpy(buf, S3I(s)->hs.peer_finished, count);
 	return (ret);
 }
 
@@ -1328,7 +1335,7 @@ SSL_get1_supported_ciphers(SSL *s)
 
 	if (s == NULL)
 		return NULL;
-	if (!ssl_supported_version_range(s, &min_vers, &max_vers))
+	if (!ssl_supported_tls_version_range(s, &min_vers, &max_vers))
 		return NULL;
 	if ((ciphers = SSL_get_ciphers(s)) == NULL)
 		return NULL;
@@ -1338,7 +1345,7 @@ SSL_get1_supported_ciphers(SSL *s)
 	for (i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
 		if ((cipher = sk_SSL_CIPHER_value(ciphers, i)) == NULL)
 			goto err;
-		if (!ssl_cipher_allowed_in_version_range(cipher, min_vers,
+		if (!ssl_cipher_allowed_in_tls_version_range(cipher, min_vers,
 		    max_vers))
 			continue;
 		if (!sk_SSL_CIPHER_push(supported_ciphers, cipher))
@@ -1362,8 +1369,6 @@ ssl_has_ecc_ciphers(SSL *s)
 	SSL_CIPHER *cipher;
 	int i;
 
-	if (s->version == DTLS1_VERSION)
-		return 0;
 	if ((ciphers = SSL_get_ciphers(s)) == NULL)
 		return 0;
 
@@ -1484,22 +1489,30 @@ SSL_set_ciphersuites(SSL *s, const char *str)
 char *
 SSL_get_shared_ciphers(const SSL *s, char *buf, int len)
 {
-	STACK_OF(SSL_CIPHER) *ciphers;
+	STACK_OF(SSL_CIPHER) *client_ciphers, *server_ciphers;
 	const SSL_CIPHER *cipher;
 	size_t curlen = 0;
 	char *end;
 	int i;
 
-	if (s->session == NULL || s->session->ciphers == NULL || len < 2)
-		return (NULL);
+	if (!s->server || s->session == NULL || len < 2)
+		return NULL;
 
-	ciphers = s->session->ciphers;
-	if (sk_SSL_CIPHER_num(ciphers) == 0)
-		return (NULL);
+	if ((client_ciphers = s->session->ciphers) == NULL)
+		return NULL;
+	if ((server_ciphers = SSL_get_ciphers(s)) == NULL)
+		return NULL;
+	if (sk_SSL_CIPHER_num(client_ciphers) == 0 ||
+	    sk_SSL_CIPHER_num(server_ciphers) == 0)
+		return NULL;
 
 	buf[0] = '\0';
-	for (i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
-		cipher = sk_SSL_CIPHER_value(ciphers, i);
+	for (i = 0; i < sk_SSL_CIPHER_num(client_ciphers); i++) {
+		cipher = sk_SSL_CIPHER_value(client_ciphers, i);
+
+		if (sk_SSL_CIPHER_find(server_ciphers, cipher) < 0)
+			continue;
+
 		end = buf + curlen;
 		if (strlcat(buf, cipher->name, len) >= len ||
 		    (curlen = strlcat(buf, ":", len)) >= len) {
@@ -1511,7 +1524,7 @@ SSL_get_shared_ciphers(const SSL *s, char *buf, int len)
 	/* remove trailing colon */
 	if ((end = strrchr(buf, ':')) != NULL)
 		*end = '\0';
-	return (buf);
+	return buf;
 }
 
 /*
@@ -1586,7 +1599,7 @@ SSL_select_next_proto(unsigned char **out, unsigned char *outlen,
 	result = client;
 	status = OPENSSL_NPN_NO_OVERLAP;
 
-found:
+ found:
 	*out = (unsigned char *) result + 1;
 	*outlen = result[0];
 	return (status);
@@ -1704,9 +1717,6 @@ void
 SSL_get0_alpn_selected(const SSL *ssl, const unsigned char **data,
     unsigned int *len)
 {
-	*data = NULL;
-	*len = 0;
-
 	*data = ssl->s3->internal->alpn_selected;
 	*len = ssl->s3->internal->alpn_selected_len;
 }
@@ -1716,8 +1726,17 @@ SSL_export_keying_material(SSL *s, unsigned char *out, size_t olen,
     const char *label, size_t llen, const unsigned char *p, size_t plen,
     int use_context)
 {
-	return (tls1_export_keying_material(s, out, olen,
-	    label, llen, p, plen, use_context));
+	if (s->internal->tls13 != NULL && s->version == TLS1_3_VERSION) {
+		if (!use_context) {
+			p = NULL;
+			plen = 0;
+		}
+		return tls13_exporter(s->internal->tls13, label, llen, p, plen,
+		    out, olen);
+	}
+
+	return (tls1_export_keying_material(s, out, olen, label, llen, p, plen,
+	    use_context));
 }
 
 static unsigned long
@@ -1806,8 +1825,10 @@ SSL_CTX_new(const SSL_METHOD *meth)
 	}
 
 	ret->method = meth;
-	ret->internal->min_version = meth->internal->min_version;
-	ret->internal->max_version = meth->internal->max_version;
+	ret->internal->min_tls_version = meth->internal->min_tls_version;
+	ret->internal->max_tls_version = meth->internal->max_tls_version;
+	ret->internal->min_proto_version = 0;
+	ret->internal->max_proto_version = 0;
 	ret->internal->mode = SSL_MODE_AUTO_RETRY;
 
 	ret->cert_store = NULL;
@@ -1917,9 +1938,9 @@ SSL_CTX_new(const SSL_METHOD *meth)
 	ret->internal->options |= SSL_OP_LEGACY_SERVER_CONNECT;
 
 	return (ret);
-err:
+ err:
 	SSLerrorx(ERR_R_MALLOC_FAILURE);
-err2:
+ err2:
 	SSL_CTX_free(ret);
 	return (NULL);
 }
@@ -2086,8 +2107,8 @@ ssl_using_ecc_cipher(SSL *s)
 {
 	unsigned long alg_a, alg_k;
 
-	alg_a = S3I(s)->hs.new_cipher->algorithm_auth;
-	alg_k = S3I(s)->hs.new_cipher->algorithm_mkey;
+	alg_a = S3I(s)->hs.cipher->algorithm_auth;
+	alg_k = S3I(s)->hs.cipher->algorithm_mkey;
 
 	return SSI(s)->tlsext_ecpointformatlist != NULL &&
 	    SSI(s)->tlsext_ecpointformatlist_length > 0 &&
@@ -2097,7 +2118,7 @@ ssl_using_ecc_cipher(SSL *s)
 int
 ssl_check_srvr_ecc_cert_and_alg(X509 *x, SSL *s)
 {
-	const SSL_CIPHER	*cs = S3I(s)->hs.new_cipher;
+	const SSL_CIPHER	*cs = S3I(s)->hs.cipher;
 	unsigned long		 alg_a;
 
 	alg_a = cs->algorithm_auth;
@@ -2125,9 +2146,9 @@ ssl_get_server_send_pkey(const SSL *s)
 	int		 i;
 
 	c = s->cert;
-	ssl_set_cert_masks(c, S3I(s)->hs.new_cipher);
+	ssl_set_cert_masks(c, S3I(s)->hs.cipher);
 
-	alg_a = S3I(s)->hs.new_cipher->algorithm_auth;
+	alg_a = S3I(s)->hs.cipher->algorithm_auth;
 
 	if (alg_a & SSL_aECDSA) {
 		i = SSL_PKEY_ECC;
@@ -2186,9 +2207,9 @@ ssl_get_auto_dh(SSL *s)
 
 	if (s->cert->dh_tmp_auto == 2) {
 		keylen = 1024;
-	} else if (S3I(s)->hs.new_cipher->algorithm_auth & SSL_aNULL) {
+	} else if (S3I(s)->hs.cipher->algorithm_auth & SSL_aNULL) {
 		keylen = 1024;
-		if (S3I(s)->hs.new_cipher->strength_bits == 256)
+		if (S3I(s)->hs.cipher->strength_bits == 256)
 			keylen = 3072;
 	} else {
 		if ((cpk = ssl_get_server_send_pkey(s)) == NULL)
@@ -2362,7 +2383,7 @@ SSL_get_error(const SSL *s, int i)
 	if (i == 0) {
 		if ((s->internal->shutdown & SSL_RECEIVED_SHUTDOWN) &&
 		    (S3I(s)->warn_alert == SSL_AD_CLOSE_NOTIFY))
-		return (SSL_ERROR_ZERO_RETURN);
+			return (SSL_ERROR_ZERO_RETURN);
 	}
 	return (SSL_ERROR_SYSCALL);
 }
@@ -2434,8 +2455,6 @@ const char *
 ssl_version_string(int ver)
 {
 	switch (ver) {
-	case DTLS1_VERSION:
-		return (SSL_TXT_DTLS1);
 	case TLS1_VERSION:
 		return (SSL_TXT_TLSV1);
 	case TLS1_1_VERSION:
@@ -2444,6 +2463,10 @@ ssl_version_string(int ver)
 		return (SSL_TXT_TLSV1_2);
 	case TLS1_3_VERSION:
 		return (SSL_TXT_TLSV1_3);
+	case DTLS1_VERSION:
+		return (SSL_TXT_DTLS1);
+	case DTLS1_2_VERSION:
+		return (SSL_TXT_DTLS1_2);
 	default:
 		return ("unknown");
 	}
@@ -2467,7 +2490,6 @@ SSL_dup(SSL *s)
 		goto err;
 
 	ret->version = s->version;
-	ret->internal->type = s->internal->type;
 	ret->method = s->method;
 
 	if (s->session != NULL) {
@@ -2589,39 +2611,15 @@ ssl_clear_cipher_state(SSL *s)
 void
 ssl_clear_cipher_read_state(SSL *s)
 {
-	EVP_CIPHER_CTX_free(s->enc_read_ctx);
-	s->enc_read_ctx = NULL;
-	EVP_MD_CTX_free(s->read_hash);
-	s->read_hash = NULL;
-
 	tls12_record_layer_clear_read_state(s->internal->rl);
-	tls12_record_layer_set_read_seq_num(s->internal->rl,
-	    S3I(s)->read_sequence);
-
-	if (s->internal->aead_read_ctx != NULL) {
-		EVP_AEAD_CTX_cleanup(&s->internal->aead_read_ctx->ctx);
-		free(s->internal->aead_read_ctx);
-		s->internal->aead_read_ctx = NULL;
-	}
+	tls12_record_layer_read_cipher_hash(s->internal->rl,
+	    &s->enc_read_ctx, &s->read_hash);
 }
 
 void
 ssl_clear_cipher_write_state(SSL *s)
 {
-	EVP_CIPHER_CTX_free(s->internal->enc_write_ctx);
-	s->internal->enc_write_ctx = NULL;
-	EVP_MD_CTX_free(s->internal->write_hash);
-	s->internal->write_hash = NULL;
-
 	tls12_record_layer_clear_write_state(s->internal->rl);
-	tls12_record_layer_set_write_seq_num(s->internal->rl,
-	    S3I(s)->write_sequence);
-
-	if (s->internal->aead_write_ctx != NULL) {
-		EVP_AEAD_CTX_cleanup(&s->internal->aead_write_ctx->ctx);
-		free(s->internal->aead_write_ctx);
-		s->internal->aead_write_ctx = NULL;
-	}
 }
 
 /* Fix this function so that it takes an optional type parameter */
@@ -3009,52 +3007,62 @@ SSL_cache_hit(SSL *s)
 int
 SSL_CTX_get_min_proto_version(SSL_CTX *ctx)
 {
-	return ctx->internal->min_version;
+	return ctx->internal->min_proto_version;
 }
 
 int
 SSL_CTX_set_min_proto_version(SSL_CTX *ctx, uint16_t version)
 {
 	return ssl_version_set_min(ctx->method, version,
-	    ctx->internal->max_version, &ctx->internal->min_version);
+	    ctx->internal->max_tls_version, &ctx->internal->min_tls_version,
+	    &ctx->internal->min_proto_version);
 }
 
 int
 SSL_CTX_get_max_proto_version(SSL_CTX *ctx)
 {
-	return ctx->internal->max_version;
+	return ctx->internal->max_proto_version;
 }
 
 int
 SSL_CTX_set_max_proto_version(SSL_CTX *ctx, uint16_t version)
 {
 	return ssl_version_set_max(ctx->method, version,
-	    ctx->internal->min_version, &ctx->internal->max_version);
+	    ctx->internal->min_tls_version, &ctx->internal->max_tls_version,
+	    &ctx->internal->max_proto_version);
 }
 
 int
 SSL_get_min_proto_version(SSL *ssl)
 {
-	return ssl->internal->min_version;
+	return ssl->internal->min_proto_version;
 }
 
 int
 SSL_set_min_proto_version(SSL *ssl, uint16_t version)
 {
 	return ssl_version_set_min(ssl->method, version,
-	    ssl->internal->max_version, &ssl->internal->min_version);
+	    ssl->internal->max_tls_version, &ssl->internal->min_tls_version,
+	    &ssl->internal->min_proto_version);
 }
 int
 SSL_get_max_proto_version(SSL *ssl)
 {
-	return ssl->internal->max_version;
+	return ssl->internal->max_proto_version;
 }
 
 int
 SSL_set_max_proto_version(SSL *ssl, uint16_t version)
 {
 	return ssl_version_set_max(ssl->method, version,
-	    ssl->internal->min_version, &ssl->internal->max_version);
+	    ssl->internal->min_tls_version, &ssl->internal->max_tls_version,
+	    &ssl->internal->max_proto_version);
+}
+
+const SSL_METHOD *
+SSL_CTX_get_ssl_method(const SSL_CTX *ctx)
+{
+	return ctx->method;
 }
 
 static int

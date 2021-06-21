@@ -1,4 +1,4 @@
-/*	$OpenBSD: vm.c,v 1.58 2020/06/28 16:52:45 pd Exp $	*/
+/*	$OpenBSD: vm.c,v 1.63 2021/06/16 16:55:02 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -21,6 +21,7 @@
 #include <sys/queue.h>
 #include <sys/wait.h>
 #include <sys/uio.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/mman.h>
@@ -51,18 +52,17 @@
 #include <unistd.h>
 #include <util.h>
 
-#include "vmd.h"
-#include "vmm.h"
-#include "loadfile.h"
-#include "pci.h"
-#include "virtio.h"
-#include "proc.h"
+#include "atomicio.h"
+#include "fw_cfg.h"
 #include "i8253.h"
 #include "i8259.h"
-#include "ns8250.h"
+#include "loadfile.h"
 #include "mc146818.h"
-#include "fw_cfg.h"
-#include "atomicio.h"
+#include "ns8250.h"
+#include "pci.h"
+#include "virtio.h"
+#include "vmd.h"
+#include "vmm.h"
 
 io_fn_t ioports_map[MAX_PORTS];
 
@@ -84,7 +84,7 @@ void vcpu_exit_inout(struct vm_run_params *);
 int vcpu_exit_eptviolation(struct vm_run_params *);
 uint8_t vcpu_exit_pci(struct vm_run_params *);
 int vcpu_pic_intr(uint32_t, uint32_t, uint8_t);
-int loadfile_bios(FILE *, struct vcpu_reg_state *);
+int loadfile_bios(gzFile, off_t, struct vcpu_reg_state *);
 int send_vm(int, struct vm_create_params *);
 int dump_send_header(int);
 int dump_vmr(int , struct vm_mem_range *);
@@ -213,6 +213,7 @@ static const struct vcpu_reg_state vcpu_init_flat16 = {
  *
  * Parameters:
  *  fp: file of a kernel file to load
+ *  size: uncompressed size of the image
  *  (out) vrs: register state to set on init for this kernel
  *
  * Return values:
@@ -220,16 +221,15 @@ static const struct vcpu_reg_state vcpu_init_flat16 = {
  *  various error codes returned from read(2) or loadelf functions
  */
 int
-loadfile_bios(FILE *fp, struct vcpu_reg_state *vrs)
+loadfile_bios(gzFile fp, off_t size, struct vcpu_reg_state *vrs)
 {
-	off_t	 size, off;
+	off_t	 off;
 
 	/* Set up a "flat 16 bit" register state for BIOS */
 	memcpy(vrs, &vcpu_init_flat16, sizeof(*vrs));
 
-	/* Get the size of the BIOS image and seek to the beginning */
-	if (fseeko(fp, 0, SEEK_END) == -1 || (size = ftello(fp)) == -1 ||
-	    fseeko(fp, 0, SEEK_SET) == -1)
+	/* Seek to the beginning of the BIOS image */
+	if (gzseek(fp, 0, SEEK_SET) == -1)
 		return (-1);
 
 	/* The BIOS image must end at 1M */
@@ -277,10 +277,10 @@ start_vm(struct vmd_vm *vm, int fd)
 	struct vcpu_reg_state	 vrs;
 	int			 nicfds[VMM_MAX_NICS_PER_VM];
 	int			 ret;
-	FILE			*fp;
-	struct vmboot_params	 vmboot;
+	gzFile			 fp;
 	size_t			 i;
 	struct vm_rwregs_params  vrp;
+	struct stat		 sb;
 
 	/* Child */
 	setproctitle("%s", vcp->vcp_name);
@@ -332,26 +332,24 @@ start_vm(struct vmd_vm *vm, int fd)
 		memcpy(&vrs, &vcpu_init_flat64, sizeof(vrs));
 
 		/* Find and open kernel image */
-		if ((fp = vmboot_open(vm->vm_kernel,
-		    vm->vm_disks[0], vmc->vmc_diskbases[0],
-		    vmc->vmc_disktypes[0], &vmboot)) == NULL)
+		if ((fp = gzdopen(vm->vm_kernel, "r")) == NULL)
 			fatalx("failed to open kernel - exiting");
 
 		/* Load kernel image */
-		ret = loadfile_elf(fp, vcp, &vrs,
-		    vmboot.vbp_bootdev, vmboot.vbp_howto, vmc->vmc_bootdevice);
+		ret = loadfile_elf(fp, vcp, &vrs);
 
 		/*
 		 * Try BIOS as a fallback (only if it was provided as an image
-		 * with vm->vm_kernel and not loaded from the disk)
+		 * with vm->vm_kernel and the file is not compressed)
 		 */
-		if (ret && errno == ENOEXEC && vm->vm_kernel != -1)
-			ret = loadfile_bios(fp, &vrs);
+		if (ret && errno == ENOEXEC && vm->vm_kernel != -1 &&
+		    gzdirect(fp) && (ret = fstat(vm->vm_kernel, &sb)) == 0)
+			ret = loadfile_bios(fp, sb.st_size, &vrs);
 
 		if (ret)
 			fatal("failed to load kernel or BIOS - exiting");
 
-		vmboot_close(fp, &vmboot);
+		gzclose(fp);
 	}
 
 	if (vm->vm_kernel != -1)
@@ -397,6 +395,7 @@ vm_dispatch_vmm(int fd, short event, void *arg)
 {
 	struct vmd_vm		*vm = arg;
 	struct vmop_result	 vmr;
+	struct vmop_addr_result	 var;
 	struct imsgev		*iev = &vm->vm_iev;
 	struct imsgbuf		*ibuf = &iev->ibuf;
 	struct imsg		 imsg;
@@ -474,6 +473,16 @@ vm_dispatch_vmm(int fd, short event, void *arg)
 				_exit(0);
 			}
 			break;
+		case IMSG_VMDOP_PRIV_GET_ADDR_RESPONSE:
+			IMSG_SIZE_CHECK(&imsg, &var);
+			memcpy(&var, imsg.data, sizeof(var));
+
+			log_debug("%s: received tap addr %s for nic %d",
+			    vm->vm_params.vmc_params.vcp_name,
+			    ether_ntoa((void *)var.var_addr), var.var_nic_idx);
+
+			vionet_set_hostmac(vm, var.var_nic_idx, var.var_addr);
+			break;
 		default:
 			fatalx("%s: got invalid imsg %d from %s",
 			    __func__, imsg.hdr.type,
@@ -485,7 +494,7 @@ vm_dispatch_vmm(int fd, short event, void *arg)
 }
 
 /*
- * vm_ctl
+ * vm_shutdown
  *
  * Tell the vmm parent process to shutdown or reboot the VM and exit.
  */
@@ -1463,7 +1472,10 @@ vcpu_run_loop(void *arg)
 
 		/* Still more pending? */
 		if (i8259_is_pending()) {
-			/* XXX can probably avoid ioctls here by providing intr in vrp */
+			/*
+			 * XXX can probably avoid ioctls here by providing intr
+			 * in vrp
+			 */
 			if (vcpu_pic_intr(vrp->vrp_vm_id,
 			    vrp->vrp_vcpu_id, 1)) {
 				fatal("can't set INTR");
@@ -1596,7 +1608,6 @@ vcpu_exit_inout(struct vm_run_params *vrp)
  *
  * handle an EPT Violation
  *
- *
  * Parameters:
  *  vrp: vcpu run parameters containing guest state for this exit
  *
@@ -1608,9 +1619,10 @@ int
 vcpu_exit_eptviolation(struct vm_run_params *vrp)
 {
 	struct vm_exit *ve = vrp->vrp_exit;
+
 	/*
 	 * vmd may be exiting to vmd to handle a pending interrupt
-	 * but last exit type may have bee VMX_EXIT_EPT_VIOLATION,
+	 * but last exit type may have been VMX_EXIT_EPT_VIOLATION,
 	 * check the fault_type to ensure we really are processing
 	 * a VMX_EXIT_EPT_VIOLATION.
 	 */

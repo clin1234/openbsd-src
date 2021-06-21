@@ -1,4 +1,4 @@
-/*	$OpenBSD: stubs.c,v 1.11 2018/06/30 15:23:35 deraadt Exp $	*/
+/*	$OpenBSD: stubs.c,v 1.13 2021/05/16 03:39:27 jsg Exp $	*/
 /*	$NetBSD: stubs.c,v 1.14 2003/07/15 00:24:42 lukem Exp $	*/
 
 /*
@@ -44,16 +44,13 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
-#include <sys/proc.h>
 #include <sys/conf.h>
-#include <sys/msgbuf.h>
 #include <sys/exec.h>
 #include <sys/core.h>
 #include <sys/kcore.h>
 #include <uvm/uvm_extern.h>
 #include <machine/bootconfig.h>
 #include <machine/cpu.h>
-#include <machine/intr.h>
 #include <machine/pcb.h>
 #include <arm/kcore.h>
 #include <arm/machdep.h>
@@ -121,7 +118,7 @@ extern char *memhook;		/* XXX */
  */
 
 void
-dumpsys()
+dumpsys(void)
 {
 	const struct bdevsw *bdev;
 	daddr_t blkno;

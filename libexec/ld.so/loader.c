@@ -1,4 +1,4 @@
-/*	$OpenBSD: loader.c,v 1.190 2019/12/17 03:16:07 guenther Exp $ */
+/*	$OpenBSD: loader.c,v 1.192 2021/05/25 17:01:36 kn Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -32,6 +32,7 @@
 #include <sys/mman.h>
 #include <sys/exec.h>
 #include <sys/sysctl.h>
+#include <machine/vmparam.h>
 #include <nlist.h>
 #include <string.h>
 #include <link.h>
@@ -73,6 +74,7 @@ char *_dl_preload __boot_data = NULL;
 char *_dl_tracefmt1 __boot_data = NULL;
 char *_dl_tracefmt2 __boot_data = NULL;
 char *_dl_traceprog __boot_data = NULL;
+void *_dl_exec_hint __boot_data = NULL;
 
 char **environ = NULL;
 char *__progname = NULL;
@@ -461,7 +463,8 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 	unsigned int loop;
 	int failed;
 	struct dep_node *n;
-	Elf_Addr minva, maxva, exe_loff;
+	Elf_Addr minva, maxva, exe_loff, exec_end, cur_exec_end;
+	Elf_Addr relro_addr = 0, relro_size = 0;
 	Elf_Phdr *ptls = NULL;
 	int align;
 
@@ -499,7 +502,7 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 	_dl_loading_object = NULL;
 
 	minva = ELF_NO_ADDR;
-	maxva = exe_loff = 0;
+	maxva = exe_loff = exec_end = 0;
 
 	/*
 	 * Examine the user application and set up object information.
@@ -539,6 +542,10 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 			next_load->start = (char *)TRUNC_PG(phdp->p_vaddr) + exe_loff;
 			next_load->size = (phdp->p_vaddr & align) + phdp->p_filesz;
 			next_load->prot = PFLAGS(phdp->p_flags);
+			cur_exec_end = (Elf_Addr)next_load->start + next_load->size;
+			if ((next_load->prot & PROT_EXEC) != 0 &&
+			    cur_exec_end > exec_end)
+				exec_end = cur_exec_end;
 			break;
 		case PT_TLS:
 			if (phdp->p_filesz > phdp->p_memsz)
@@ -546,8 +553,8 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 			ptls = phdp;
 			break;
 		case PT_GNU_RELRO:
-			exe_obj->relro_addr = phdp->p_vaddr + exe_loff;
-			exe_obj->relro_size = phdp->p_memsz;
+			relro_addr = phdp->p_vaddr + exe_loff;
+			relro_size = phdp->p_memsz;
 			break;
 		}
 		phdp++;
@@ -555,7 +562,15 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 	exe_obj->load_list = load_list;
 	exe_obj->obj_flags |= DF_1_GLOBAL;
 	exe_obj->load_size = maxva - minva;
+	exe_obj->relro_addr = relro_addr;
+	exe_obj->relro_size = relro_size;
 	_dl_set_sod(exe_obj->load_name, &exe_obj->sod);
+
+#ifdef __i386__
+	if (exec_end > I386_MAX_EXE_ADDR)
+		_dl_exec_hint = (void *)ROUND_PG(exec_end-I386_MAX_EXE_ADDR);
+	DL_DEB(("_dl_exec_hint:  0x%lx\n", _dl_exec_hint));
+#endif
 
 	/* TLS bits in the base executable */
 	if (ptls != NULL && ptls->p_memsz)
@@ -626,7 +641,7 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 		debug_map->r_ldbase = dyn_loff;
 		_dl_debug_map = debug_map;
 #ifdef __mips__
-		Elf_Addr relro_addr = exe_obj->relro_addr;
+		relro_addr = exe_obj->relro_addr;
 		if (dynp->d_tag == DT_DEBUG &&
 		    ((Elf_Addr)map_link + sizeof(*map_link) <= relro_addr ||
 		     (Elf_Addr)map_link >= relro_addr + exe_obj->relro_size)) {

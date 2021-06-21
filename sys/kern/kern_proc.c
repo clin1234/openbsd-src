@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_proc.c,v 1.88 2020/09/26 15:15:22 kettenis Exp $	*/
+/*	$OpenBSD: kern_proc.c,v 1.90 2021/02/08 10:51:01 mpi Exp $	*/
 /*	$NetBSD: kern_proc.c,v 1.14 1996/02/09 18:59:41 christos Exp $	*/
 
 /*

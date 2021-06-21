@@ -1,4 +1,4 @@
-/* $OpenBSD: monitor_wrap.c,v 1.121 2020/10/18 11:32:01 djm Exp $ */
+/* $OpenBSD: monitor_wrap.c,v 1.123 2021/04/15 16:24:31 markus Exp $ */
 /*
  * Copyright 2002 Niels Provos <provos@citi.umich.edu>
  * Copyright 2002 Markus Friedl <markus@openbsd.org>
@@ -78,8 +78,7 @@ extern struct sshbuf *loginmsg;
 extern ServerOptions options;
 
 void
-mm_log_handler(const char *file, const char *func, int line,
-    LogLevel level, const char *msg, void *ctx)
+mm_log_handler(LogLevel level, int forced, const char *msg, void *ctx)
 {
 	struct sshbuf *log_msg;
 	struct monitor *mon = (struct monitor *)ctx;
@@ -93,10 +92,8 @@ mm_log_handler(const char *file, const char *func, int line,
 		fatal_f("sshbuf_new failed");
 
 	if ((r = sshbuf_put_u32(log_msg, 0)) != 0 || /* length; filled below */
-	    (r = sshbuf_put_cstring(log_msg, file)) != 0 ||
-	    (r = sshbuf_put_cstring(log_msg, func)) != 0 ||
-	    (r = sshbuf_put_u32(log_msg, (u_int)line)) != 0 ||
 	    (r = sshbuf_put_u32(log_msg, level)) != 0 ||
+	    (r = sshbuf_put_u32(log_msg, forced)) != 0 ||
 	    (r = sshbuf_put_cstring(log_msg, msg)) != 0)
 		fatal_fr(r, "assemble");
 	if ((len = sshbuf_len(log_msg)) < 4 || len > 0xffffffff)
@@ -242,6 +239,15 @@ mm_sshkey_sign(struct ssh *ssh, struct sshkey *key, u_char **sigp, size_t *lenp,
 	return (0);
 }
 
+#define GETPW(b, id) \
+	do { \
+		if ((r = sshbuf_get_string_direct(b, &p, &len)) != 0) \
+			fatal_fr(r, "parse pw %s", #id); \
+		if (len != sizeof(pw->id)) \
+			fatal_fr(r, "bad length for %s", #id); \
+		memcpy(&pw->id, p, len); \
+	} while (0)
+
 struct passwd *
 mm_getpwnamallow(struct ssh *ssh, const char *username)
 {
@@ -273,14 +279,11 @@ mm_getpwnamallow(struct ssh *ssh, const char *username)
 		goto out;
 	}
 
-	/* XXX don't like passing struct passwd like this */
 	pw = xcalloc(sizeof(*pw), 1);
-	if ((r = sshbuf_get_string_direct(m, &p, &len)) != 0)
-		fatal_fr(r, "parse");
-	if (len != sizeof(*pw))
-		fatal_f("struct passwd size mismatch");
-	memcpy(pw, p, sizeof(*pw));
-
+	GETPW(m, pw_uid);
+	GETPW(m, pw_gid);
+	GETPW(m, pw_change);
+	GETPW(m, pw_expire);
 	if ((r = sshbuf_get_cstring(m, &pw->pw_name, NULL)) != 0 ||
 	    (r = sshbuf_get_cstring(m, &pw->pw_passwd, NULL)) != 0 ||
 	    (r = sshbuf_get_cstring(m, &pw->pw_gecos, NULL)) != 0 ||

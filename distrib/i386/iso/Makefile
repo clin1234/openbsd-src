@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.29 2020/08/05 04:23:30 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.32 2021/02/13 18:48:23 semarie Exp $
 
 FS=		install${OSrev}.img
 FSSIZE=		921600
@@ -20,18 +20,17 @@ XBASE=		${RELXDIR}/xbase${OSrev}.tgz ${RELXDIR}/xfont${OSrev}.tgz \
 
 all: ${FS} ${CDROM}
 
-${FS}: ${BASE} ${XBASE} bsd.gz
+${FS}: ${BASE} ${XBASE} bsd.rd
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
 	vnconfig -v ${FS} > vnd
 	fdisk -yi -l ${FSSIZE} -f ${DESTDIR}/usr/mdec/mbr `cat vnd`
 	disklabel -w `cat vnd` ${FSDISKTYPE}
 	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
-	cp ${DESTDIR}/usr/mdec/boot ${MOUNT_POINT}/boot
-	strip -R .comment -R .SUNW_ctf ${MOUNT_POINT}/boot
+	objcopy -S -R .comment ${DESTDIR}/usr/mdec/boot ${MOUNT_POINT}/boot
 	installboot -v -r ${MOUNT_POINT} `cat vnd` \
 	    ${DESTDIR}/usr/mdec/biosboot ${MOUNT_POINT}/boot
-	install -c -m 555 -o root -g wheel bsd.gz ${MOUNT_POINT}/bsd
+	install -c -m 555 -o root -g wheel bsd.rd ${MOUNT_POINT}/bsd
 	ln ${MOUNT_POINT}/bsd ${MOUNT_POINT}/bsd.rd
 	mkdir -p ${MOUNT_POINT}/${OSREV}/${MACHINE}
 	mkdir -p ${MOUNT_POINT}/etc
@@ -72,12 +71,6 @@ ${CDROM}: ${BASE} ${XBASE}
 	    -V "OpenBSD/${MACHINE}    ${OSREV} Install CD" \
 	    -b ${OSREV}/${MACHINE}/cdbr -c ${OSREV}/${MACHINE}/boot.catalog \
 	    ${.OBJDIR}/cd-dir
-
-bsd.gz: bsd.rd
-	cp bsd.rd bsd.strip
-	strip bsd.strip
-	strip -R .comment -R .SUNW_ctf bsd.strip
-	gzip -9cn bsd.strip > bsd.gz
 
 bsd.rd: ${BSDRD}
 	cp ${BSDRD} bsd.rd

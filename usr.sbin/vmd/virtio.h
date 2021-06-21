@@ -1,4 +1,4 @@
-/*	$OpenBSD: virtio.h,v 1.35 2019/12/11 06:45:16 pd Exp $	*/
+/*	$OpenBSD: virtio.h,v 1.40 2021/06/21 02:38:18 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -16,7 +16,17 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/types.h>
+
 #include <dev/pv/virtioreg.h>
+#include <net/if_tun.h>
+
+#include <event.h>
+
+#include "vmd.h"
+
+#ifndef _VIRTIO_H_
+#define _VIRTIO_H_
 
 #define VIRTQUEUE_ALIGN(n)	(((n)+(VIRTIO_PAGE_SIZE-1))&    \
 				    ~(VIRTIO_PAGE_SIZE-1))
@@ -36,9 +46,14 @@
 #define VIONET_QUEUE_SIZE	256
 #define VIONET_QUEUE_MASK	(VIONET_QUEUE_SIZE - 1)
 
+/* Virtio network device is backed by tap(4), so inherit limits */
+#define VIONET_HARD_MTU		TUNMRU
+#define VIONET_MIN_TXLEN	ETHER_HDR_LEN
+#define VIONET_MAX_TXLEN	VIONET_HARD_MTU + ETHER_HDR_LEN
+
 /* VMM Control Interface shutdown timeout (in seconds) */
 #define VMMCI_TIMEOUT		3
-#define VMMCI_SHUTDOWN_TIMEOUT	30
+#define VMMCI_SHUTDOWN_TIMEOUT	120
 
 /* All the devices we support have either 1, 2 or 3 queues */
 /* viornd - 1 queue
@@ -208,6 +223,7 @@ struct vionet_dev {
 	uint32_t vm_vmid;
 	int irq;
 	uint8_t mac[6];
+	uint8_t hostmac[6];
 
 	int idx;
 	int lockedmac;
@@ -297,7 +313,8 @@ int vionet_notifyq(struct vionet_dev *);
 void vionet_notify_rx(struct vionet_dev *);
 int vionet_notify_tx(struct vionet_dev *);
 void vionet_process_rx(uint32_t);
-int vionet_enq_rx(struct vionet_dev *, char *, ssize_t, int *);
+int vionet_enq_rx(struct vionet_dev *, char *, size_t, int *);
+void vionet_set_hostmac(struct vmd_vm *, unsigned int, uint8_t *);
 
 int vmmci_io(int, uint16_t, uint32_t *, uint8_t *, void *, uint8_t);
 int vmmci_dump(int);
@@ -320,3 +337,5 @@ void vioscsi_update_qa(struct vioscsi_dev *);
 int vioscsi_notifyq(struct vioscsi_dev *);
 void virtio_stop(struct vm_create_params *vcp);
 void virtio_start(struct vm_create_params *vcp);
+
+#endif /* _VIRTIO_H_ */

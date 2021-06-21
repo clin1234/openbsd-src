@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtp.c,v 1.166 2019/08/10 16:07:01 gilles Exp $	*/
+/*	$OpenBSD: smtp.c,v 1.171 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -18,25 +18,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-
-#include <err.h>
 #include <errno.h>
-#include <event.h>
-#include <imsg.h>
-#include <netdb.h>
-#include <pwd.h>
-#include <signal.h>
-#include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include <tls.h>
 #include <unistd.h>
-
-#include <openssl/ssl.h>
 
 #include "smtpd.h"
 #include "log.h"
@@ -50,7 +35,7 @@ static void smtp_dropped(struct listener *, int, const struct sockaddr_storage *
 static int smtp_enqueue(void);
 static int smtp_can_accept(void);
 static void smtp_setup_listeners(void);
-static int smtp_sni_callback(SSL *, int *, void *);
+static void smtp_setup_listener_tls(struct listener *);
 
 int
 proxy_session(struct listener *listener, int sock,
@@ -62,6 +47,11 @@ proxy_session(struct listener *listener, int sock,
 
 static void smtp_accepted(struct listener *, int, const struct sockaddr_storage *, struct io *);
 
+/*
+ * This function are not publicy exported because it is a hack until libtls
+ * has a proper privsep setup
+ */
+void tls_config_use_fake_private_key(struct tls_config *config);
 
 #define	SMTP_FD_RESERVE	5
 static size_t	sessions;
@@ -111,7 +101,7 @@ smtp_imsg(struct mproc *p, struct imsg *imsg)
 		return;
 	}
 
-	errx(1, "smtp_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
+	fatalx("smtp_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
 }
 
 void
@@ -145,6 +135,10 @@ smtp_setup_listeners(void)
 			}
 			fatal("smtpd: socket");
 		}
+
+		if (l->flags & F_SSL)
+			smtp_setup_listener_tls(l);
+
 		opt = 1;
 		if (setsockopt(l->fd, SOL_SOCKET, SO_REUSEADDR, &opt,
 		    sizeof(opt)) == -1)
@@ -155,19 +149,87 @@ smtp_setup_listeners(void)
 }
 
 static void
+smtp_setup_listener_tls(struct listener *l)
+{
+	static const char *dheparams[] = { "none", "auto", "legacy" };
+	struct tls_config *config;
+	const char *ciphers;
+	uint32_t protos;
+	struct pki *pki;
+	struct ca *ca;
+	int i;
+
+	if ((config = tls_config_new()) == NULL)
+		fatal("smtpd: tls_config_new");
+
+	ciphers = env->sc_tls_ciphers;
+	if (l->tls_ciphers)
+		ciphers = l->tls_ciphers;
+	if (ciphers && tls_config_set_ciphers(config, ciphers) == -1)
+		fatal("%s", tls_config_error(config));
+
+	if (l->tls_protocols) {
+		if (tls_config_parse_protocols(&protos, l->tls_protocols) == -1)
+			fatal("failed to parse protocols \"%s\"",
+			    l->tls_protocols);
+		if (tls_config_set_protocols(config, protos) == -1)
+			fatal("%s", tls_config_error(config));
+	}
+
+	pki = l->pki[0];
+	if (pki == NULL)
+		fatal("no pki defined");
+
+	if (tls_config_set_dheparams(config, dheparams[pki->pki_dhe]) == -1)
+		fatal("tls_config_set_dheparams");
+
+	tls_config_use_fake_private_key(config);
+	for (i = 0; i < l->pkicount; i++) {
+		pki = l->pki[i];
+		if (i == 0) {
+			if (tls_config_set_keypair_mem(config, pki->pki_cert,
+			    pki->pki_cert_len, NULL, 0) == -1)
+				fatal("tls_config_set_keypair_mem");
+		} else {
+			if (tls_config_add_keypair_mem(config, pki->pki_cert,
+			    pki->pki_cert_len, NULL, 0) == -1)
+				fatal("tls_config_add_keypair_mem");
+		}
+	}
+	free(l->pki);
+	l->pkicount = 0;
+
+	if (l->ca_name[0]) {
+		ca = dict_get(env->sc_ca_dict, l->ca_name);
+		if (tls_config_set_ca_mem(config, ca->ca_cert, ca->ca_cert_len)
+		    == -1)
+			fatal("tls_config_set_ca_mem");
+	}
+	else if (tls_config_set_ca_file(config, tls_default_ca_cert_file())
+	    == -1)
+		fatal("tls_config_set_ca_file");
+
+	if (l->flags & F_TLS_VERIFY)
+		tls_config_verify_client(config);
+
+	l->tls = tls_server();
+	if (l->tls == NULL)
+		fatal("tls_server");
+	if (tls_configure(l->tls, config) == -1) {
+		fatal("tls_configure: %s", tls_error(l->tls));
+	}
+	tls_config_free(config);
+}
+
+
+static void
 smtp_setup_events(void)
 {
 	struct listener *l;
-	struct pki	*pki;
-	SSL_CTX		*ssl_ctx;
-	void		*iter;
-	const char	*k;
 
 	TAILQ_FOREACH(l, env->sc_listeners, entry) {
-		log_debug("debug: smtp: listen on %s port %d flags 0x%01x"
-		    " pki \"%s\""
-		    " ca \"%s\"", ss_to_text(&l->ss), ntohs(l->port),
-		    l->flags, l->pki_name, l->ca_name);
+		log_debug("debug: smtp: listen on %s port %d flags 0x%01x",
+		    ss_to_text(&l->ss), ntohs(l->port), l->flags);
 
 		io_set_nonblocking(l->fd);
 		if (listen(l->fd, SMTPD_BACKLOG) == -1)
@@ -176,14 +238,6 @@ smtp_setup_events(void)
 
 		if (!(env->sc_flags & SMTPD_SMTP_PAUSED))
 			event_add(&l->ev, NULL);
-	}
-
-	iter = NULL;
-	while (dict_iter(env->sc_pki_dict, &iter, &k, (void **)&pki)) {
-		if (!ssl_setup((SSL_CTX **)&ssl_ctx, pki, smtp_sni_callback,
-			env->sc_tls_ciphers))
-			fatal("smtp_setup_events: ssl_setup failure");
-		dict_xset(env->sc_ssl_dict, k, ssl_ctx);
 	}
 
 	purge_config(PURGE_PKI_KEYS);
@@ -317,22 +371,6 @@ smtp_collect(void)
 		env->sc_flags &= ~SMTPD_SMTP_DISABLED;
 		smtp_resume();
 	}
-}
-
-static int
-smtp_sni_callback(SSL *ssl, int *ad, void *arg)
-{
-	const char		*sn;
-	void			*ssl_ctx;
-
-	sn = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-	if (sn == NULL)
-		return SSL_TLSEXT_ERR_NOACK;
-	ssl_ctx = dict_get(env->sc_ssl_dict, sn);
-	if (ssl_ctx == NULL)
-		return SSL_TLSEXT_ERR_NOACK;
-	SSL_set_SSL_CTX(ssl, ssl_ctx);
-	return SSL_TLSEXT_ERR_OK;
 }
 
 static void

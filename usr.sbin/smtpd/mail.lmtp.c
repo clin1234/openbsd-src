@@ -14,7 +14,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 
@@ -316,9 +315,8 @@ stream_file(FILE *conn)
 {
 	char *line = NULL;
 	size_t linesize = 0;
-	ssize_t linelen;
 
-	while ((linelen = getline(&line, &linesize, stdin)) != -1) {
+	while (getline(&line, &linesize, stdin) != -1) {
 		line[strcspn(line, "\n")] = '\0';
 		if (line[0] == '.')
 			fprintf(conn, ".");

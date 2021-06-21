@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_ciph.c,v 1.119 2020/09/13 16:49:05 jsing Exp $ */
+/* $OpenBSD: ssl_ciph.c,v 1.123 2021/05/16 08:24:21 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -143,6 +143,7 @@
 #include <stdio.h>
 
 #include <openssl/objects.h>
+#include <openssl/opensslconf.h>
 
 #ifndef OPENSSL_NO_ENGINE
 #include <openssl/engine.h>
@@ -559,9 +560,21 @@ ssl_cipher_get_evp_aead(const SSL_SESSION *ss, const EVP_AEAD **aead)
 int
 ssl_get_handshake_evp_md(SSL *s, const EVP_MD **md)
 {
+	unsigned long handshake_mac;
+
 	*md = NULL;
 
-	switch (ssl_get_algorithm2(s) & SSL_HANDSHAKE_MAC_MASK) {
+	if (S3I(s)->hs.cipher == NULL)
+		return 0;
+
+	handshake_mac = S3I(s)->hs.cipher->algorithm2 &
+	    SSL_HANDSHAKE_MAC_MASK;
+
+	/* For TLSv1.2 we upgrade the default MD5+SHA1 MAC to SHA256. */
+	if (SSL_USE_SHA256_PRF(s) && handshake_mac == SSL_HANDSHAKE_MAC_DEFAULT)
+		handshake_mac = SSL_HANDSHAKE_MAC_SHA256;
+
+	switch (handshake_mac) {
 	case SSL_HANDSHAKE_MAC_DEFAULT:
 		*md = EVP_md5_sha1();
 		return 1;
@@ -1585,6 +1598,12 @@ uint16_t
 SSL_CIPHER_get_value(const SSL_CIPHER *c)
 {
 	return ssl3_cipher_get_value(c);
+}
+
+const SSL_CIPHER *
+SSL_CIPHER_find(SSL *ssl, const unsigned char *ptr)
+{
+	return ssl->method->get_cipher_by_char(ptr);
 }
 
 int

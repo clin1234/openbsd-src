@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_malloc.c,v 1.142 2020/10/14 22:41:48 deraadt Exp $	*/
+/*	$OpenBSD: kern_malloc.c,v 1.146 2021/05/16 15:10:20 deraadt Exp $	*/
 /*	$NetBSD: kern_malloc.c,v 1.15.4.2 1996/06/13 17:10:56 cgd Exp $	*/
 
 /*
@@ -42,6 +42,7 @@
 #include <sys/time.h>
 #include <sys/mutex.h>
 #include <sys/rwlock.h>
+#include <sys/tracepoint.h>
 
 #include <uvm/uvm_extern.h>
 
@@ -195,7 +196,7 @@ malloc(size_t size, int type, int flags)
 			return (NULL);
 		} else
 			panic("malloc: allocation too large, "
-			    "type = %d, size = %lu\n", type, size);
+			    "type = %d, size = %lu", type, size);
 	}
 
 	indx = BUCKETINDX(size);
@@ -359,6 +360,9 @@ out:
 
 	if ((flags & M_ZERO) && va != NULL)
 		memset(va, 0, size);
+
+	TRACEPOINT(uvm, malloc, type, va, size, flags);
+
 	return (va);
 }
 
@@ -389,6 +393,8 @@ free(void *addr, int type, size_t freedsize)
 		panic("free: non-malloced addr %p type %s", addr,
 		    memname[type]);
 #endif
+
+	TRACEPOINT(uvm, free, type, addr, freedsize);
 
 	mtx_enter(&malloc_mtx);
 	kup = btokup(addr);
@@ -574,8 +580,8 @@ kmeminit(void)
 	    FALSE, &kmem_map_store);
 	kmembase = (char *)base;
 	kmemlimit = (char *)limit;
-	kmemusage = (struct kmemusage *) uvm_km_zalloc(kernel_map,
-		(vsize_t)(nkmempages * sizeof(struct kmemusage)));
+	kmemusage = km_alloc(round_page(nkmempages * sizeof(struct kmemusage)),
+	    &kv_any, &kp_zero, &kd_waitok);
 	for (indx = 0; indx < MINBUCKET + 16; indx++) {
 		XSIMPLEQ_INIT(&bucket[indx].kb_freelist);
 	}
@@ -687,18 +693,6 @@ sysctl_malloc(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (EOPNOTSUPP);
 	}
 	/* NOTREACHED */
-}
-
-/*
- * Round up a size to how much malloc would actually allocate.
- */
-size_t
-malloc_roundup(size_t sz)
-{
-	if (sz > MAXALLOCSAVE)
-		return round_page(sz);
-
-	return (1 << BUCKETINDX(sz));
 }
 
 #if defined(DDB)

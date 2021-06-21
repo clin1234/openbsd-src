@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_swap.c,v 1.147 2020/09/29 11:47:41 mpi Exp $	*/
+/*	$OpenBSD: uvm_swap.c,v 1.150 2021/03/26 13:40:05 mpi Exp $	*/
 /*	$NetBSD: uvm_swap.c,v 1.40 2000/11/17 11:39:39 mrg Exp $	*/
 
 /*
@@ -1403,7 +1403,7 @@ uvm_swap_alloc(int *nslots, boolean_t lessok)
 	/*
 	 * lock data lock, convert slots into blocks, and enter loop
 	 */
-
+	KERNEL_ASSERT_LOCKED();
 ReTry:	/* XXXMRG */
 	LIST_FOREACH(spp, &swap_priority, spi_swappri) {
 		TAILQ_FOREACH(sdp, &spp->spi_swapdev, swd_next) {
@@ -1426,7 +1426,7 @@ ReTry:	/* XXXMRG */
 			sdp->swd_npginuse += *nslots;
 			uvmexp.swpginuse += *nslots;
 			/* done!  return drum slot number */
-			return(result + sdp->swd_drumoffset);
+			return result + sdp->swd_drumoffset;
 		}
 	}
 
@@ -1449,8 +1449,10 @@ uvm_swapisfull(void)
 {
 	int result;
 
+	KERNEL_LOCK();
 	KASSERT(uvmexp.swpgonly <= uvmexp.swpages);
 	result = (uvmexp.swpgonly == uvmexp.swpages);
+	KERNEL_UNLOCK();
 
 	return result;
 }
@@ -1465,6 +1467,7 @@ uvm_swap_markbad(int startslot, int nslots)
 {
 	struct swapdev *sdp;
 
+	KERNEL_LOCK();
 	sdp = swapdrum_getsdp(startslot);
 	if (sdp != NULL) {
 		/*
@@ -1475,6 +1478,7 @@ uvm_swap_markbad(int startslot, int nslots)
 		 */
 		sdp->swd_npgbad += nslots;
 	}
+	KERNEL_UNLOCK();
 }
 
 /*
@@ -1501,7 +1505,7 @@ uvm_swap_free(int startslot, int nslots)
 	 * in the extent, and return.   must hold pri lock to do
 	 * lookup and access the extent.
 	 */
-
+	KERNEL_LOCK();
 	sdp = swapdrum_getsdp(startslot);
 	KASSERT(uvmexp.nswapdev >= 1);
 	KASSERT(sdp != NULL);
@@ -1533,6 +1537,7 @@ uvm_swap_free(int startslot, int nslots)
 		}
 	}
 #endif /* UVM_SWAP_ENCRYPT */
+	KERNEL_UNLOCK();
 }
 
 /*
@@ -1567,17 +1572,18 @@ uvm_swap_get(struct vm_page *page, int swslot, int flags)
 		return VM_PAGER_ERROR;
 	}
 
+	KERNEL_LOCK();
 	/* this page is (about to be) no longer only in swap. */
-	uvmexp.swpgonly--;
+	atomic_dec_int(&uvmexp.swpgonly);
 
 	result = uvm_swap_io(&page, swslot, 1, B_READ |
 	    ((flags & PGO_SYNCIO) ? 0 : B_ASYNC));
 
 	if (result != VM_PAGER_OK && result != VM_PAGER_PEND) {
 		/* oops, the read failed so it really is still only in swap. */
-		uvmexp.swpgonly++;
+		atomic_inc_int(&uvmexp.swpgonly);
 	}
-
+	KERNEL_UNLOCK();
 	return (result);
 }
 
@@ -1599,6 +1605,8 @@ uvm_swap_io(struct vm_page **pps, int startslot, int npages, int flags)
 	struct swapdev *sdp;
 	int	encrypt = 0;
 #endif
+
+	KERNEL_ASSERT_LOCKED();
 
 	write = (flags & B_READ) == 0;
 	async = (flags & B_ASYNC) != 0;

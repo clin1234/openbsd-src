@@ -1,13 +1,17 @@
-#	$OpenBSD: Makefile,v 1.6 2020/01/20 00:49:55 jan Exp $
+#	$OpenBSD: Makefile,v 1.11 2021/05/09 14:26:45 jan Exp $
 
 .PHONY: setup-ftpd
 
 REGRESS_TARGETS =	run-ftpd-get
+REGRESS_TARGETS +=	run-ftpd-get-active
 REGRESS_TARGETS +=	run-ftpd-put
+REGRESS_TARGETS +=	run-ftpd-put-active
 REGRESS_TARGETS +=	run-ftpd-ls
 REGRESS_TARGETS +=	run-ftpd-nlist
 REGRESS_TARGETS +=	run-ftpd-delete
 REGRESS_TARGETS +=	run-ftpd-mkdir
+REGRESS_TARGETS +=	run-ftpd-rename
+REGRESS_TARGETS +=	run-ftpd-size
 REGRESS_ROOT_TARGETS =	${REGRESS_TARGETS}
 REGRESS_CLEANUP =	cleanup-ftpd
 REGRESS_SETUP =		setup-ftpd
@@ -35,7 +39,6 @@ regress:
 .endif
 
 setup-ftpd:
-	@echo '\n======== $@ ========'
 	${SUDO} pkill tcpserver || true
 	${SUDO} pkill ftpd || true
 	# start ftpd
@@ -49,35 +52,48 @@ setup-ftpd:
 	dd if=/dev/random of="ftpd.regress.local" count=1 bs=1m
 
 run-ftpd-get:
-	@echo '\n======== $@ ========'
-	ftp -a ftp://127.0.0.1/ftpd.regress
+	ftp_proxy= ftp -a ftp://127.0.0.1/ftpd.regress
+	cmp ${FTPDIR}/ftpd.regress ftpd.regress
+	rm ftpd.regress
+
+run-ftpd-get-active:
+	ftp_proxy= ftp -a -A ftp://127.0.0.1/ftpd.regress
 	cmp ${FTPDIR}/ftpd.regress ftpd.regress
 	rm ftpd.regress
 
 run-ftpd-put:
-	@echo '\n======== $@ ========'
 	echo put ftpd.regress.local | ftp -a 127.0.0.1
 	cmp ${FTPDIR}/ftpd.regress.local ftpd.regress.local
 	${SUDO} rm ${FTPDIR}/ftpd.regress.local
 
+run-ftpd-put-active:
+	echo put ftpd.regress.local | ftp -a -A 127.0.0.1
+	cmp ${FTPDIR}/ftpd.regress.local ftpd.regress.local
+	${SUDO} rm ${FTPDIR}/ftpd.regress.local
+
 run-ftpd-ls:
-	@echo '\n======== $@ ========'
 	echo ls | ftp -a 127.0.0.1 | grep -q 'ftpd.regress'
 
 run-ftpd-nlist:
-	@echo '\n======== $@ ========'
 	echo nlist | ftp -a 127.0.0.1 | grep -q 'ftpd.regress'
 
 run-ftpd-delete:
-	@echo '\n======== $@ ========'
 	echo delete ftpd.regress | ftp -a 127.0.0.1
 	test ! -f ${FTPDIR}/ftpd.regress
 
 run-ftpd-mkdir:
-	@echo '\n======== $@ ========'
 	echo mkdir ftpd.regress.dir.create | ftp -a 127.0.0.1
 	test -d ${FTPDIR}/ftpd.regress.dir.create
 	${SUDO} rm -r ${FTPDIR}/ftpd.regress.dir.create
+
+run-ftpd-rename:
+	echo rename ftpd.regress ftpd.regress.new | ftp -a 127.0.0.1
+	test ! -f ${FTPDIR}/ftpd.regress
+	test   -f ${FTPDIR}/ftpd.regress.new
+
+run-ftpd-size:
+	test $$(echo "binary\nsize ftpd.regress" | ftp -a 127.0.0.1 | cut -f 2)\
+	    -eq $$(stat -f %z ${FTPDIR}/ftpd.regress)
 
 cleanup-ftpd:
 	${SUDO} pkill tcpserver || true

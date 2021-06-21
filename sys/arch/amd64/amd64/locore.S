@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore.S,v 1.122 2020/11/03 18:19:31 guenther Exp $	*/
+/*	$OpenBSD: locore.S,v 1.125 2021/06/18 06:17:28 guenther Exp $	*/
 /*	$NetBSD: locore.S,v 1.13 2004/03/25 18:33:17 drochner Exp $	*/
 
 /*
@@ -342,6 +342,7 @@ ENTRY(cpu_switchto)
 	shrq	$32,%rdx
 
 	/* If old proc exited, don't bother. */
+	xorl	%ecx,%ecx
 	testq	%r13,%r13
 	jz	switch_exited
 
@@ -349,18 +350,19 @@ ENTRY(cpu_switchto)
 	 * Save old context.
 	 *
 	 * Registers:
-	 *   %rax, %rcx - scratch
+	 *   %rax - scratch
 	 *   %r13 - old proc, then old pcb
+	 *   %rcx - old pmap if not P_SYSTEM
 	 *   %r12 - new proc
 	 *   %r9d - cpuid
 	 */
 
+	/* remember the pmap if not P_SYSTEM */
+	testl	$P_SYSTEM,P_FLAG(%r13)
 	movq	P_ADDR(%r13),%r13
-
-	/* clear the old pmap's bit for the cpu */
+	jnz	0f
 	movq	PCB_PMAP(%r13),%rcx
-	lock
-	btrq	%r9,PM_CPUS(%rcx)
+0:
 
 	/* Save stack pointers. */
 	movq	%rsp,PCB_RSP(%r13)
@@ -378,7 +380,7 @@ ENTRY(cpu_switchto)
 	addq	$PCB_SAVEFPU,%rdi
 #endif
 	CODEPATCH_START
-	.byte 0x48; fxsave	(%rdi)		/* really fxsave64 */
+	fxsave64	(%rdi)
 	CODEPATCH_END(CPTAG_XSAVE)
 
 switch_exited:
@@ -388,7 +390,7 @@ switch_exited:
 	addq	$PCB_SAVEFPU,%rdi
 #endif
 	CODEPATCH_START
-	.byte 0x48; fxrstor	(%rdi)		/* really fxrstor64 */
+	fxrstor64	(%rdi)
 	CODEPATCH_END(CPTAG_XRSTOR)
 	andl	$~CPUF_USERXSTATE,CPUVAR(FLAGS)
 
@@ -416,14 +418,24 @@ restore_saved:
 	 * Restore saved context.
 	 *
 	 * Registers:
-	 *   %rax, %rcx, %rdx - scratch
-	 *   %r13 - new pcb
+	 *   %rax, %rdx - scratch
+	 *   %rcx - old pmap if not P_SYSTEM
 	 *   %r12 - new process
+	 *   %r13 - new pcb
+	 *   %rbx - new pmap if not P_SYSTEM
 	 */
+
+	movq	P_ADDR(%r12),%r13
+
+	/* remember the pmap if not P_SYSTEM */
+	xorl	%ebx,%ebx
+	testl	$P_SYSTEM,P_FLAG(%r12)
+	jnz	1f
+	movq	PCB_PMAP(%r13),%rbx
+1:
 
 	/* No interrupts while loading new state. */
 	cli
-	movq	P_ADDR(%r12),%r13
 
 	/* Restore stack pointers. */
 	movq	PCB_RSP(%r13),%rsp
@@ -433,11 +445,22 @@ restore_saved:
 	RETGUARD_SETUP_OFF(cpu_switchto, r11, 6*8)
 
 	/* don't switch cr3 to the same thing it already was */
-	movq	%cr3,%rax
-	cmpq	PCB_CR3(%r13),%rax
-	movq	PCB_CR3(%r13),%rax	/* flags from cmpq unchanged */
+	movq	PCB_CR3(%r13),%rax
+	movq	%cr3,%rdi
+	xorq	%rax,%rdi
+	btrq	$63,%rdi	/* ignore CR3_REUSE_PCID */
+	testq	%rdi,%rdi
 	jz	.Lsame_cr3
 
+#ifdef DIAGNOSTIC
+	/* verify ci_proc_pmap had been updated properly */
+	cmpq	%rcx,CPUVAR(PROC_PMAP)
+	jnz	.Lbogus_proc_pmap
+#endif
+	/* record which pmap this CPU should get IPIs for */
+	movq	%rbx,CPUVAR(PROC_PMAP)
+
+.Lset_cr3:
 	movq	%rax,%cr3			/* %rax used below too */
 
 .Lsame_cr3:
@@ -451,14 +474,13 @@ restore_saved:
 	RET_STACK_REFILL_WITH_RCX
 
 	/* Don't bother with the rest if switching to a system process. */
-	testl	$P_SYSTEM,P_FLAG(%r12)
-	jnz	switch_restored
+	testq	%rbx,%rbx
+	jz	switch_restored
 
 	/* record the bits needed for future U-->K transition */
 	movq	PCB_KSTACK(%r13),%rdx
 	subq	$FRAMESIZE,%rdx
 	movq	%rdx,CPUVAR(KERN_RSP)
-	movq	PCB_PMAP(%r13),%rcx
 
 	CODEPATCH_START
 	/*
@@ -466,19 +488,12 @@ restore_saved:
 	 * then record them in cpu_info for easy access in syscall and
 	 * interrupt trampolines.
 	 */
-	movq	PM_PDIRPA_INTEL(%rcx),%rdx
+	movq	PM_PDIRPA_INTEL(%rbx),%rdx
 	orq	cr3_reuse_pcid,%rax
 	orq	cr3_pcid_proc_intel,%rdx
 	movq	%rax,CPUVAR(KERN_CR3)
 	movq	%rdx,CPUVAR(USER_CR3)
 	CODEPATCH_END(CPTAG_MELTDOWN_NOP)
-
-	/* set the new pmap's bit for the cpu */
-	lock
-	btsq	%r9,PM_CPUS(%rcx)
-#ifdef DIAGNOSTIC
-	jc	_C_LABEL(switch_pmcpu_set)
-#endif
 
 switch_restored:
 	SET_CURPCB(%r13)
@@ -493,6 +508,18 @@ switch_restored:
 	popq	%rbx
 	RETGUARD_CHECK(cpu_switchto, r11)
 	ret
+
+#ifdef DIAGNOSTIC
+	.globl	_C_LABEL(panic)
+.Lbogus_proc_pmap:
+	leaq	bogus_proc_pmap,%rdi
+	call	_C_LABEL(panic)
+	int3	/* NOTREACHED */
+	.pushsection .rodata
+bogus_proc_pmap:
+	.asciz	"curcpu->ci_proc_pmap didn't point to previous pmap"
+	.popsection
+#endif /* DIAGNOSTIC */
 END(cpu_switchto)
 
 ENTRY(cpu_idle_enter)
@@ -518,20 +545,6 @@ ENTRY(cpu_idle_cycle)
 	ret
 END(cpu_idle_cycle)
 
-	.globl	_C_LABEL(panic)
-
-#ifdef DIAGNOSTIC
-NENTRY(switch_pmcpu_set)
-	leaq	switch_active(%rip),%rdi
-	call	_C_LABEL(panic)
-END(switch_pmcpu_set)
-	/* NOTREACHED */
-
-	.section .rodata
-switch_active:
-	.asciz	"activate already active pmap"
-	.text
-#endif /* DIAGNOSTIC */
 /*
  * savectx(struct pcb *pcb);
  * Update pcb, saving current processor state.
@@ -708,7 +721,7 @@ KUTEXT_PAGE_END
 #endif
 	/* untouched state so can't fault */
 	CODEPATCH_START
-	.byte 0x48; fxrstor	(%rdi)		/* really fxrstor64 */
+	fxrstor64	(%rdi)
 	CODEPATCH_END(CPTAG_XRSTOR)
 #if PCB_SAVEFPU != 0
 	subq	$PCB_SAVEFPU,%rdi
@@ -921,7 +934,7 @@ KTEXT_PAGE_END
 	addq	$PCB_SAVEFPU,%rdi
 #endif
 	CODEPATCH_START
-	.byte 0x48; fxrstor	(%rdi)		/* really fxrstor64 */
+	fxrstor64	(%rdi)
 	CODEPATCH_END(CPTAG_XRSTOR)
 	movq	$T_PROTFLT,TF_TRAPNO(%rsp)
 	jmp	recall_trap
@@ -1037,7 +1050,7 @@ ENTRY(xrstor_user)
 	.globl	xrstor_fault
 xrstor_fault:
 	CODEPATCH_START
-	.byte 0x48; fxrstor	(%rdi)		/* really fxrstor64 */
+	fxrstor64	(%rdi)
 	CODEPATCH_END(CPTAG_XRSTOR)
 	xorl	%eax, %eax
 	RETGUARD_CHECK(xrstor_user, r11)
@@ -1054,7 +1067,7 @@ ENTRY(fpusave)
 	movl	%edx,%eax
 	shrq	$32,%rdx
 	CODEPATCH_START
-	.byte 0x48; fxsave	(%rdi)		/* really fxsave64 */
+	fxsave64	(%rdi)
 	CODEPATCH_END(CPTAG_XSAVE)
 	RETGUARD_CHECK(fpusave, r11)
 	ret
@@ -1066,14 +1079,14 @@ ENTRY(fpusavereset)
 	movl	%edx,%eax
 	shrq	$32,%rdx
 	CODEPATCH_START
-	.byte 0x48; fxsave	(%rdi)		/* really fxsave64 */
+	fxsave64	(%rdi)
 	CODEPATCH_END(CPTAG_XSAVE)
 	movq	proc0paddr(%rip),%rdi
 #if PCB_SAVEFPU != 0
 	addq	$PCB_SAVEFPU,%rdi
 #endif
 	CODEPATCH_START
-	.byte 0x48; fxrstor	(%rdi)		/* really fxrstor64 */
+	fxrstor64	(%rdi)
 	CODEPATCH_END(CPTAG_XRSTOR)
 	RETGUARD_CHECK(fpusavereset, r11)
 	ret
@@ -1100,15 +1113,15 @@ END(xsetbv_user)
 	.section .rodata
 	.globl	_C_LABEL(_xrstor)
 _C_LABEL(_xrstor):
-	.byte 0x48; xrstor	(%rdi)		/* really xrstor64 */
+	xrstor64	(%rdi)
 
 	.globl	_C_LABEL(_xsave)
 _C_LABEL(_xsave):
-	.byte 0x48; xsave	(%rdi)		/* really xsave64 */
+	xsave64	(%rdi)
 
 	.globl	_C_LABEL(_xsaveopt)
 _C_LABEL(_xsaveopt):
-	.byte 0x48; xsaveopt	(%rdi)		/* really xsaveopt64 */
+	xsaveopt64	(%rdi)
 
 	.globl	_C_LABEL(_pcid_set_reuse)
 _C_LABEL(_pcid_set_reuse):

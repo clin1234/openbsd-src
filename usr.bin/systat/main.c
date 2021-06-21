@@ -1,4 +1,4 @@
-/* $OpenBSD: main.c,v 1.72 2020/01/12 20:51:08 martijn Exp $	 */
+/* $OpenBSD: main.c,v 1.74 2021/06/02 08:32:22 martijn Exp $	 */
 /*
  * Copyright (c) 2001, 2007 Can Erkin Acar
  * Copyright (c) 2001 Daniel Hartmeier
@@ -40,9 +40,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -73,6 +75,7 @@ char	uloadbuf[TIMEPOS];
 
 int  ucount(void);
 void usage(void);
+double strtodnum(const char *, double, double, const char **);
 
 /* command prompt */
 
@@ -281,8 +284,7 @@ cmd_compat(const char *buf)
 	const char *s;
 
 	if (strcasecmp(buf, "help") == 0) {
-		show_help();
-		need_update = 1;
+		message_toggle(MESSAGE_HELP);
 		return;
 	}
 	if (strcasecmp(buf, "quit") == 0 || strcasecmp(buf, "q") == 0) {
@@ -301,8 +303,7 @@ cmd_compat(const char *buf)
 		return;
 	}
 	if (strncasecmp(buf, "order", 5) == 0) {
-		show_order();
-		need_update = 1;
+		message_toggle(MESSAGE_ORDER);
 		return;
 	}
 	if (strncasecmp(buf, "human", 5) == 0) {
@@ -323,9 +324,14 @@ void
 cmd_delay(const char *buf)
 {
 	double del;
-	del = atof(buf);
+	const char *errstr;
 
-	if (del > 0) {
+	if (buf[0] == '\0')
+		return;
+	del = strtodnum(buf, 0, UINT32_MAX / 1000000, &errstr);
+	if (errstr != NULL)
+		error("s: \"%s\": delay value is %s", buf, errstr);
+	else {
 		udelay = (useconds_t)(del * 1000000);
 		gotsig_alarm = 1;
 		naptime = del;
@@ -350,12 +356,10 @@ keyboard_callback(int ch)
 	case '?':
 		/* FALLTHROUGH */
 	case 'h':
-		show_help();
-		need_update = 1;
+		message_toggle(MESSAGE_HELP);
 		break;
 	case CTRL_G:
-		show_view();
-		need_update = 1;
+		message_toggle(MESSAGE_VIEW);
 		break;
 	case 'l':
 		command_set(&cm_count, NULL);
@@ -414,6 +418,48 @@ gethz(void)
 	hz = cinf.hz;
 }
 
+#define	INVALID		1
+#define	TOOSMALL	2
+#define	TOOLARGE	3
+
+double
+strtodnum(const char *nptr, double minval, double maxval, const char **errstrp)
+{
+	double d = 0;
+	int error = 0;
+	char *ep;
+	struct errval {
+		const char *errstr;
+		int err;
+	} ev[4] = {
+		{ NULL,		0 },
+		{ "invalid",	EINVAL },
+		{ "too small",	ERANGE },
+		{ "too large",	ERANGE },
+	};
+
+	ev[0].err = errno;
+	errno = 0;
+	if (minval > maxval) {
+		error = INVALID;
+	} else {
+		d = strtod(nptr, &ep);
+		if (nptr == ep || *ep != '\0')
+			error = INVALID;
+		else if ((d == -HUGE_VAL && errno == ERANGE) || d < minval)
+			error = TOOSMALL;
+		else if ((d == HUGE_VAL && errno == ERANGE) || d > maxval)
+			error = TOOLARGE;
+	}
+	if (errstrp != NULL)
+		*errstrp = ev[error].errstr;
+	errno = ev[error].err;
+	if (error)
+		d = 0;
+
+	return (d);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -421,7 +467,7 @@ main(int argc, char *argv[])
 	const char *errstr;
 	extern char *optarg;
 	extern int optind;
-	double delay = 5;
+	double delay = 5, del;
 
 	char *viewstr = NULL;
 
@@ -475,9 +521,11 @@ main(int argc, char *argv[])
 			nflag = 1;
 			break;
 		case 's':
-			delay = atof(optarg);
-			if (delay <= 0)
-				delay = 5;
+			delay = strtodnum(optarg, 0, UINT32_MAX / 1000000,
+			    &errstr);
+			if (errstr != NULL)
+				errx(1, "-s \"%s\": delay value is %s", optarg,
+				    errstr);
 			break;
 		case 'w':
 			rawwidth = strtonum(optarg, 1, MAX_LINE_BUF-1, &errstr);
@@ -497,16 +545,16 @@ main(int argc, char *argv[])
 	argv += optind;
 
 	if (argc == 1) {
-		double del = atof(argv[0]);
-		if (del == 0)
+		del = strtodnum(argv[0], 0, UINT32_MAX / 1000000, &errstr);
+		if (errstr != NULL)
 			viewstr = argv[0];
 		else
 			delay = del;
 	} else if (argc == 2) {
 		viewstr = argv[0];
-		delay = atof(argv[1]);
-		if (delay <= 0)
-			delay = 5;
+		delay = strtodnum(argv[1], 0, UINT32_MAX / 1000000, &errstr);
+		if (errstr != NULL)
+			errx(1, "\"%s\": delay value is %s", argv[1], errstr);
 	}
 
 	udelay = (useconds_t)(delay * 1000000.0);

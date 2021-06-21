@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_tc.c,v 1.69 2020/09/16 00:00:40 cheloha Exp $ */
+/*	$OpenBSD: kern_tc.c,v 1.74 2021/06/19 13:49:39 cheloha Exp $ */
 
 /*
  * Copyright (c) 2000 Poul-Henning Kamp <phk@FreeBSD.org>
@@ -55,7 +55,14 @@ dummy_get_timecount(struct timecounter *tc)
 }
 
 static struct timecounter dummy_timecounter = {
-	dummy_get_timecount, 0, ~0u, 1000000, "dummy", -1000000, NULL, 0
+	.tc_get_timecount = dummy_get_timecount,
+	.tc_poll_pps = 0,
+	.tc_counter_mask = ~0u,
+	.tc_frequency = 1000000,
+	.tc_name = "dummy",
+	.tc_quality = -1000000,
+	.tc_priv = NULL,
+	.tc_user = 0,
 };
 
 /*
@@ -189,6 +196,21 @@ binuptime(struct bintime *bt)
 }
 
 void
+getbinuptime(struct bintime *bt)
+{
+	struct timehands *th;
+	u_int gen;
+
+	do {
+		th = timehands;
+		gen = th->th_generation;
+		membar_consumer();
+		*bt = th->th_offset;
+		membar_consumer();
+	} while (gen == 0 || gen != th->th_generation);
+}
+
+void
 nanouptime(struct timespec *tsp)
 {
 	struct bintime bt;
@@ -226,6 +248,24 @@ getuptime(void)
 
 	return now;
 #endif
+}
+
+uint64_t
+nsecuptime(void)
+{
+	struct bintime bt;
+
+	binuptime(&bt);
+	return BINTIME_TO_NSEC(&bt);
+}
+
+uint64_t
+getnsecuptime(void)
+{
+	struct bintime bt;
+
+	getbinuptime(&bt);
+	return BINTIME_TO_NSEC(&bt);
 }
 
 void
@@ -517,8 +557,7 @@ tc_setclock(const struct timespec *ts)
 #ifndef SMALL_KERNEL
 	/* convert the bintime to ticks */
 	bintimesub(&new_naptime, &old_naptime, &elapsed);
-	adj_ticks = (uint64_t)hz * elapsed.sec +
-	    (((uint64_t)1000000 * (uint32_t)(elapsed.frac >> 32)) >> 32) / tick;
+	adj_ticks = BINTIME_TO_NSEC(&elapsed) / tick_nsec;
 	if (adj_ticks > 0) {
 		if (adj_ticks > INT_MAX)
 			adj_ticks = INT_MAX;
@@ -821,6 +860,11 @@ inittimecounter(void)
 	(void)timecounter->tc_get_timecount(timecounter);
 }
 
+const struct sysctl_bounded_args tc_vars[] = {
+	{ KERN_TIMECOUNTER_TICK, &tc_tick, SYSCTL_INT_READONLY },
+	{ KERN_TIMECOUNTER_TIMESTEPWARNINGS, &timestepwarnings, 0, 1 },
+};
+
 /*
  * Return timecounter-related information.
  */
@@ -832,17 +876,13 @@ sysctl_tc(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		return (ENOTDIR);
 
 	switch (name[0]) {
-	case KERN_TIMECOUNTER_TICK:
-		return (sysctl_rdint(oldp, oldlenp, newp, tc_tick));
-	case KERN_TIMECOUNTER_TIMESTEPWARNINGS:
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
-		    &timestepwarnings));
 	case KERN_TIMECOUNTER_HARDWARE:
 		return (sysctl_tc_hardware(oldp, oldlenp, newp, newlen));
 	case KERN_TIMECOUNTER_CHOICE:
 		return (sysctl_tc_choice(oldp, oldlenp, newp, newlen));
 	default:
-		return (EOPNOTSUPP);
+		return (sysctl_bounded_arr(tc_vars, nitems(tc_vars), name,
+		    namelen, oldp, oldlenp, newp, newlen));
 	}
 	/* NOTREACHED */
 }

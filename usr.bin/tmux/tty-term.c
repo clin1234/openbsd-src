@@ -1,4 +1,4 @@
-/* $OpenBSD: tty-term.c,v 1.85 2020/10/13 07:29:24 nicm Exp $ */
+/* $OpenBSD: tty-term.c,v 1.90 2021/06/10 07:45:43 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -58,6 +58,7 @@ static const struct tty_term_code_entry tty_term_codes[] = {
 	[TTYC_AX] = { TTYCODE_FLAG, "AX" },
 	[TTYC_BCE] = { TTYCODE_FLAG, "bce" },
 	[TTYC_BEL] = { TTYCODE_STRING, "bel" },
+	[TTYC_BIDI] = { TTYCODE_STRING, "Bidi" },
 	[TTYC_BLINK] = { TTYCODE_STRING, "blink" },
 	[TTYC_BOLD] = { TTYCODE_STRING, "bold" },
 	[TTYC_CIVIS] = { TTYCODE_STRING, "civis" },
@@ -247,6 +248,7 @@ static const struct tty_term_code_entry tty_term_codes[] = {
 	[TTYC_MS] = { TTYCODE_STRING, "Ms" },
 	[TTYC_OL] = { TTYCODE_STRING, "ol" },
 	[TTYC_OP] = { TTYCODE_STRING, "op" },
+	[TTYC_RECT] = { TTYCODE_STRING, "Rect" },
 	[TTYC_REV] = { TTYCODE_STRING, "rev" },
 	[TTYC_RGB] = { TTYCODE_FLAG, "RGB" },
 	[TTYC_RIN] = { TTYCODE_STRING, "rin" },
@@ -430,10 +432,11 @@ tty_term_apply_overrides(struct tty_term *term)
 	struct options_entry		*o;
 	struct options_array_item	*a;
 	union options_value		*ov;
-	const char			*s;
+	const char			*s, *acs;
 	size_t				 offset;
 	char				*first;
 
+	/* Update capabilities from the option. */
 	o = options_get_only(global_options, "terminal-overrides");
 	a = options_array_first(o);
 	while (a != NULL) {
@@ -446,10 +449,69 @@ tty_term_apply_overrides(struct tty_term *term)
 			tty_term_apply(term, s + offset, 0);
 		a = options_array_next(a);
 	}
+
+	/* Update the RGB flag if the terminal has RGB colours. */
+	if (tty_term_has(term, TTYC_SETRGBF) &&
+	    tty_term_has(term, TTYC_SETRGBB))
+		term->flags |= TERM_RGBCOLOURS;
+	else
+		term->flags &= ~TERM_RGBCOLOURS;
+	log_debug("RGBCOLOURS flag is %d", !!(term->flags & TERM_RGBCOLOURS));
+
+	/*
+	 * Set or clear the DECSLRM flag if the terminal has the margin
+	 * capabilities.
+	 */
+	if (tty_term_has(term, TTYC_CMG) && tty_term_has(term, TTYC_CLMG))
+		term->flags |= TERM_DECSLRM;
+	else
+		term->flags &= ~TERM_DECSLRM;
+	log_debug("DECSLRM flag is %d", !!(term->flags & TERM_DECSLRM));
+
+	/*
+	 * Set or clear the DECFRA flag if the terminal has the rectangle
+	 * capability.
+	 */
+	if (tty_term_has(term, TTYC_RECT))
+		term->flags |= TERM_DECFRA;
+	else
+		term->flags &= ~TERM_DECFRA;
+	log_debug("DECFRA flag is %d", !!(term->flags & TERM_DECFRA));
+
+	/*
+	 * Terminals without am (auto right margin) wrap at at $COLUMNS - 1
+	 * rather than $COLUMNS (the cursor can never be beyond $COLUMNS - 1).
+	 *
+	 * Terminals without xenl (eat newline glitch) ignore a newline beyond
+	 * the right edge of the terminal, but tmux doesn't care about this -
+	 * it always uses absolute only moves the cursor with a newline when
+	 * also sending a linefeed.
+	 *
+	 * This is irritating, most notably because it is painful to write to
+	 * the very bottom-right of the screen without scrolling.
+	 *
+	 * Flag the terminal here and apply some workarounds in other places to
+	 * do the best possible.
+	 */
+	if (!tty_term_flag(term, TTYC_AM))
+		term->flags |= TERM_NOAM;
+	else
+		term->flags &= ~TERM_NOAM;
+	log_debug("NOAM flag is %d", !!(term->flags & TERM_NOAM));
+
+	/* Generate ACS table. If none is present, use nearest ASCII. */
+	memset(term->acs, 0, sizeof term->acs);
+	if (tty_term_has(term, TTYC_ACSC))
+		acs = tty_term_string(term, TTYC_ACSC);
+	else
+		acs = "a#j+k+l+m+n+o-p-q-r-s-t+u+v+w+x|y<z>~.";
+	for (; acs[0] != '\0' && acs[1] != '\0'; acs += 2)
+		term->acs[(u_char) acs[0]][0] = acs[1];
 }
 
 struct tty_term *
-tty_term_create(struct tty *tty, char *name, int *feat, int fd, char **cause)
+tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
+    int *feat, char **cause)
 {
 	struct tty_term				*term;
 	const struct tty_term_code_entry	*ent;
@@ -457,10 +519,9 @@ tty_term_create(struct tty *tty, char *name, int *feat, int fd, char **cause)
 	struct options_entry			*o;
 	struct options_array_item		*a;
 	union options_value			*ov;
-	u_int					 i;
-	int		 			 n, error;
-	const char				*s, *acs;
-	size_t					 offset;
+	u_int					 i, j;
+	const char				*s, *value;
+	size_t					 offset, namelen;
 	char					*first;
 
 	log_debug("adding term %s", name);
@@ -471,57 +532,38 @@ tty_term_create(struct tty *tty, char *name, int *feat, int fd, char **cause)
 	term->codes = xcalloc(tty_term_ncodes(), sizeof *term->codes);
 	LIST_INSERT_HEAD(&tty_terms, term, entry);
 
-	/* Set up curses terminal. */
-	if (setupterm(name, fd, &error) != OK) {
-		switch (error) {
-		case 1:
-			xasprintf(cause, "can't use hardcopy terminal: %s",
-			    name);
-			break;
-		case 0:
-			xasprintf(cause, "missing or unsuitable terminal: %s",
-			    name);
-			break;
-		case -1:
-			xasprintf(cause, "can't find terminfo database");
-			break;
-		default:
-			xasprintf(cause, "unknown error");
-			break;
-		}
-		goto error;
-	}
-
 	/* Fill in codes. */
-	for (i = 0; i < tty_term_ncodes(); i++) {
-		ent = &tty_term_codes[i];
+	for (i = 0; i < ncaps; i++) {
+		namelen = strcspn(caps[i], "=");
+		if (namelen == 0)
+			continue;
+		value = caps[i] + namelen + 1;
 
-		code = &term->codes[i];
-		code->type = TTYCODE_NONE;
-		switch (ent->type) {
-		case TTYCODE_NONE:
-			break;
-		case TTYCODE_STRING:
-			s = tigetstr((char *) ent->name);
-			if (s == NULL || s == (char *) -1)
+		for (j = 0; j < tty_term_ncodes(); j++) {
+			ent = &tty_term_codes[j];
+			if (strncmp(ent->name, caps[i], namelen) != 0)
+				continue;
+			if (ent->name[namelen] != '\0')
+				continue;
+
+			code = &term->codes[j];
+			code->type = TTYCODE_NONE;
+			switch (ent->type) {
+			case TTYCODE_NONE:
 				break;
-			code->type = TTYCODE_STRING;
-			code->value.string = tty_term_strip(s);
-			break;
-		case TTYCODE_NUMBER:
-			n = tigetnum((char *) ent->name);
-			if (n == -1 || n == -2)
+			case TTYCODE_STRING:
+				code->type = TTYCODE_STRING;
+				code->value.string = tty_term_strip(value);
 				break;
-			code->type = TTYCODE_NUMBER;
-			code->value.number = n;
-			break;
-		case TTYCODE_FLAG:
-			n = tigetflag((char *) ent->name);
-			if (n == -1)
+			case TTYCODE_NUMBER:
+				code->type = TTYCODE_NUMBER;
+				code->value.number = atoi(value);
 				break;
-			code->type = TTYCODE_FLAG;
-			code->value.flag = n;
-			break;
+			case TTYCODE_FLAG:
+				code->type = TTYCODE_FLAG;
+				code->value.flag = (*value == '1');
+				break;
+			}
 		}
 	}
 
@@ -538,9 +580,6 @@ tty_term_create(struct tty *tty, char *name, int *feat, int fd, char **cause)
 			tty_add_features(feat, s + offset, ":");
 		a = options_array_next(a);
 	}
-
-	/* Delete curses data. */
-	del_curterm(cur_term);
 
 	/* Apply overrides so any capabilities used for features are changed. */
 	tty_term_apply_overrides(term);
@@ -578,40 +617,10 @@ tty_term_create(struct tty *tty, char *name, int *feat, int fd, char **cause)
 	    (!tty_term_has(term, TTYC_SETRGBF) ||
 	    !tty_term_has(term, TTYC_SETRGBB)))
 		tty_add_features(feat, "RGB", ",");
-	if (tty_term_has(term, TTYC_SETRGBF) &&
-	    tty_term_has(term, TTYC_SETRGBB))
-		term->flags |= TERM_RGBCOLOURS;
 
 	/* Apply the features and overrides again. */
-	tty_apply_features(term, *feat);
-	tty_term_apply_overrides(term);
-
-	/*
-	 * Terminals without am (auto right margin) wrap at at $COLUMNS - 1
-	 * rather than $COLUMNS (the cursor can never be beyond $COLUMNS - 1).
-	 *
-	 * Terminals without xenl (eat newline glitch) ignore a newline beyond
-	 * the right edge of the terminal, but tmux doesn't care about this -
-	 * it always uses absolute only moves the cursor with a newline when
-	 * also sending a linefeed.
-	 *
-	 * This is irritating, most notably because it is painful to write to
-	 * the very bottom-right of the screen without scrolling.
-	 *
-	 * Flag the terminal here and apply some workarounds in other places to
-	 * do the best possible.
-	 */
-	if (!tty_term_flag(term, TTYC_AM))
-		term->flags |= TERM_NOAM;
-
-	/* Generate ACS table. If none is present, use nearest ASCII. */
-	memset(term->acs, 0, sizeof term->acs);
-	if (tty_term_has(term, TTYC_ACSC))
-		acs = tty_term_string(term, TTYC_ACSC);
-	else
-		acs = "a#j+k+l+m+n+o-p-q-r-s-t+u+v+w+x|y<z>~.";
-	for (; acs[0] != '\0' && acs[1] != '\0'; acs += 2)
-		term->acs[(u_char) acs[0]][0] = acs[1];
+	if (tty_apply_features(term, *feat))
+		tty_term_apply_overrides(term);
 
 	/* Log the capabilities. */
 	for (i = 0; i < tty_term_ncodes(); i++)
@@ -640,6 +649,85 @@ tty_term_free(struct tty_term *term)
 	LIST_REMOVE(term, entry);
 	free(term->name);
 	free(term);
+}
+
+int
+tty_term_read_list(const char *name, int fd, char ***caps, u_int *ncaps,
+    char **cause)
+{
+	const struct tty_term_code_entry	*ent;
+	int					 error, n;
+	u_int					 i;
+	const char				*s;
+	char					 tmp[11];
+
+	if (setupterm(name, fd, &error) != OK) {
+		switch (error) {
+		case 1:
+			xasprintf(cause, "can't use hardcopy terminal: %s",
+			    name);
+			break;
+		case 0:
+			xasprintf(cause, "missing or unsuitable terminal: %s",
+			    name);
+			break;
+		case -1:
+			xasprintf(cause, "can't find terminfo database");
+			break;
+		default:
+			xasprintf(cause, "unknown error");
+			break;
+		}
+		return (-1);
+	}
+
+	*ncaps = 0;
+	*caps = NULL;
+
+	for (i = 0; i < tty_term_ncodes(); i++) {
+		ent = &tty_term_codes[i];
+		switch (ent->type) {
+		case TTYCODE_NONE:
+			continue;
+		case TTYCODE_STRING:
+			s = tigetstr((char *)ent->name);
+			if (s == NULL || s == (char *)-1)
+				continue;
+			break;
+		case TTYCODE_NUMBER:
+			n = tigetnum((char *)ent->name);
+			if (n == -1 || n == -2)
+				continue;
+			xsnprintf(tmp, sizeof tmp, "%d", n);
+			s = tmp;
+			break;
+		case TTYCODE_FLAG:
+			n = tigetflag((char *) ent->name);
+			if (n == -1)
+				continue;
+			if (n)
+				s = "1";
+			else
+				s = "0";
+			break;
+		}
+		*caps = xreallocarray(*caps, (*ncaps) + 1, sizeof **caps);
+		xasprintf(&(*caps)[*ncaps], "%s=%s", ent->name, s);
+		(*ncaps)++;
+	}
+
+	del_curterm(cur_term);
+	return (0);
+}
+
+void
+tty_term_free_list(char **caps, u_int ncaps)
+{
+	u_int	i;
+
+	for (i = 0; i < ncaps; i++)
+		free(caps[i]);
+	free(caps);
 }
 
 int

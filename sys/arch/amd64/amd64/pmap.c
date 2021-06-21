@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.140 2020/10/26 18:35:41 kettenis Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.145 2021/06/18 06:17:28 guenther Exp $	*/
 /*	$NetBSD: pmap.c,v 1.3 2003/05/08 18:13:13 thorpej Exp $	*/
 
 /*
@@ -312,7 +312,7 @@ void pmap_free_ptp(struct pmap *, struct vm_page *,
     vaddr_t, struct pg_to_free *);
 void pmap_freepage(struct pmap *, struct vm_page *, int, struct pg_to_free *);
 #ifdef MULTIPROCESSOR
-static int pmap_is_active(struct pmap *, int);
+static int pmap_is_active(struct pmap *, struct cpu_info *);
 #endif
 paddr_t pmap_map_ptes(struct pmap *);
 struct pv_entry *pmap_remove_pv(struct vm_page *, struct pmap *, vaddr_t);
@@ -341,7 +341,7 @@ void pmap_tlb_shoottlb(struct pmap *, int);
 #ifdef MULTIPROCESSOR
 void pmap_tlb_shootwait(void);
 #else
-#define	pmap_tlb_shootwait()
+#define	pmap_tlb_shootwait()		do { } while (0)
 #endif
 
 /*
@@ -353,7 +353,7 @@ void pmap_tlb_shootwait(void);
  *		of course the kernel is always loaded
  */
 
-static __inline int
+static inline int
 pmap_is_curpmap(struct pmap *pmap)
 {
 	return((pmap == pmap_kernel()) ||
@@ -365,15 +365,14 @@ pmap_is_curpmap(struct pmap *pmap)
  */
 
 #ifdef MULTIPROCESSOR
-static __inline int
-pmap_is_active(struct pmap *pmap, int cpu_id)
+static inline int
+pmap_is_active(struct pmap *pmap, struct cpu_info *ci)
 {
-	return (pmap == pmap_kernel() ||
-	    (pmap->pm_cpus & (1ULL << cpu_id)) != 0);
+	return pmap == pmap_kernel() || pmap == ci->ci_proc_pmap;
 }
 #endif
 
-static __inline u_int
+static inline u_int
 pmap_pte2flags(u_long pte)
 {
 	return (((pte & PG_U) ? PG_PMAP_REF : 0) |
@@ -672,7 +671,7 @@ pmap_bootstrap(paddr_t first_avail, paddr_t max_pa)
 
 	kpm = pmap_kernel();
 	for (i = 0; i < PTP_LEVELS - 1; i++) {
-		uvm_objinit(&kpm->pm_obj[i], NULL, 1);
+		uvm_obj_init(&kpm->pm_obj[i], NULL, 1);
 		kpm->pm_ptphint[i] = NULL;
 	}
 	memset(&kpm->pm_list, 0, sizeof(kpm->pm_list));  /* pm_list not used */
@@ -698,6 +697,14 @@ pmap_bootstrap(paddr_t first_avail, paddr_t max_pa)
 		CPUID_LEAF(0x7, 0, dummy, ebx, dummy, dummy);
 		if (ebx & SEFF0EBX_INVPCID) {
 			pmap_use_pcid = 1;
+			/*
+			 * We cannot use global mappings because
+			 * invpcid function 0 does not invalidate global
+			 * mappings. The hardware can cache kernel
+			 * mappings based on PCID_KERN, i.e. there is no
+			 * need for global mappings.
+			 */
+			pg_g_kern = 0;
 			lcr4( rcr4() | CR4_PCIDE );
 			cr3_pcid_proc = PCID_PROC;
 			cr3_pcid_temp = PCID_TEMP;
@@ -1300,12 +1307,11 @@ pmap_create(void)
 
 	/* init uvm_object */
 	for (i = 0; i < PTP_LEVELS - 1; i++) {
-		uvm_objinit(&pmap->pm_obj[i], NULL, 1);
+		uvm_obj_init(&pmap->pm_obj[i], NULL, 1);
 		pmap->pm_ptphint[i] = NULL;
 	}
 	pmap->pm_stats.wired_count = 0;
 	pmap->pm_stats.resident_count = 1;	/* count the PDP allocd below */
-	pmap->pm_cpus = 0;
 	pmap->pm_type = PMAP_TYPE_NORMAL;
 
 	/* allocate PDP */
@@ -1362,16 +1368,6 @@ pmap_destroy(struct pmap *pmap)
 	if (refs > 0) {
 		return;
 	}
-
-	/*
-	 * reference count is zero, free pmap resources and then free pmap.
-	 */
-
-#ifdef DIAGNOSTIC
-	if (__predict_false(pmap->pm_cpus != 0))
-		printf("%s: pmap %p cpus=0x%llx\n", __func__,
-		    (void *)pmap, pmap->pm_cpus);
-#endif
 
 	/*
 	 * remove it from global list of pmaps
@@ -1432,23 +1428,24 @@ pmap_activate(struct proc *p)
 	pcb->pcb_cr3 |= (pmap != pmap_kernel()) ? cr3_pcid_proc :
 	    (PCID_KERN | cr3_reuse_pcid);
 
-	if (p == curproc) {
-		lcr3(pcb->pcb_cr3);
+	if (p != curproc)
+		return;
+
+	if ((p->p_flag & P_SYSTEM) == 0) {
+		struct cpu_info *self = curcpu();
+
+		/* mark the pmap in use by this processor */
+		self->ci_proc_pmap = pmap;
 
 		/* in case we return to userspace without context switching */
 		if (cpu_meltdown) {
-			struct cpu_info *self = curcpu();
-
 			self->ci_kern_cr3 = pcb->pcb_cr3 | cr3_reuse_pcid;
 			self->ci_user_cr3 = pmap->pm_pdirpa_intel |
 			    cr3_pcid_proc_intel;
 		}
-
-		/*
-		 * mark the pmap in use by this processor.
-		 */
-		x86_atomic_setbits_u64(&pmap->pm_cpus, (1ULL << cpu_number()));
 	}
+
+	lcr3(pcb->pcb_cr3);
 }
 
 /*
@@ -1458,12 +1455,15 @@ pmap_activate(struct proc *p)
 void
 pmap_deactivate(struct proc *p)
 {
-	struct pmap *pmap = p->p_vmspace->vm_map.pmap;
+	if ((p->p_flag & P_SYSTEM) == 0) {
+		struct cpu_info *self = curcpu();
 
-	/*
-	 * mark the pmap no longer in use by this processor.
-	 */
-	x86_atomic_clearbits_u64(&pmap->pm_cpus, (1ULL << cpu_number()));
+		/*
+		 * mark the pmap no longer in use by this processor.
+		 */
+		KASSERT(self->ci_proc_pmap == p->p_vmspace->vm_map.pmap);
+		self->ci_proc_pmap = NULL;
+	}
 }
 
 /*
@@ -1626,17 +1626,18 @@ pmap_remove_ptes(struct pmap *pmap, struct vm_page *ptp, vaddr_t ptpva,
 		if ((opte & PG_PVLIST) == 0) {
 #ifdef DIAGNOSTIC
 			if (pg != NULL)
-				panic("%s: managed page without PG_PVLIST "
-				      "for 0x%lx", __func__, startva);
+				panic("%s: managed page without PG_PVLIST: "
+				    "va 0x%lx, opte 0x%llx", __func__,
+				    startva, opte);
 #endif
 			continue;
 		}
 
 #ifdef DIAGNOSTIC
 		if (pg == NULL)
-			panic("%s: unmanaged page marked PG_PVLIST, "
-			      "va = 0x%lx, pa = 0x%lx", __func__,
-			      startva, (u_long)(opte & PG_FRAME));
+			panic("%s: unmanaged page marked PG_PVLIST: "
+			    "va 0x%lx, opte 0x%llx", __func__,
+			    startva, opte);
 #endif
 
 		/* sync R/M bits */
@@ -1692,16 +1693,16 @@ pmap_remove_pte(struct pmap *pmap, struct vm_page *ptp, pt_entry_t *pte,
 	if ((opte & PG_PVLIST) == 0) {
 #ifdef DIAGNOSTIC
 		if (pg != NULL)
-			panic("%s: managed page without PG_PVLIST for 0x%lx",
-			      __func__, va);
+			panic("%s: managed page without PG_PVLIST: "
+			    "va 0x%lx, opte 0x%llx", __func__, va, opte);
 #endif
 		return 1;
 	}
 
 #ifdef DIAGNOSTIC
 	if (pg == NULL)
-		panic("%s: unmanaged page marked PG_PVLIST, va = 0x%lx, "
-		      "pa = 0x%lx", __func__, va, (u_long)(opte & PG_FRAME));
+		panic("%s: unmanaged page marked PG_PVLIST: "
+		    "va 0x%lx, opte 0x%llx", __func__, va, opte);
 #endif
 
 	/* sync R/M bits */
@@ -2724,18 +2725,19 @@ pmap_enter(struct pmap *pmap, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 				pg = PHYS_TO_VM_PAGE(pa);
 #ifdef DIAGNOSTIC
 				if (pg == NULL)
-					panic("%s: same pa PG_PVLIST "
-					      "mapping with unmanaged page "
-					      "pa = 0x%lx (0x%lx)", __func__,
-					      pa, atop(pa));
+					panic("%s: same pa, PG_PVLIST "
+					    "mapping with unmanaged page: "
+					    "va 0x%lx, opte 0x%llx, pa 0x%lx",
+					    __func__, va, opte, pa);
 #endif
 				pmap_sync_flags_pte(pg, opte);
 			} else {
 #ifdef DIAGNOSTIC
 				if (PHYS_TO_VM_PAGE(pa) != NULL)
-					panic("%s: same pa, managed "
-					    "page, no PG_VLIST pa: 0x%lx",
-					    __func__, pa);
+					panic("%s: same pa, no PG_PVLIST "
+					    "mapping with managed page: "
+					    "va 0x%lx, opte 0x%llx, pa 0x%lx",
+					    __func__, va, opte, pa);
 #endif
 			}
 			goto enter_now;
@@ -2755,8 +2757,8 @@ pmap_enter(struct pmap *pmap, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 #ifdef DIAGNOSTIC
 			if (pg == NULL)
 				panic("%s: PG_PVLIST mapping with unmanaged "
-				      "page pa = 0x%lx (0x%lx)",
-				      __func__, pa, atop(pa));
+				    "page: va 0x%lx, opte 0x%llx, pa 0x%lx",
+				    __func__, va, opte, pa);
 #endif
 			pmap_sync_flags_pte(pg, opte);
 			opve = pmap_remove_pv(pg, pmap, va);
@@ -3120,6 +3122,32 @@ volatile vaddr_t tlb_shoot_addr1 __attribute__((section(".kudata")));
 volatile vaddr_t tlb_shoot_addr2 __attribute__((section(".kudata")));
 volatile int tlb_shoot_first_pcid __attribute__((section(".kudata")));
 
+
+/* Obtain the "lock" for TLB shooting */
+static inline int
+pmap_start_tlb_shoot(long wait, const char *func)
+{
+	int s = splvm();
+
+	while (atomic_cas_ulong(&tlb_shoot_wait, 0, wait) != 0) {
+#ifdef MP_LOCKDEBUG
+		int nticks = __mp_lock_spinout;
+#endif
+		while (tlb_shoot_wait != 0) {
+			CPU_BUSY_CYCLE();
+#ifdef MP_LOCKDEBUG
+			if (--nticks <= 0) {
+				db_printf("%s: spun out", func);
+				db_enter();
+				nticks = __mp_lock_spinout;
+			}
+#endif
+		}
+	}
+
+	return s;
+}
+
 void
 pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 {
@@ -3132,31 +3160,15 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self || !(ci->ci_flags & CPUF_RUNNING))
 			continue;
-		if (!is_kva && !pmap_is_active(pm, ci->ci_cpuid))
+		if (!is_kva && !pmap_is_active(pm, ci))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
 		wait++;
 	}
 
 	if (wait > 0) {
-		int s = splvm();
+		int s = pmap_start_tlb_shoot(wait, __func__);
 
-		while (atomic_cas_ulong(&tlb_shoot_wait, 0, wait) != 0) {
-#ifdef MP_LOCKDEBUG
-			int nticks = __mp_lock_spinout;
-#endif
-			while (tlb_shoot_wait != 0) {
-				CPU_BUSY_CYCLE();
-#ifdef MP_LOCKDEBUG
-
-				if (--nticks <= 0) {
-					db_printf("%s: spun out", __func__);
-					db_enter();
-					nticks = __mp_lock_spinout;
-				}
-#endif
-			}
-		}
 		tlb_shoot_first_pcid = is_kva ? PCID_KERN : PCID_PROC;
 		tlb_shoot_addr1 = va;
 		CPU_INFO_FOREACH(cii, ci) {
@@ -3194,31 +3206,15 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self || !(ci->ci_flags & CPUF_RUNNING))
 			continue;
-		if (!is_kva && !pmap_is_active(pm, ci->ci_cpuid))
+		if (!is_kva && !pmap_is_active(pm, ci))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
 		wait++;
 	}
 
 	if (wait > 0) {
-		int s = splvm();
+		int s = pmap_start_tlb_shoot(wait, __func__);
 
-		while (atomic_cas_ulong(&tlb_shoot_wait, 0, wait) != 0) {
-#ifdef MP_LOCKDEBUG
-			int nticks = __mp_lock_spinout;
-#endif
-			while (tlb_shoot_wait != 0) {
-				CPU_BUSY_CYCLE();
-#ifdef MP_LOCKDEBUG
-
-				if (--nticks <= 0) {
-					db_printf("%s: spun out", __func__);
-					db_enter();
-					nticks = __mp_lock_spinout;
-				}
-#endif
-			}
-		}
 		tlb_shoot_first_pcid = is_kva ? PCID_KERN : PCID_PROC;
 		tlb_shoot_addr1 = sva;
 		tlb_shoot_addr2 = eva;
@@ -3265,7 +3261,7 @@ pmap_tlb_shoottlb(struct pmap *pm, int shootself)
 	KASSERT(pm != pmap_kernel());
 
 	CPU_INFO_FOREACH(cii, ci) {
-		if (ci == self || !pmap_is_active(pm, ci->ci_cpuid) ||
+		if (ci == self || !pmap_is_active(pm, ci) ||
 		    !(ci->ci_flags & CPUF_RUNNING))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
@@ -3273,24 +3269,7 @@ pmap_tlb_shoottlb(struct pmap *pm, int shootself)
 	}
 
 	if (wait) {
-		int s = splvm();
-
-		while (atomic_cas_ulong(&tlb_shoot_wait, 0, wait) != 0) {
-#ifdef MP_LOCKDEBUG
-			int nticks = __mp_lock_spinout;
-#endif
-			while (tlb_shoot_wait != 0) {
-				CPU_BUSY_CYCLE();
-#ifdef MP_LOCKDEBUG
-
-				if (--nticks <= 0) {
-					db_printf("%s: spun out", __func__);
-					db_enter();
-					nticks = __mp_lock_spinout;
-				}
-#endif
-			}
-		}
+		int s = pmap_start_tlb_shoot(wait, __func__);
 
 		CPU_INFO_FOREACH(cii, ci) {
 			if ((mask & (1ULL << ci->ci_cpuid)) == 0)

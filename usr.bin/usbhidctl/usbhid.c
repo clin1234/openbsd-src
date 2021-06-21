@@ -1,4 +1,4 @@
-/*	$OpenBSD: usbhid.c,v 1.15 2019/06/28 13:35:05 deraadt Exp $	*/
+/*	$OpenBSD: usbhid.c,v 1.17 2021/05/31 18:30:11 jcs Exp $	*/
 /*      $NetBSD: usbhid.c,v 1.22 2002/02/20 20:30:42 christos Exp $ */
 
 /*
@@ -394,13 +394,7 @@ allocreport(struct Sreport *report, report_desc_t rd, int repindex)
 	report->size = reptsize;
 
 	if (report->size > 0) {
-		/*
-		 * Allocate a buffer with enough space for the
-		 * report in the variable-sized data field.
-		 */
-		report->buffer = malloc(sizeof(*report->buffer) -
-					sizeof(report->buffer->ucr_data) +
-					report->size);
+		report->buffer = malloc(sizeof(*report->buffer));
 		if (report->buffer == NULL)
 			err(1, NULL);
 	} else
@@ -761,6 +755,7 @@ usage(void)
 	fprintf(stderr,
 	    "       %s -f device [-t table] -w name=value ...\n",
 	    __progname);
+	fprintf(stderr, "       %s -f device -R\n", __progname);
 	exit(1);
 }
 
@@ -770,16 +765,18 @@ main(int argc, char **argv)
 	char const *dev;
 	char const *table;
 	size_t varnum;
-	int aflag, lflag, nflag, rflag, wflag;
-	int ch, hidfd;
+	uint32_t repsize;
+	int aflag, lflag, nflag, rflag, Rflag, wflag;
+	int ch, hidfd, x;
+	uint8_t *repdata;
 	report_desc_t repdesc;
 	char devnamebuf[PATH_MAX];
 	struct Susbvar variables[128];
 
-	wflag = aflag = nflag = verbose = rflag = lflag = 0;
+	wflag = aflag = nflag = verbose = rflag = Rflag = lflag = 0;
 	dev = NULL;
 	table = NULL;
-	while ((ch = getopt(argc, argv, "?af:lnrt:vw")) != -1) {
+	while ((ch = getopt(argc, argv, "?af:lnRrt:vw")) != -1) {
 		switch (ch) {
 		case 'a':
 			aflag = 1;
@@ -795,6 +792,9 @@ main(int argc, char **argv)
 			break;
 		case 'r':
 			rflag = 1;
+			break;
+		case 'R':
+			Rflag = 1;
 			break;
 		case 't':
 			table = optarg;
@@ -813,7 +813,8 @@ main(int argc, char **argv)
 	}
 	argc -= optind;
 	argv += optind;
-	if (dev == NULL || (lflag && (wflag || rflag))) {
+	if (dev == NULL || (lflag && (wflag || rflag || Rflag)) ||
+	    (rflag && Rflag)) {
 		/*
 		 * No device specified, or attempting to loop and set
 		 * or dump report at the same time
@@ -948,6 +949,14 @@ main(int argc, char **argv)
 	if (repdesc == 0)
 		errx(1, "USB_GET_REPORT_DESC");
 
+	if (Rflag) {
+		hid_get_report_desc_data(repdesc, &repdata, &repsize);
+
+		for (x = 0; x < repsize; x++)
+			printf("%s0x%02x", x > 0 ? " " : "", repdata[x]);
+		printf("\n");
+	}
+
 	if (lflag) {
 		devloop(hidfd, repdesc, variables, varnum);
 		/* NOTREACHED */
@@ -957,10 +966,11 @@ main(int argc, char **argv)
 		/* Report mode header */
 		printf("Report descriptor:\n");
 
-	devshow(hidfd, repdesc, variables, varnum,
-		1 << hid_input |
-		1 << hid_output |
-		1 << hid_feature);
+	if (!Rflag)
+		devshow(hidfd, repdesc, variables, varnum,
+			1 << hid_input |
+			1 << hid_output |
+			1 << hid_feature);
 
 	if (rflag) {
 		/* Report mode trailer */

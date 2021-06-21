@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_sess.c,v 1.101 2020/10/11 02:22:27 jsing Exp $ */
+/* $OpenBSD: ssl_sess.c,v 1.104 2021/05/16 08:24:21 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -136,6 +136,7 @@
  */
 
 #include <openssl/lhash.h>
+#include <openssl/opensslconf.h>
 
 #ifndef OPENSSL_NO_ENGINE
 #include <openssl/engine.h>
@@ -345,6 +346,7 @@ ssl_get_new_session(SSL *s, int session)
 		case TLS1_1_VERSION:
 		case TLS1_2_VERSION:
 		case DTLS1_VERSION:
+		case DTLS1_2_VERSION:
 			ss->ssl_version = s->version;
 			ss->session_id_length = SSL3_SSL_SESSION_ID_LENGTH;
 			break;
@@ -870,6 +872,12 @@ int
 SSL_SESSION_get_protocol_version(const SSL_SESSION *s)
 {
 	return s->ssl_version;
+}
+
+const SSL_CIPHER *
+SSL_SESSION_get0_cipher(const SSL_SESSION *s)
+{
+	return s->cipher;
 }
 
 X509 *

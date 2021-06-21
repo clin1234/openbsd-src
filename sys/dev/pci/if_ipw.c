@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ipw.c,v 1.127 2020/07/10 13:22:20 patrick Exp $	*/
+/*	$OpenBSD: if_ipw.c,v 1.129 2021/03/28 18:02:32 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2004-2008
@@ -679,6 +679,10 @@ int
 ipw_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 {
 	struct ipw_softc *sc = ic->ic_softc;
+	struct ifnet *ifp = &ic->ic_if;
+
+	if (LINK_STATE_IS_UP(ifp->if_link_state))
+		ieee80211_set_link_state(ic, LINK_STATE_DOWN);
 
 	switch (nstate) {
 	case IEEE80211_S_SCAN:
@@ -690,6 +694,14 @@ ipw_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 		break;
 
 	case IEEE80211_S_RUN:
+		if (!(ic->ic_flags & IEEE80211_F_RSNON)) {
+			/*
+			 * NB: When RSN is enabled, we defer setting
+			 * the link up until the port is valid.
+			 */
+			ieee80211_set_link_state(ic, LINK_STATE_UP);
+		}
+		break;
 	case IEEE80211_S_INIT:
 	case IEEE80211_S_ASSOC:
 		/* nothing to do */
@@ -1780,6 +1792,12 @@ ipw_auth_and_assoc(void *arg1)
 	error = ipw_cmd(sc, IPW_CMD_ENABLE, NULL, 0);
 	if (error != 0)
 		goto fail;
+
+	/*
+	 * net80211 won't see the AP's auth response. Move to ASSOC state
+	 * in order to make net80211 accept the AP's assoc response.
+	 */
+	ic->ic_newstate(ic, IEEE80211_S_ASSOC, -1);
 
 	return;
 fail:

@@ -1,4 +1,4 @@
-/* $OpenBSD: prcm.c,v 1.14 2020/04/05 13:11:13 kettenis Exp $ */
+/* $OpenBSD: prcm.c,v 1.17 2021/05/16 15:10:19 deraadt Exp $ */
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  *
@@ -50,13 +50,9 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/time.h>
 #include <sys/device.h>
 
 #include <machine/bus.h>
-#include <machine/intr.h>
-#include <arm/cpufunc.h>
 #include <armv7/armv7/armv7var.h>
 #include <armv7/omap/prcmvar.h>
 
@@ -75,7 +71,7 @@ uint32_t prcm_imask_addr[PRCM_REG_MAX];
 uint32_t prcm_fmask_addr[PRCM_REG_MAX];
 
 #define SYS_CLK			13    /* SYS_CLK speed in MHz */
-#define PRCM_AM335X_MASTER_OSC	24000 /* KHz */
+#define PRCM_AM335X_MASTER_OSC	24000 /* kHz */
 
 
 struct prcm_softc {
@@ -336,7 +332,7 @@ prcm_v3_bit(int mod)
 	case PRCM_I2C2:
 		return PRCM_CLK_EN_I2C3;
 	default:
-		panic("%s: module not found\n", __func__);
+		panic("%s: module not found", __func__);
 	}
 }
 
@@ -383,7 +379,7 @@ prcm_am335x_clkctrl(int mod)
 	case PRCM_RNG:
 		return PRCM_AM335X_RNG_CLKCTRL;
 	default:
-		panic("%s: module not found\n", __func__);
+		panic("%s: module not found", __func__);
 	}
 }
 
@@ -479,7 +475,7 @@ prcm_v4_enablemodule(struct prcm_softc *sc, int mod)
 			/* XXX */
 			break;
 	default:
-		panic("%s: module not found\n", __func__);
+		panic("%s: module not found", __func__);
 	}
 }
 

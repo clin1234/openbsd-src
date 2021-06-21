@@ -1,5 +1,5 @@
 /*	$NetBSD: loadfile.h,v 1.1 1999/04/28 09:08:50 christos Exp $	 */
-/*	$OpenBSD: loadfile.h,v 1.12 2019/05/16 21:16:04 claudio Exp $	 */
+/*	$OpenBSD: loadfile.h,v 1.15 2021/06/16 16:55:02 dv Exp $	 */
 
 /*-
  * Copyright (c) 1998 The NetBSD Foundation, Inc.
@@ -29,6 +29,13 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+
+#include <zlib.h>
+
+#include "vmd.h"
+
+#ifndef _LOADFILE_H_
+#define _LOADFILE_H_
 
 /*
  * Array indices in the u_long position array
@@ -73,8 +80,8 @@
 #define PML2_PAGE 0x13000
 #define NPTE_PG (PAGE_SIZE / sizeof(uint64_t))
 
-int loadfile_elf(FILE *, struct vm_create_params *,
-    struct vcpu_reg_state *, uint32_t, uint32_t, unsigned int);
+int loadfile_elf(gzFile, struct vm_create_params *, struct vcpu_reg_state *);
 
-size_t mread(FILE *, paddr_t, size_t);
+size_t mread(gzFile, paddr_t, size_t);
 
+#endif /* _LOADFILE_H_ */

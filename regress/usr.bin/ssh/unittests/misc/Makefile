@@ -1,7 +1,12 @@
-#	$OpenBSD: Makefile,v 1.3 2020/10/16 14:02:24 djm Exp $
+#	$OpenBSD: Makefile,v 1.7 2021/05/21 03:48:07 djm Exp $
 
 PROG=test_misc
 SRCS=tests.c
+SRCS+=	test_convtime.c
+SRCS+=	test_expand.c
+SRCS+=	test_parse.c
+SRCS+=	test_argv.c
+SRCS+=	test_strdelim.c
 
 # From usr.bin/ssh/Makefile.inc
 SRCS+=	sshbuf.c
@@ -12,6 +17,7 @@ SRCS+=	log.c
 SRCS+=	xmalloc.c
 SRCS+=	misc.c
 SRCS+=	match.c
+SRCS+=	addr.c
 SRCS+=	addrmatch.c
 
 # From usr.bin/ssh/sshd/Makefile

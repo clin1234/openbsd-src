@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.39 2020/08/05 04:23:30 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.43 2021/02/13 18:48:23 semarie Exp $
 
 FS=		install${OSrev}.img
 FSSIZE=		1359872
@@ -25,7 +25,7 @@ TEMPLATE=	${.CURDIR}/template
 
 all: ${FS} ${CDROM}
 
-${FS}: ${BASE} ${XBASE} bsd.gz
+${FS}: ${BASE} ${XBASE} bsd.rd
 	dd if=/dev/zero of=${FS} bs=512 count=${TOTALSIZE}
 	vnconfig -v ${FS} > vnd
 	fdisk -yi -l ${FSSIZE} -b ${MSDOSSIZE} -f ${DESTDIR}/usr/mdec/mbr `cat vnd`
@@ -41,15 +41,13 @@ ${FS}: ${BASE} ${XBASE} bsd.gz
 .endif
 	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
-	cp ${DESTDIR}/usr/mdec/boot ${MOUNT_POINT}/boot
-	strip ${MOUNT_POINT}/boot
-	strip -R .comment -R .SUNW_ctf ${MOUNT_POINT}/boot
+	objcopy -S -R .comment ${DESTDIR}/usr/mdec/boot ${MOUNT_POINT}/boot
 	installboot -v -r ${MOUNT_POINT} `cat vnd` \
 	    ${DESTDIR}/usr/mdec/biosboot ${MOUNT_POINT}/boot
 	mkdir -p ${MOUNT_POINT}/${OSREV}/${MACHINE}
 	mkdir -p ${MOUNT_POINT}/etc
 	echo "set image /${OSREV}/${MACHINE}/bsd.rd" > ${MOUNT_POINT}/etc/boot.conf
-	install -c -m 555 -o root -g wheel bsd.gz ${MOUNT_POINT}/bsd
+	install -c -m 555 -o root -g wheel bsd.rd ${MOUNT_POINT}/bsd
 	ln ${MOUNT_POINT}/bsd ${MOUNT_POINT}/bsd.rd
 
 	cp -p ${BASE} ${MOUNT_POINT}/${OSREV}/${MACHINE}
@@ -93,12 +91,6 @@ install:
 clean cleandir:
 	rm -f ${CDROM} ${FS}
 	rm -rf cd-dir
-
-bsd.gz: bsd.rd
-	cp bsd.rd bsd.strip
-	strip bsd.strip
-	strip -R .comment -R .SUNW_ctf bsd.strip
-	gzip -9cn bsd.strip > bsd.gz
 
 bsd.rd: ${BSDRD}
 	cp ${BSDRD} bsd.rd

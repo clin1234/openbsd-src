@@ -1,4 +1,4 @@
-.\"	$OpenBSD: smtp.1,v 1.7 2018/07/04 08:23:43 jmc Exp $
+.\"	$OpenBSD: smtp.1,v 1.14 2021/05/23 16:12:56 eric Exp $
 .\"
 .\" Copyright (c) 2018, Eric Faurot <eric@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: July 4 2018 $
+.Dd $Mdocdate: May 23 2021 $
 .Dt SMTP 1
 .Os
 .Sh NAME
@@ -23,9 +23,11 @@
 .Sh SYNOPSIS
 .Nm
 .Op Fl Chnv
+.Op Fl a Ar authfile
 .Op Fl F Ar from
 .Op Fl H Ar helo
 .Op Fl s Ar server
+.Op Fl T Ar params
 .Op Ar recipient ...
 .Sh DESCRIPTION
 The
@@ -42,15 +44,26 @@ The content is sent unaltered as mail data.
 .Pp
 The options are as follows:
 .Bl -tag -width Ds
+.It Fl a Ar authfile
+Perform a login before sending the message.
+The username and password are read from
+.Ar authfile
+and need to be on the first and second line respectively.
+This option requires a TLS or STARTTLS
+.Ar server .
 .It Fl C
 Do not require server certificate to be valid.
+This flag is deprecated.
+Use
+.Dq Fl T Cm noverify
+instead.
 .It Fl F Ar from
 Set the return-path (MAIL FROM) for the SMTP transaction.
 Default to the current username.
 .It Fl H Ar helo
 Define the hostname to advertise (HELO) when establishing the SMTP session.
 .It Fl h
-Display version and usage.
+Display usage.
 .It Fl n
 Do not actually execute a transaction,
 just try to establish an SMTP session and quit.
@@ -83,6 +96,39 @@ SMTP session with forced TLS on connection.
 .Pp
 Defaults to
 .Dq smtp://localhost:25 .
+.It Fl T Ar params
+Set specific parameters for TLS sessions.
+The
+.Ar params
+string is a comma or space separated list of options.
+The available options are:
+.Bl -tag -width Ds
+.It Cm cafile Ns = Ns Ar filename
+Use
+.Ar filename
+as root certificates file instead of the system default.
+.It Cm ciphers Ns = Ns Ar value
+Specify the allowed ciphers.
+Refer to
+.Xr tls_config_set_ciphers 3
+for
+.Ar value .
+.It Cm nosni
+Disable Server Name Indication (SNI).
+.It Cm noverify
+Do not require server certificate to be valid.
+.It Cm protocols Ns = Ns Ar value
+Specify the protocols to use.
+Refer to
+.Xr tls_config_parse_protocols 3
+for
+.Ar value .
+.It Cm servername Ns = Ns Ar value
+Use
+.Ar value
+for Server Name Indication (SNI).
+Defaults to the specified server hostname.
+.El
 .It Fl v
 Be more verbose.
 This option can be specified multiple times.

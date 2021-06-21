@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_pool.c,v 1.230 2020/01/24 06:31:17 cheloha Exp $	*/
+/*	$OpenBSD: subr_pool.c,v 1.234 2021/06/15 05:24:46 dlg Exp $	*/
 /*	$NetBSD: subr_pool.c,v 1.61 2001/09/26 07:14:56 chs Exp $	*/
 
 /*-
@@ -41,8 +41,10 @@
 #include <sys/syslog.h>
 #include <sys/sysctl.h>
 #include <sys/task.h>
+#include <sys/time.h>
 #include <sys/timeout.h>
 #include <sys/percpu.h>
+#include <sys/tracepoint.h>
 
 #include <uvm/uvm_extern.h>
 
@@ -148,7 +150,7 @@ struct pool_page_header {
 	caddr_t			ph_page;	/* this page's address */
 	caddr_t			ph_colored;	/* page's colored address */
 	unsigned long		ph_magic;
-	int			ph_tick;
+	uint64_t		ph_timestamp;
 };
 #define POOL_MAGICBIT (1 << 3) /* keep away from perturbed low bits */
 #define POOL_PHPOISON(ph) ISSET((ph)->ph_magic, POOL_MAGICBIT)
@@ -266,8 +268,9 @@ void	pool_gc_sched(void *);
 struct timeout pool_gc_tick = TIMEOUT_INITIALIZER(pool_gc_sched, NULL);
 void	pool_gc_pages(void *);
 struct task pool_gc_task = TASK_INITIALIZER(pool_gc_pages, NULL);
-int pool_wait_free = 1;
-int pool_wait_gc = 8;
+
+#define POOL_WAIT_FREE	SEC_TO_NSEC(1)
+#define POOL_WAIT_GC	SEC_TO_NSEC(8)
 
 RBT_PROTOTYPE(phtree, pool_page_header, ph_node, phtree_compare);
 
@@ -457,7 +460,7 @@ pool_init(struct pool *pp, size_t size, u_int align, int ipl, int flags,
 		pool_init(&phpool, sizeof(struct pool_page_header), 0,
 		    IPL_HIGH, 0, "phpool", NULL);
 
-		/* make sure phpool wont "recurse" */
+		/* make sure phpool won't "recurse" */
 		KASSERT(POOL_INPGHDR(&phpool));
 	}
 
@@ -613,6 +616,8 @@ good:
 #endif
 	if (ISSET(flags, PR_ZERO))
 		memset(v, 0, pp->pr_size);
+
+	TRACEPOINT(uvm, pool_get, pp, v, flags);
 
 	return (v);
 
@@ -780,6 +785,8 @@ pool_put(struct pool *pp, void *v)
 		panic("%s: NULL item", __func__);
 #endif
 
+	TRACEPOINT(uvm, pool_put, pp, v);
+
 #ifdef MULTIPROCESSOR
 	if (pp->pr_cache != NULL && TAILQ_EMPTY(&pp->pr_requests)) {
 		pool_cache_put(pp, v);
@@ -797,7 +804,7 @@ pool_put(struct pool *pp, void *v)
 	/* is it time to free a page? */
 	if (pp->pr_nidle > pp->pr_maxpages &&
 	    (ph = TAILQ_FIRST(&pp->pr_emptypages)) != NULL &&
-	    (ticks - ph->ph_tick) > (hz * pool_wait_free)) {
+	    getnsecuptime() - ph->ph_timestamp > POOL_WAIT_FREE) {
 		freeph = ph;
 		pool_p_remove(pp, freeph);
 	}
@@ -864,7 +871,7 @@ pool_do_put(struct pool *pp, void *v)
 		 */
 		pp->pr_nidle++;
 
-		ph->ph_tick = ticks;
+		ph->ph_timestamp = getnsecuptime();
 		TAILQ_REMOVE(&pp->pr_partpages, ph, ph_entry);
 		TAILQ_INSERT_TAIL(&pp->pr_emptypages, ph, ph_entry);
 		pool_update_curpage(pp);
@@ -1566,7 +1573,7 @@ pool_gc_pages(void *null)
 		/* is it time to free a page? */
 		if (pp->pr_nidle > pp->pr_minpages &&
 		    (ph = TAILQ_FIRST(&pp->pr_emptypages)) != NULL &&
-		    (ticks - ph->ph_tick) > (hz * pool_wait_gc)) {
+		    getnsecuptime() - ph->ph_timestamp > POOL_WAIT_GC) {
 			freeph = ph;
 			pool_p_remove(pp, freeph);
 		} else
@@ -1598,7 +1605,7 @@ pool_allocator_alloc(struct pool *pp, int flags, int *slowdown)
 	if (v != NULL && POOL_INPGHDR(pp)) {
 		vaddr_t addr = (vaddr_t)v;
 		if ((addr & pp->pr_pgmask) != addr) {
-			panic("%s: %s page address %p isnt aligned to %u",
+			panic("%s: %s page address %p isn't aligned to %u",
 			    __func__, pp->pr_wchan, v, pp->pr_pgsize);
 		}
 	}
@@ -1726,7 +1733,7 @@ pool_cache_init(struct pool *pp)
 	arc4random_buf(pp->pr_cache_magic, sizeof(pp->pr_cache_magic));
 	TAILQ_INIT(&pp->pr_cache_lists);
 	pp->pr_cache_nitems = 0;
-	pp->pr_cache_tick = ticks;
+	pp->pr_cache_timestamp = getnsecuptime();
 	pp->pr_cache_items = 8;
 	pp->pr_cache_contention = 0;
 	pp->pr_cache_ngc = 0;
@@ -1829,7 +1836,7 @@ pool_cache_list_free(struct pool *pp, struct pool_cache *pc,
 {
 	pool_list_enter(pp);
 	if (TAILQ_EMPTY(&pp->pr_cache_lists))
-		pp->pr_cache_tick = ticks;
+		pp->pr_cache_timestamp = getnsecuptime();
 
 	pp->pr_cache_nitems += POOL_CACHE_ITEM_NITEMS(ci);
 	TAILQ_INSERT_TAIL(&pp->pr_cache_lists, ci, ci_nextl);
@@ -2006,7 +2013,7 @@ pool_cache_gc(struct pool *pp)
 {
 	unsigned int contention, delta;
 
-	if ((ticks - pp->pr_cache_tick) > (hz * pool_wait_gc) &&
+	if (getnsecuptime() - pp->pr_cache_timestamp > POOL_WAIT_GC &&
 	    !TAILQ_EMPTY(&pp->pr_cache_lists) &&
 	    pl_enter_try(pp, &pp->pr_cache_lock)) {
 		struct pool_cache_item *pl = NULL;
@@ -2015,7 +2022,7 @@ pool_cache_gc(struct pool *pp)
 		if (pl != NULL) {
 			TAILQ_REMOVE(&pp->pr_cache_lists, pl, ci_nextl);
 			pp->pr_cache_nitems -= POOL_CACHE_ITEM_NITEMS(pl);
-			pp->pr_cache_tick = ticks;
+			pp->pr_cache_timestamp = getnsecuptime();
 
 			pp->pr_cache_ngc++;
 		}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.6 2019/03/11 22:53:29 pamela Exp $	*/
+/*	$OpenBSD: control.c,v 1.9 2021/03/20 16:46:03 kn Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -15,6 +15,7 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+#ifndef SMALL
 #include <sys/types.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
@@ -29,7 +30,6 @@
 #include <errno.h>
 #include <event.h>
 #include <imsg.h>
-#include <md5.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -41,9 +41,22 @@
 
 #define	CONTROL_BACKLOG	5
 
+struct {
+	struct event	ev;
+	struct event	evt;
+	int		fd;
+} control_state = {.fd = -1};
+
+struct ctl_conn {
+	TAILQ_ENTRY(ctl_conn)	entry;
+	struct imsgev		iev;
+};
+
 struct ctl_conn	*control_connbyfd(int);
 struct ctl_conn	*control_connbypid(pid_t);
 void		 control_close(int);
+
+TAILQ_HEAD(ctl_conns, ctl_conn) ctl_conns = TAILQ_HEAD_INITIALIZER(ctl_conns);
 
 int
 control_init(char *path)
@@ -89,9 +102,12 @@ control_init(char *path)
 }
 
 int
-control_listen(void)
+control_listen(int fd)
 {
+	if (control_state.fd != -1)
+		fatalx("%s: received unexpected controlsock", __func__);
 
+	control_state.fd = fd;
 	if (listen(control_state.fd, CONTROL_BACKLOG) == -1) {
 		log_warn("%s: listen", __func__);
 		return (-1);
@@ -287,3 +303,4 @@ control_imsg_relay(struct imsg *imsg)
 	return (imsg_compose_event(&c->iev, imsg->hdr.type, 0, imsg->hdr.pid,
 	    -1, imsg->data, IMSG_DATA_SIZE(*imsg)));
 }
+#endif	/* SMALL */

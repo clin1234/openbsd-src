@@ -1,4 +1,4 @@
-/*	$OpenBSD: azalia_codec.c,v 1.182 2020/10/25 02:54:38 jsg Exp $	*/
+/*	$OpenBSD: azalia_codec.c,v 1.186 2021/06/11 15:50:43 jsg Exp $	*/
 /*	$NetBSD: azalia_codec.c,v 1.8 2006/05/10 11:17:27 kent Exp $	*/
 
 /*-
@@ -162,9 +162,18 @@ azalia_codec_init_vtbl(codec_t *this)
 		break;
 	case 0x10ec0285:
 		this->name = "Realtek ALC285";
-		if (this->subid == 0x229217aa)		 /* Thinkpad X1 Carbon 7 */
+		if (this->subid == 0x229217aa) {
+			/* Thinkpad X1 Carbon 7 */
 			this->qrks |= AZ_QRK_ROUTE_SPKR2_DAC |
 			    AZ_QRK_WID_CLOSE_PCBEEP;
+		 } else if (this->subid == 0x22c017aa) {
+			/* Thinkpad X1 Extreme 3 */
+			this->qrks |= AZ_QRK_DOLBY_ATMOS |
+			    AZ_QRK_ROUTE_SPKR2_DAC;
+		}
+		break;
+	case 0x10ec0287:
+		this->name = "Realtek ALC287";
 		break;
 	case 0x10ec0292:
 		this->name = "Realtek ALC292";
@@ -200,6 +209,9 @@ azalia_codec_init_vtbl(codec_t *this)
 			this->name = "Realtek ALC3235";
 		else
 			this->name = "Realtek ALC293";
+		break;
+	case 0x10ec0294:
+		this->name = "Realtek ALC294";
 		break;
 	case 0x10ec0295:
 		if (PCI_VENDOR(this->subid) == PCI_VENDOR_DELL)
@@ -298,6 +310,9 @@ azalia_codec_init_vtbl(codec_t *this)
 		break;
 	case 0x10ec0892:
 		this->name = "Realtek ALC892";
+		break;
+	case 0x10ec0897:
+		this->name = "Realtek ALC897";
 		break;
 	case 0x10ec0900:
 		this->name = "Realtek ALC1150";

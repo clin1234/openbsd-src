@@ -1,4 +1,4 @@
-/*	$OpenBSD: mft.c,v 1.19 2020/11/06 04:22:18 tb Exp $ */
+/*	$OpenBSD: mft.c,v 1.35 2021/06/14 12:08:50 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -17,6 +17,7 @@
 
 #include <assert.h>
 #include <err.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <fcntl.h>
@@ -24,7 +25,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <openssl/bn.h>
+#include <openssl/asn1.h>
 #include <openssl/sha.h>
+#include <openssl/x509.h>
 
 #include "extern.h"
 
@@ -66,6 +70,7 @@ generalizedtime_to_tm(const ASN1_GENERALIZEDTIME *gtime, struct tm *tm)
 	data = ASN1_STRING_get0_data(gtime);
 	len = ASN1_STRING_length(gtime);
 
+	memset(tm, 0, sizeof(*tm));
 	return ASN1_time_parse(data, len, tm, V_ASN1_GENERALIZEDTIME) ==
 	    V_ASN1_GENERALIZEDTIME;
 }
@@ -125,7 +130,7 @@ mft_parse_filehash(struct parse *p, const ASN1_OCTET_STRING *os)
 	const ASN1_TYPE		*file, *hash;
 	char			*fn = NULL;
 	const unsigned char	*d = os->data;
-	size_t			 dsz = os->length, sz;
+	size_t			 dsz = os->length;
 	int			 rc = 0;
 	struct mftfile		*fent;
 
@@ -165,19 +170,9 @@ mft_parse_filehash(struct parse *p, const ASN1_OCTET_STRING *os)
 		warnx("%s: path components disallowed in filename: %s",
 		    p->fn, fn);
 		goto out;
-	} else if ((sz = strlen(fn)) <= 4) {
+	} else if (strlen(fn) <= 4) {
 		warnx("%s: filename must be large enough for suffix part: %s",
 		    p->fn, fn);
-		goto out;
-	}
-
-	if (strcasecmp(fn + sz - 4, ".roa") &&
-	    strcasecmp(fn + sz - 4, ".crl") &&
-	    strcasecmp(fn + sz - 4, ".cer")) {
-		/* ignore unknown files */
-		free(fn);
-		fn = NULL;
-		rc = 1;
 		goto out;
 	}
 
@@ -200,13 +195,12 @@ mft_parse_filehash(struct parse *p, const ASN1_OCTET_STRING *os)
 
 	/* Insert the filename and hash value. */
 
-	p->res->files = reallocarray(p->res->files, p->res->filesz + 1,
-	    sizeof(struct mftfile));
+	p->res->files = recallocarray(p->res->files, p->res->filesz,
+	    p->res->filesz + 1, sizeof(struct mftfile));
 	if (p->res->files == NULL)
 		err(1, NULL);
 
 	fent = &p->res->files[p->res->filesz++];
-	memset(fent, 0, sizeof(struct mftfile));
 
 	fent->file = fn;
 	fn = NULL;
@@ -265,7 +259,8 @@ mft_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 	ASN1_SEQUENCE_ANY	*seq;
 	const ASN1_TYPE		*t;
 	const ASN1_GENERALIZEDTIME *from, *until;
-	int			 i, rc = -1;
+	BIGNUM			*mft_seqnum = NULL;
+	int			 i = 0, rc = -1;
 
 	if ((seq = d2i_ASN1_SEQUENCE_ANY(NULL, &d, dsz)) == NULL) {
 		cryptowarnx("%s: RFC 6486 section 4.2: Manifest: "
@@ -273,7 +268,7 @@ mft_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 		goto out;
 	}
 
-	/* The version is optional. */
+	/* The profile version field is optional. */
 
 	if (sk_ASN1_TYPE_num(seq) != 5 &&
 	    sk_ASN1_TYPE_num(seq) != 6) {
@@ -283,17 +278,11 @@ mft_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 		goto out;
 	}
 
-	/* Start with optional version. */
-
-	i = 0;
 	if (sk_ASN1_TYPE_num(seq) == 6) {
-		t = sk_ASN1_TYPE_value(seq, i++);
-		if (t->type != V_ASN1_INTEGER) {
-			warnx("%s: RFC 6486 section 4.2.1: version: "
-			    "want ASN.1 integer, have %s (NID %d)",
-			    p->fn, ASN1_tag2str(t->type), t->type);
-			goto out;
-		}
+		warnx("%s: RFC 6486 section 4.2.1 and X.690, 11.5: not "
+		    "expecting version field, as only version 0 is supported",
+		    p->fn);
+		goto out;
 	}
 
 	/* Now the manifest sequence number. */
@@ -303,6 +292,30 @@ mft_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 		warnx("%s: RFC 6486 section 4.2.1: manifestNumber: "
 		    "want ASN.1 integer, have %s (NID %d)",
 		    p->fn, ASN1_tag2str(t->type), t->type);
+		goto out;
+	}
+
+	mft_seqnum = ASN1_INTEGER_to_BN(t->value.integer, NULL);
+	if (mft_seqnum == NULL) {
+		warnx("%s: ASN1_INTEGER_to_BN error", p->fn);
+		goto out;
+	}
+
+	if (BN_is_negative(mft_seqnum)) {
+		warnx("%s: RFC 6486 section 4.2.1: manifestNumber: "
+		    "want positive integer, have negative.", p->fn);
+		goto out;
+	}
+
+	if (BN_num_bytes(mft_seqnum) > 20) {
+		warnx("%s: RFC 6486 section 4.2.1: manifestNumber: "
+		    "want 20 or less than octets, have more.", p->fn);
+		goto out;
+	}
+
+	p->res->seqnum = BN_bn2hex(mft_seqnum);
+	if (p->res->seqnum == NULL) {
+		warnx("%s: BN_bn2hex error", p->fn);
 		goto out;
 	}
 
@@ -371,6 +384,7 @@ mft_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 	rc = 1;
 out:
 	sk_ASN1_TYPE_pop_free(seq, ASN1_TYPE_free);
+	BN_free(mft_seqnum);
 	return rc;
 }
 
@@ -393,7 +407,7 @@ mft_parse(X509 **x509, const char *fn)
 	p.fn = fn;
 
 	cms = cms_parse_validate(x509, fn, "1.2.840.113549.1.9.16.1.26",
-	    NULL, &cmsz);
+	    &cmsz);
 	if (cms == NULL)
 		return NULL;
 	assert(*x509 != NULL);
@@ -402,8 +416,15 @@ mft_parse(X509 **x509, const char *fn)
 		err(1, NULL);
 	if ((p.res->file = strdup(fn)) == NULL)
 		err(1, NULL);
-	if (!x509_get_ski_aki(*x509, fn, &p.res->ski, &p.res->aki))
+
+	p.res->aia = x509_get_aia(*x509, fn);
+	p.res->aki = x509_get_aki(*x509, 0, fn);
+	p.res->ski = x509_get_ski(*x509, fn);
+	if (p.res->aia == NULL || p.res->aki == NULL || p.res->ski == NULL) {
+		warnx("%s: RFC 6487 section 4.8: "
+		    "missing AIA, AKI or SKI X509 extension", fn);
 		goto out;
+	}
 
 	/*
 	 * If we're stale, then remove all of the files that the MFT
@@ -441,48 +462,6 @@ out:
 }
 
 /*
- * Check the hash value of a file.
- * Return zero on failure, non-zero on success.
- */
-static int
-mft_validfilehash(const char *fn, const struct mftfile *m)
-{
-	char	filehash[SHA256_DIGEST_LENGTH];
-	char	buffer[8192];
-	char	*cp, *path = NULL;
-	SHA256_CTX ctx;
-	ssize_t	nr;
-	int	fd;
-
-	/* Check hash of file now, but first build path for it */
-	cp = strrchr(fn, '/');
-	assert(cp != NULL);
-	if (asprintf(&path, "%.*s/%s", (int)(cp - fn), fn, m->file) == -1)
-		err(1, "asprintf");
-
-	if ((fd = open(path, O_RDONLY)) == -1) {
-		warn("%s: referenced file %s", fn, m->file);
-		free(path);
-		return 0;
-	}
-	free(path);
-
-	SHA256_Init(&ctx);
-	while ((nr = read(fd, buffer, sizeof(buffer))) > 0) {
-		SHA256_Update(&ctx, buffer, nr);
-	}
-	close(fd);
-
-	SHA256_Final(filehash, &ctx);
-	if (memcmp(m->hash, filehash, SHA256_DIGEST_LENGTH) != 0) {
-		warnx("%s: bad message digest for %s", fn, m->file);
-		return 0;
-	}
-
-	return 1;
-}
-
-/*
  * Check all files and their hashes in a MFT structure.
  * Return zero on failure, non-zero on success.
  */
@@ -491,10 +470,24 @@ mft_check(const char *fn, struct mft *p)
 {
 	size_t	i;
 	int	rc = 1;
+	char	*cp, *path = NULL;
 
-	for (i = 0; i < p->filesz; i++)
-		if (!mft_validfilehash(fn, &p->files[i]))
+	/* Check hash of file now, but first build path for it */
+	cp = strrchr(fn, '/');
+	assert(cp != NULL);
+	assert(cp - fn < INT_MAX);
+
+	for (i = 0; i < p->filesz; i++) {
+		const struct mftfile *m = &p->files[i];
+		if (asprintf(&path, "%.*s/%s", (int)(cp - fn), fn,
+		    m->file) == -1)
+			err(1, NULL);
+		if (!valid_filehash(path, m->hash, sizeof(m->hash))) {
+			warnx("%s: bad message digest for %s", fn, m->file);
 			rc = 0;
+		}
+		free(path);
+	}
 
 	return rc;
 }
@@ -515,10 +508,12 @@ mft_free(struct mft *p)
 		for (i = 0; i < p->filesz; i++)
 			free(p->files[i].file);
 
+	free(p->aia);
 	free(p->aki);
 	free(p->ski);
 	free(p->file);
 	free(p->files);
+	free(p->seqnum);
 	free(p);
 }
 
@@ -527,22 +522,22 @@ mft_free(struct mft *p)
  * See mft_read() for the other side of the pipe.
  */
 void
-mft_buffer(char **b, size_t *bsz, size_t *bmax, const struct mft *p)
+mft_buffer(struct ibuf *b, const struct mft *p)
 {
 	size_t		 i;
 
-	io_simple_buffer(b, bsz, bmax, &p->stale, sizeof(int));
-	io_str_buffer(b, bsz, bmax, p->file);
-	io_simple_buffer(b, bsz, bmax, &p->filesz, sizeof(size_t));
+	io_simple_buffer(b, &p->stale, sizeof(int));
+	io_str_buffer(b, p->file);
+	io_simple_buffer(b, &p->filesz, sizeof(size_t));
 
 	for (i = 0; i < p->filesz; i++) {
-		io_str_buffer(b, bsz, bmax, p->files[i].file);
-		io_simple_buffer(b, bsz, bmax,
-			p->files[i].hash, SHA256_DIGEST_LENGTH);
+		io_str_buffer(b, p->files[i].file);
+		io_simple_buffer(b, p->files[i].hash, SHA256_DIGEST_LENGTH);
 	}
 
-	io_str_buffer(b, bsz, bmax, p->aki);
-	io_str_buffer(b, bsz, bmax, p->ski);
+	io_str_buffer(b, p->aia);
+	io_str_buffer(b, p->aki);
+	io_str_buffer(b, p->ski);
 }
 
 /*
@@ -560,6 +555,7 @@ mft_read(int fd)
 
 	io_simple_read(fd, &p->stale, sizeof(int));
 	io_str_read(fd, &p->file);
+	assert(p->file);
 	io_simple_read(fd, &p->filesz, sizeof(size_t));
 
 	if ((p->files = calloc(p->filesz, sizeof(struct mftfile))) == NULL)
@@ -570,7 +566,10 @@ mft_read(int fd)
 		io_simple_read(fd, p->files[i].hash, SHA256_DIGEST_LENGTH);
 	}
 
+	io_str_read(fd, &p->aia);
 	io_str_read(fd, &p->aki);
 	io_str_read(fd, &p->ski);
+	assert(p->aia && p->aki && p->ski);
+
 	return p;
 }

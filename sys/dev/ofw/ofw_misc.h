@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofw_misc.h,v 1.16 2020/11/10 19:08:43 kettenis Exp $	*/
+/*	$OpenBSD: ofw_misc.h,v 1.20 2021/04/07 17:12:22 kettenis Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis
  *
@@ -163,6 +163,7 @@ enum endpoint_type {
 	EP_DRM_CRTC,		/* struct drm_crtc */
 	EP_DRM_ENCODER,		/* struct drm_encoder */
 	EP_DRM_PANEL,		/* struct drm_panel */
+	EP_DAI_DEVICE,		/* struct dai_device */
 };
 
 struct endpoint {
@@ -176,6 +177,7 @@ struct endpoint {
 };
 
 void	device_ports_register(struct device_ports *, enum endpoint_type);
+struct device_ports *device_ports_byphandle(uint32_t);
 int	device_port_activate(uint32_t, void *);
 struct endpoint *endpoint_byreg(struct device_ports *, uint32_t, uint32_t);
 struct endpoint *endpoint_remote(struct endpoint *);
@@ -193,6 +195,8 @@ struct dai_device {
 
 	LIST_ENTRY(dai_device) dd_list;
 	uint32_t dd_phandle;
+
+	struct device_ports dd_ports;
 };
 
 void	dai_register(struct dai_device *);
@@ -230,6 +234,22 @@ struct mii_bus {
 };
 
 void	mii_register(struct mii_bus *);
+struct mii_bus *mii_bynode(int);
 struct mii_bus *mii_byphandle(uint32_t);
+
+/* IOMMU support */
+
+struct iommu_device {
+	int	id_node;
+	void	*id_cookie;
+	bus_dma_tag_t (*id_map)(void *, uint32_t *, bus_dma_tag_t);
+
+	LIST_ENTRY(iommu_device) id_list;
+	uint32_t id_phandle;
+};
+
+void	iommu_device_register(struct iommu_device *);
+bus_dma_tag_t iommu_device_map(int, bus_dma_tag_t);
+bus_dma_tag_t iommu_device_map_pci(int, uint32_t, bus_dma_tag_t);
 
 #endif /* _DEV_OFW_MISC_H_ */

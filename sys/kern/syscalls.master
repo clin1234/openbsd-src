@@ -1,4 +1,4 @@
-;	$OpenBSD: syscalls.master,v 1.207 2020/03/18 19:33:36 anton Exp $
+;	$OpenBSD: syscalls.master,v 1.218 2021/06/04 09:05:19 mvs Exp $
 ;	$NetBSD: syscalls.master,v 1.32 1996/04/23 10:24:21 mycroft Exp $
 
 ;	@(#)syscalls.master	8.2 (Berkeley) 1/13/94
@@ -107,7 +107,7 @@
 36	STD		{ void sys_sync(void); }
 37	STD		{ int sys_msyscall(void *addr, size_t len); }
 38	STD		{ int sys_stat(const char *path, struct stat *ub); }
-39	STD		{ pid_t sys_getppid(void); }
+39	STD NOLOCK	{ pid_t sys_getppid(void); }
 40	STD		{ int sys_lstat(const char *path, struct stat *ub); }
 41	STD NOLOCK	{ int sys_dup(int fd); }
 42	STD		{ int sys_fstatat(int fd, const char *path, \
@@ -159,10 +159,10 @@
 			    struct timezone *tzp); }
 68	STD NOLOCK	{ int sys_settimeofday(const struct timeval *tv, \
 			    const struct timezone *tzp); }
-69	STD		{ int sys_setitimer(int which, \
+69	STD NOLOCK	{ int sys_setitimer(int which, \
 			    const struct itimerval *itv, \
 			    struct itimerval *oitv); }
-70	STD		{ int sys_getitimer(int which, \
+70	STD NOLOCK	{ int sys_getitimer(int which, \
 			    struct itimerval *itv); }
 71	STD		{ int sys_select(int nd, fd_set *in, fd_set *ou, \
 			    fd_set *ex, struct timeval *tv); }
@@ -212,7 +212,7 @@
 95	STD		{ int sys_fsync(int fd); }
 96	STD		{ int sys_setpriority(int which, id_t who, int prio); }
 97	STD NOLOCK	{ int sys_socket(int domain, int type, int protocol); }
-98	STD		{ int sys_connect(int s, const struct sockaddr *name, \
+98	STD NOLOCK	{ int sys_connect(int s, const struct sockaddr *name, \
 			    socklen_t namelen); }
 99	STD		{ int sys_getdents(int fd, void *buf, size_t buflen); }
 100	STD		{ int sys_getpriority(int which, id_t who); }
@@ -235,7 +235,7 @@
 			    fd_set *ex, const struct timespec *ts, \
 			    const sigset_t *mask); }
 111	STD		{ int sys_sigsuspend(int mask); }
-112	STD		{ int sys_sendsyslog(const char *buf, size_t nbyte, \
+112	STD NOLOCK	{ int sys_sendsyslog(const char *buf, size_t nbyte, \
 			    int flags); }
 113	UNIMPL		fktrace
 114	STD 		{ int sys_unveil(const char *path, \
@@ -349,7 +349,7 @@
 197	STD		{ void *sys_mmap(void *addr, size_t len, int prot, \
 			    int flags, int fd, long pad, off_t pos); }
 198	INDIR		{ quad_t sys___syscall(quad_t num, ...); }
-199	STD		{ off_t sys_lseek(int fd, int pad, off_t offset, \
+199	STD NOLOCK	{ off_t sys_lseek(int fd, int pad, off_t offset, \
 			    int whence); }
 200	STD		{ int sys_truncate(const char *path, int pad, \
 			    off_t length); }
@@ -533,7 +533,7 @@
 307	OBSOL		statfs53
 308	OBSOL		fstatfs53
 309	OBSOL		fhstatfs53
-310	STD		{ int sys_setrtable(int rtableid); }
+310	STD NOLOCK	{ int sys_setrtable(int rtableid); }
 311	STD NOLOCK	{ int sys_getrtable(void); }
 312	OBSOL		t32_getdirentries
 313	STD		{ int sys_faccessat(int fd, const char *path, \

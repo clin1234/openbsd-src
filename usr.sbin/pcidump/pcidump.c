@@ -1,4 +1,4 @@
-/*	$OpenBSD: pcidump.c,v 1.57 2020/06/22 05:54:26 dlg Exp $	*/
+/*	$OpenBSD: pcidump.c,v 1.64 2021/05/30 02:24:43 jsg Exp $	*/
 
 /*
  * Copyright (c) 2006, 2007 David Gwynne <loki@animata.net>
@@ -402,8 +402,10 @@ dump_vpd(int bus, int dev, int func)
 	io.pv_count = nitems(data);
 	io.pv_data = data;
 
-	if (ioctl(pcifd, PCIOCGETVPD, &io) == -1)
+	if (ioctl(pcifd, PCIOCGETVPD, &io) == -1) {
 		warn("PCIOCGETVPD");
+		return;
+	}
 
 	do {
 		uint8_t vpd = *buf;
@@ -484,6 +486,27 @@ dump_pci_powerstate(int bus, int dev, int func, uint8_t ptr)
 	printf("\n");
 }
 
+static unsigned int
+pcie_dcap_mps(uint32_t dcap)
+{
+	uint32_t shift = dcap & 0x7;
+	return (128 << shift);
+}
+
+static unsigned int
+pcie_dcsr_mps(uint32_t dcsr)
+{
+	uint32_t shift = (dcsr >> 5) & 0x7;
+	return (128 << shift);
+}
+
+static unsigned int
+pcie_dcsr_mrrs(uint32_t dcsr)
+{
+	uint32_t shift = (dcsr >> 12) & 0x7;
+	return (128 << shift);
+}
+
 void
 print_pcie_ls(uint8_t speed)
 {
@@ -500,8 +523,20 @@ print_pcie_ls(uint8_t speed)
 void
 dump_pcie_linkspeed(int bus, int dev, int func, uint8_t ptr)
 {
+	u_int32_t dcap, dcsr;
 	u_int32_t lcap, sreg, lcap2 = 0, xcap;
 	u_int8_t cwidth, cspeed, swidth, sspeed;
+
+	if (pci_read(bus, dev, func, ptr + PCI_PCIE_DCAP, &dcap) != 0)
+		return;
+
+	if (pci_read(bus, dev, func, ptr + PCI_PCIE_DCSR, &dcsr) != 0)
+		return;
+
+	printf("\t\tMax Payload Size: %u / %u bytes\n",
+	    pcie_dcsr_mps(dcsr), pcie_dcap_mps(dcap));
+	printf("\t\tMax Read Request Size: %u bytes\n",
+	    pcie_dcsr_mrrs(dcsr));
 
 	if (pci_read(bus, dev, func, ptr + PCI_PCIE_XCAP, &xcap) != 0)
 		return;
@@ -533,9 +568,9 @@ dump_pcie_linkspeed(int bus, int dev, int func, uint8_t ptr)
 	print_pcie_ls(sspeed);
 	printf(" / ");
 	print_pcie_ls(cspeed);
-	printf(" GT/s, ");
+	printf(" GT/s\n");
 
-	printf("Link Width: x%d / x%d\n", swidth, cwidth);
+	printf("\t\tLink Width: x%d / x%d\n", swidth, cwidth);
 }
 
 void
@@ -1145,6 +1180,14 @@ static const struct pci_subclass pci_subclass_display[] = {
 	{ PCI_SUBCLASS_DISPLAY_MISC,		"Miscellaneous"	},
 };
 
+static const struct pci_subclass pci_subclass_multimedia[] = {
+	{ PCI_SUBCLASS_MULTIMEDIA_VIDEO,	"Video"		},
+	{ PCI_SUBCLASS_MULTIMEDIA_AUDIO,	"Audio"		},
+	{ PCI_SUBCLASS_MULTIMEDIA_TELEPHONY,	"Telephony"	},
+	{ PCI_SUBCLASS_MULTIMEDIA_HDAUDIO,	"HD Audio"	},
+	{ PCI_SUBCLASS_MULTIMEDIA_MISC,		"Miscellaneous"	},
+};
+
 static const struct pci_subclass pci_subclass_memory[] = {
 	{ PCI_SUBCLASS_MEMORY_RAM,		"RAM"		},
 	{ PCI_SUBCLASS_MEMORY_FLASH,		"Flash"		},
@@ -1261,6 +1304,9 @@ static const struct pci_subclass pci_subclass_dasp[] = {
 	{ PCI_SUBCLASS_DASP_MISC,		"Miscellaneous"	},
 };
 
+static const struct pci_subclass pci_subclass_accelerator[] = {};
+static const struct pci_subclass pci_subclass_instrumentation[] = {};
+
 #define CLASS(_c, _n, _s) { \
 	.class = _c, \
 	.name = _n, \
@@ -1277,6 +1323,8 @@ static const struct pci_class pci_classes[] = {
 	    pci_subclass_network),
 	CLASS(PCI_CLASS_DISPLAY,	"Display",
 	    pci_subclass_display),
+	CLASS(PCI_CLASS_MULTIMEDIA,	"Multimedia",
+	    pci_subclass_multimedia),
 	CLASS(PCI_CLASS_MEMORY,		"Memory",
 	    pci_subclass_memory),
 	CLASS(PCI_CLASS_BRIDGE,		"Bridge",
@@ -1303,6 +1351,10 @@ static const struct pci_class pci_classes[] = {
 	    pci_subclass_crypto),
 	CLASS(PCI_CLASS_DASP,		"DASP",
 	    pci_subclass_dasp),
+	CLASS(PCI_CLASS_ACCELERATOR,	"Accelerator",
+	    pci_subclass_accelerator),
+	CLASS(PCI_CLASS_INSTRUMENTATION, "Instrumentation",
+	    pci_subclass_instrumentation),
 };
 
 static const struct pci_class *
@@ -1347,7 +1399,6 @@ pci_class_name(pci_class_t class)
 	return (pc->name);
 }
 
-
 static const char *
 pci_subclass_name(pci_class_t class, pci_subclass_t subclass)
 {
@@ -1359,7 +1410,7 @@ pci_subclass_name(pci_class_t class, pci_subclass_t subclass)
 		return ("(unknown)");
 
 	ps = pci_subclass(pc, subclass);
-	if (ps == NULL)
+	if (ps == NULL || ps->name == NULL)
 		return ("(unknown)");
 
 	return (ps->name);

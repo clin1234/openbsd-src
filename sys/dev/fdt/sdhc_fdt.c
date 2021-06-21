@@ -1,4 +1,4 @@
-/*	$OpenBSD: sdhc_fdt.c,v 1.12 2020/05/31 11:47:09 kettenis Exp $	*/
+/*	$OpenBSD: sdhc_fdt.c,v 1.16 2021/05/03 13:11:40 visa Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis
  *
@@ -126,6 +126,7 @@ sdhc_fdt_match(struct device *parent, void *match, void *aux)
 	struct fdt_attach_args *faa = aux;
 
 	return (OF_is_compatible(faa->fa_node, "arasan,sdhci-5.1") ||
+	    OF_is_compatible(faa->fa_node, "arasan,sdhci-8.9a") ||
 	    OF_is_compatible(faa->fa_node, "brcm,bcm2711-emmc2") ||
 	    OF_is_compatible(faa->fa_node, "brcm,bcm2835-sdhci") ||
 	    OF_is_compatible(faa->fa_node, "marvell,armada-3700-sdhci") ||
@@ -232,6 +233,11 @@ sdhc_fdt_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc.sc_flags |= SDHC_F_NODDR50;
 	}
 
+	if (OF_is_compatible(faa->fa_node, "arasan,sdhci-8.9a")) {
+		freq = clock_get_frequency(faa->fa_node, "clk_xin");
+		sc->sc.sc_clkbase = freq / 1000;
+	}
+
 	if (OF_is_compatible(faa->fa_node, "brcm,bcm2711-emmc2"))
 		sc->sc.sc_flags |= SDHC_F_NOPWR0;
 
@@ -275,8 +281,10 @@ sdhc_fdt_attach(struct device *parent, struct device *self, void *aux)
 		    SDHC_CAPABILITIES);
 		if (OF_getpropint(faa->fa_node, "bus-width", 1) != 8)
 			cap &= ~SDHC_8BIT_MODE_SUPP;
-		if (OF_getproplen(faa->fa_node, "no-1-8-v") == 0)
+		if (OF_getproplen(faa->fa_node, "no-1-8-v") == 0) {
 			cap &= ~SDHC_VOLTAGE_SUPP_1_8V;
+			sc->sc.sc_flags |= SDHC_F_NODDR50;
+		}
 		if (OF_getproplen(faa->fa_node,
 		    "marvell,xenon-phy-slow-mode") == 0)
 			sc->sc_slow_mode = 1;

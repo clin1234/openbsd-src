@@ -1,4 +1,4 @@
-/* $OpenBSD: control-notify.c,v 1.27 2020/05/21 07:24:13 nicm Exp $ */
+/* $OpenBSD: control-notify.c,v 1.29 2021/03/16 09:14:58 nicm Exp $ */
 
 /*
  * Copyright (c) 2012 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -49,7 +49,7 @@ control_notify_window_layout_changed(struct window *w)
 	char		*cp;
 
 	template = "%layout-change #{window_id} #{window_layout} "
-	    "#{window_visible_layout} #{window_flags}";
+	    "#{window_visible_layout} #{window_raw_flags}";
 
 	TAILQ_FOREACH(c, &clients, entry) {
 		if (!CONTROL_SHOULD_NOTIFY_CLIENT(c) || c->session == NULL)
@@ -168,6 +168,17 @@ control_notify_client_session_changed(struct client *cc)
 			control_write(c, "%%client-session-changed %s $%u %s",
 			    cc->name, s->id, s->name);
 		}
+	}
+}
+
+void
+control_notify_client_detached(struct client *cc)
+{
+	struct client	*c;
+
+	TAILQ_FOREACH(c, &clients, entry) {
+		if (CONTROL_SHOULD_NOTIFY_CLIENT(c))
+			control_write(c, "%%client-detached %s", cc->name);
 	}
 }
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-keygen.c,v 1.424 2020/11/08 22:37:24 djm Exp $ */
+/* $OpenBSD: ssh-keygen.c,v 1.429 2021/04/03 06:18:41 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1994 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -55,6 +55,7 @@
 #include "sshsig.h"
 #include "ssh-sk.h"
 #include "sk-api.h" /* XXX for SSH_SK_USER_PRESENCE_REQD; remove */
+#include "cipher.h"
 
 #ifdef ENABLE_PKCS11
 #include "ssh-pkcs11.h"
@@ -1317,7 +1318,7 @@ do_known_hosts(struct passwd *pw, const char *name, int find_host,
 	foreach_options |= print_fingerprint ? HKF_WANT_PARSE_KEY : 0;
 	if ((r = hostkeys_foreach(identity_file, (find_host || !hash_hosts) ?
 	    known_hosts_find_delete : known_hosts_hash, &ctx, name, NULL,
-	    foreach_options)) != 0) {
+	    foreach_options, 0)) != 0) {
 		if (inplace)
 			unlink(tmp);
 		fatal_fr(r, "hostkeys_foreach");
@@ -1985,7 +1986,7 @@ add_cert_option(char *opt)
 			fatal("Invalid source-address list");
 		certflags_src_addr = xstrdup(val);
 	} else if (strncasecmp(opt, "extension:", 10) == 0 ||
-		   (iscrit = (strncasecmp(opt, "critical:", 9) == 0))) {
+		    (iscrit = (strncasecmp(opt, "critical:", 9) == 0))) {
 		val = xstrdup(strchr(opt, ':') + 1);
 		if ((cp = strchr(val, '=')) != NULL)
 			*cp++ = '\0';
@@ -2705,12 +2706,12 @@ done:
 				fatal_f("sshkey_fingerprint failed");
 			if (principal == NULL) {
 				printf("Good \"%s\" signature with %s key %s\n",
-				       sig_namespace, sshkey_type(sign_key), fp);
+				    sig_namespace, sshkey_type(sign_key), fp);
 
 			} else {
 				printf("Good \"%s\" signature for %s with %s key %s\n",
-				       sig_namespace, principal,
-				       sshkey_type(sign_key), fp);
+				    sig_namespace, principal,
+				    sshkey_type(sign_key), fp);
 			}
 		} else {
 			printf("Could not verify signature.\n");
@@ -3044,9 +3045,9 @@ usage(void)
 	    "usage: ssh-keygen [-q] [-a rounds] [-b bits] [-C comment] [-f output_keyfile]\n"
 	    "                  [-m format] [-N new_passphrase] [-O option]\n"
 	    "                  [-t dsa | ecdsa | ecdsa-sk | ed25519 | ed25519-sk | rsa]\n"
-	    "                  [-w provider]\n"
+	    "                  [-w provider] [-Z cipher]\n"
 	    "       ssh-keygen -p [-a rounds] [-f keyfile] [-m format] [-N new_passphrase]\n"
-	    "                   [-P old_passphrase]\n"
+	    "                   [-P old_passphrase] [-Z cipher]\n"
 	    "       ssh-keygen -i [-f input_keyfile] [-m key_format]\n"
 	    "       ssh-keygen -e [-f input_keyfile] [-m key_format]\n"
 	    "       ssh-keygen -y [-f input_keyfile]\n"
@@ -3129,6 +3130,7 @@ main(int argc, char **argv)
 	pw = getpwuid(getuid());
 	if (!pw)
 		fatal("No user exists for uid %lu", (u_long)getuid());
+	pw = pwcopy(pw);
 	if (gethostname(hostname, sizeof(hostname)) == -1)
 		fatal("gethostname: %s", strerror(errno));
 
@@ -3234,6 +3236,9 @@ main(int argc, char **argv)
 			break;
 		case 'Z':
 			openssh_format_cipher = optarg;
+			if (cipher_by_name(openssh_format_cipher) == NULL)
+				fatal("Invalid OpenSSH-format cipher '%s'",
+				    openssh_format_cipher);
 			break;
 		case 'C':
 			identity_comment = optarg;
@@ -3340,12 +3345,12 @@ main(int argc, char **argv)
 		if (strncmp(sign_op, "find-principals", 15) == 0) {
 			if (ca_key_path == NULL) {
 				error("Too few arguments for find-principals:"
-				      "missing signature file");
+				    "missing signature file");
 				exit(1);
 			}
 			if (!have_identity) {
 				error("Too few arguments for find-principals:"
-				      "missing allowed keys file");
+				    "missing allowed keys file");
 				exit(1);
 			}
 			return sig_find_principals(ca_key_path, identity_file);
@@ -3366,7 +3371,7 @@ main(int argc, char **argv)
 		} else if (strncmp(sign_op, "check-novalidate", 16) == 0) {
 			if (ca_key_path == NULL) {
 				error("Too few arguments for check-novalidate: "
-				      "missing signature file");
+				    "missing signature file");
 				exit(1);
 			}
 			return sig_verify(ca_key_path, cert_principals,

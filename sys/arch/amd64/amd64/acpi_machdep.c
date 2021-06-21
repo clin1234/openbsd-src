@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpi_machdep.c,v 1.92 2020/07/21 03:48:04 deraadt Exp $	*/
+/*	$OpenBSD: acpi_machdep.c,v 1.94 2021/03/15 22:44:57 patrick Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -199,6 +199,12 @@ acpi_intr_establish(int irq, int flags, int level,
 #else
 	return NULL;
 #endif
+}
+
+void
+acpi_intr_disestablish(void *cookie)
+{
+	intr_disestablish(cookie);
 }
 
 u_int8_t *
@@ -562,3 +568,9 @@ acpi_resume_mp(void)
 #endif /* MULTIPROCESSOR */
 
 #endif /* ! SMALL_KERNEL */
+
+bus_dma_tag_t
+acpi_iommu_device_map(struct aml_node *node, bus_dma_tag_t dmat)
+{
+	return dmat;
+}

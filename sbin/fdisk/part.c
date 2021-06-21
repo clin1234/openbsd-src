@@ -1,4 +1,4 @@
-/*	$OpenBSD: part.c,v 1.77 2017/03/26 00:22:49 sobrado Exp $	*/
+/*	$OpenBSD: part.c,v 1.87 2021/06/21 13:17:20 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -20,6 +20,7 @@
 #include <sys/disklabel.h>
 
 #include <err.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,12 +30,13 @@
 #include "misc.h"
 #include "part.h"
 
-int	PRT_check_chs(struct prt *partn);
+int		 check_chs(struct prt *partn);
+const char	*ascii_id(int);
 
 static const struct part_type {
 	int	type;
 	char	sname[14];
-	char	guid[37];
+	char	guid[UUID_STR_LEN + 1];
 } part_types[] = {
 	{ 0x00, "unused      ", "00000000-0000-0000-0000-000000000000" },
 	{ 0x01, "FAT12       ", "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7" },
@@ -49,6 +51,7 @@ static const struct part_type {
 	{ 0x0A, "OS/2 Bootmgr"},   /* OS/2 Boot Manager or OPUS */
 	{ 0x0B, "FAT32       ", "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7" },
 	{ 0x0C, "FAT32L      ", "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7" },
+	{ 0x0D, "BIOS Boot   ", "21686148-6449-6e6f-744e-656564454649" },
 	{ 0x0E, "FAT16L      ", "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7" },
 	{ 0x0F, "Extended LBA"},   /* Extended DOS LBA-mapped */
 	{ 0x10, "OPUS        "},   /* OPUS */
@@ -112,6 +115,11 @@ static const struct part_type {
 	{ 0xA9, "NetBSD      ", "516e7cb4-6ecf-11d6-8ff8-00022d09712b" },
 	{ 0xAB, "MacOS X boot", "426f6f74-0000-11aa-aa11-00306543ecac" },
 	{ 0xAF, "MacOS X HFS+", "48465300-0000-11aa-aa11-00306543ecac" },
+	{ 0xB0, "APFS        ", "7c3457ef-0000-11aa-aa11-00306543ecac" },
+	{ 0xB1, "APFS ISC    ", "69646961-6700-11aa-aa11-00306543ecac" },
+	{ 0xB2, "APFS Recovry", "52637672-7900-11aa-aa11-00306543ecac" },
+	{ 0xB3, "HiFive FSBL ", "5b193300-fc78-40cd-8002-e86c45580b47" },
+	{ 0xB4, "HiFive BBL  ", "2e54b353-1271-4842-806f-e436d6af6985" },
 	{ 0xB7, "BSDI filesy*"},   /* BSDI BSD/386 filesystem */
 	{ 0xB8, "BSDI swap   "},   /* BSDI BSD/386 swap */
 	{ 0xBF, "Solaris     ", "6a85cf4d-1dd2-11b2-99a6-080020736631" },
@@ -133,6 +141,49 @@ static const struct part_type {
 	{ 0xF4, "SpeedStor   "},   /* SpeedStor >1024 cyl. or LANstep or IBM PS/2 IML */
 	{ 0xFF, "Xenix BBT   "},   /* Xenix Bad Block Table */
 };
+
+static const struct protected_guid {
+	char	guid[UUID_STR_LEN + 1];
+} protected_guid[] = {
+	{ "7c3457ef-0000-11aa-aa11-00306543ecac" },	/* APFS		*/
+	{ "69646961-6700-11aa-aa11-00306543ecac" },	/* APFS ISC	*/
+	{ "52637672-7900-11aa-aa11-00306543ecac" },	/* APFS Recovry */
+	{ "5b193300-fc78-40cd-8002-e86c45580b47" },	/* HiFive FSBL	*/
+	{ "2e54b353-1271-4842-806f-e436d6af6985" },	/* HiFive BBL	*/
+};
+
+#ifndef nitems
+#define	nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
+#endif
+
+int
+PRT_protected_guid(struct uuid *leuuid)
+{
+	struct uuid	 uuid;
+	char		*str = NULL;
+	int		 rslt;
+	unsigned int	 i;
+	uint32_t	 status;
+
+	uuid_dec_le(leuuid, &uuid);
+	uuid_to_string(&uuid, &str, &status);
+	if (status != uuid_s_ok) {
+		rslt = 1;
+		goto done;
+	}
+
+	rslt = 0;
+	for(i = 0; i < nitems(protected_guid); i++) {
+		if (strncmp(str, protected_guid[i].guid, UUID_STR_LEN) == 0) {
+			rslt = 1;
+			break;
+		}
+	}
+
+ done:
+	free(str);
+	return rslt;
+}
 
 void
 PRT_printall(void)
@@ -157,7 +208,7 @@ PRT_printall(void)
 }
 
 const char *
-PRT_ascii_id(int id)
+ascii_id(int id)
 {
 	static char unknown[] = "<Unknown ID>";
 	int i;
@@ -175,7 +226,7 @@ PRT_parse(struct dos_partition *prt, off_t offset, off_t reloff,
     struct prt *partn)
 {
 	off_t off;
-	u_int32_t t;
+	uint32_t t;
 
 	partn->flag = prt->dp_flag;
 	partn->shead = prt->dp_shd;
@@ -196,18 +247,22 @@ PRT_parse(struct dos_partition *prt, off_t offset, off_t reloff,
 #if 0 /* XXX */
 	partn->bs = letoh32(prt->dp_start) + off;
 	partn->ns = letoh32(prt->dp_size);
+	if (partn->id == DOSPTYP_EFI && partn == UINT32_MAX)
+		partn->ns = DL_GETDSIZE(&dl) - partn->bs;
 #else
-	memcpy(&t, &prt->dp_start, sizeof(u_int32_t));
+	memcpy(&t, &prt->dp_start, sizeof(uint32_t));
 	partn->bs = letoh32(t) + off;
-	memcpy(&t, &prt->dp_size, sizeof(u_int32_t));
+	memcpy(&t, &prt->dp_size, sizeof(uint32_t));
 	partn->ns = letoh32(t);
+	if (partn->id == DOSPTYP_EFI && partn->ns == UINT32_MAX)
+		partn->ns = DL_GETDSIZE(&dl) - partn->bs;
 #endif
 
 	PRT_fix_CHS(partn);
 }
 
 int
-PRT_check_chs(struct prt *partn)
+check_chs(struct prt *partn)
 {
 	if ( (partn->shead > 255) ||
 		(partn->ssect >63) ||
@@ -226,8 +281,8 @@ PRT_make(struct prt *partn, off_t offset, off_t reloff,
     struct dos_partition *prt)
 {
 	off_t off;
-	u_int32_t ecsave, scsave;
-	u_int64_t t;
+	uint32_t ecsave, scsave;
+	uint64_t t;
 
 	/* Save (and restore below) cylinder info we may fiddle with. */
 	scsave = partn->scyl;
@@ -242,7 +297,7 @@ PRT_make(struct prt *partn, off_t offset, off_t reloff,
 	else
 		off = offset;
 
-	if (PRT_check_chs(partn)) {
+	if (check_chs(partn)) {
 		prt->dp_shd = partn->shead & 0xFF;
 		prt->dp_ssect = (partn->ssect & 0x3F) |
 		    ((partn->scyl & 0x300) >> 2);
@@ -259,9 +314,13 @@ PRT_make(struct prt *partn, off_t offset, off_t reloff,
 	prt->dp_typ = partn->id & 0xFF;
 
 	t = htole64(partn->bs - off);
-	memcpy(&prt->dp_start, &t, sizeof(u_int32_t));
-	t = htole64(partn->ns);
-	memcpy(&prt->dp_size, &t, sizeof(u_int32_t));
+	memcpy(&prt->dp_start, &t, sizeof(uint32_t));
+	if (partn->id == DOSPTYP_EFI && (partn->bs + partn->ns) >
+	    DL_GETDSIZE(&dl))
+		t = htole64(UINT32_MAX);
+	else
+		t = htole64(partn->ns);
+	memcpy(&prt->dp_size, &t, sizeof(uint32_t));
 
 	partn->scyl = scsave;
 	partn->ecyl = ecsave;
@@ -293,16 +352,16 @@ PRT_print(int num, struct prt *partn, char *units)
 		    partn->ecyl, partn->ehead, partn->esect,
 		    partn->bs, size,
 		    unit_types[i].abbr,
-		    PRT_ascii_id(partn->id));
+		    ascii_id(partn->id));
 	}
 }
 
 void
 PRT_fix_BN(struct prt *part, int pn)
 {
-	u_int32_t spt, tpc, spc;
-	u_int32_t start = 0;
-	u_int32_t end = 0;
+	uint32_t spt, tpc, spc;
+	uint32_t start = 0;
+	uint32_t end = 0;
 
 	/* Zero out entry if not used */
 	if (part->id == DOSPTYP_UNUSED) {
@@ -334,9 +393,9 @@ PRT_fix_BN(struct prt *part, int pn)
 void
 PRT_fix_CHS(struct prt *part)
 {
-	u_int32_t spt, tpc, spc;
-	u_int32_t start, end, size;
-	u_int32_t cyl, head, sect;
+	uint32_t spt, tpc, spc;
+	uint32_t start, end, size;
+	uint32_t cyl, head, sect;
 
 	/* Zero out entry if not used */
 	if (part->id == DOSPTYP_UNUSED || part->ns == 0) {
@@ -375,7 +434,7 @@ PRT_fix_CHS(struct prt *part)
 char *
 PRT_uuid_to_typename(struct uuid *uuid)
 {
-	static char partition_type[37];	/* Room for a GUID if needed. */
+	static char partition_type[UUID_STR_LEN + 1];
 	char *uuidstr = NULL;
 	int i, entries, status;
 

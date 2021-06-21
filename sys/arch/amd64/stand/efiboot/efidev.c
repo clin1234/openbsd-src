@@ -1,4 +1,4 @@
-/*	$OpenBSD: efidev.c,v 1.31 2019/07/29 14:51:39 yasuoka Exp $	*/
+/*	$OpenBSD: efidev.c,v 1.38 2021/06/10 18:05:20 krw Exp $	*/
 
 /*
  * Copyright (c) 1996 Michael Shalayeff
@@ -44,9 +44,9 @@
 #endif
 
 #include <efi.h>
-#include "eficall.h"
 
 extern int debug;
+extern EFI_BOOT_SERVICES *BS;
 
 #include "efidev.h"
 #include "biosdev.h"	/* for dklookup() */
@@ -84,106 +84,58 @@ efid_init(struct diskinfo *dip, void *handle)
 static EFI_STATUS
 efid_io(int rw, efi_diskinfo_t ed, u_int off, int nsect, void *buf)
 {
-	u_int		 blks, lba, i_lblks, i_tblks, i_nblks;
-	EFI_STATUS	 status = EFI_SUCCESS;
-	static u_char	*iblk = NULL;
-	static u_int	 iblksz = 0;
+	u_int blks, start, end;
+	EFI_PHYSICAL_ADDRESS addr;
+	EFI_STATUS status;
+	caddr_t data;
+	size_t size;
 
-	/* block count of the intrisic block size in DEV_BSIZE */
+	/* block count of the intrinsic block size in DEV_BSIZE */
 	blks = EFI_BLKSPERSEC(ed);
 	if (blks == 0)
 		/* block size < 512.  HP Stream 13 actually has such a disk. */
 		return (EFI_UNSUPPORTED);
 
-	/* leading and trailing unaligned blocks in intrisic block */
-	i_lblks = ((off % blks) == 0)? 0 : blks - (off % blks);
-	i_tblks = (nsect > i_lblks)? (off + nsect) % blks : 0;
+	start = off / blks;
+	end = (off + nsect + blks - 1) / blks;
+	size = (end - start) * ed->blkio->Media->BlockSize;
 
-	/* aligned blocks in intrisic block */
-	i_nblks = (nsect > i_lblks + i_tblks)? nsect - (i_lblks + i_tblks) : 0;
+	status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+	    EFI_SIZE_TO_PAGES(size), &addr);
+	if (EFI_ERROR(status))
+		goto on_eio;
+	data = (caddr_t)(uintptr_t)addr;
 
-	lba = (off + i_lblks) / blks;
-
-	/* allocate the space for reading unaligned blocks */
-	if (ed->blkio->Media->BlockSize != DEV_BSIZE) {
-		if (iblk && iblksz < ed->blkio->Media->BlockSize) {
-			free(iblk, iblksz);
-			iblk = NULL;
-		}
-		if (iblk == NULL) {
-			iblk = alloc(ed->blkio->Media->BlockSize);
-			iblksz = ed->blkio->Media->BlockSize;
-		}
-	}
 	switch (rw) {
 	case F_READ:
-		if (i_lblks > 0) {
-			status = EFI_CALL(ed->blkio->ReadBlocks,
-			    ed->blkio, ed->mediaid, lba - 1,
-			    ed->blkio->Media->BlockSize, iblk);
-			if (EFI_ERROR(status))
-				goto on_eio;
-			memcpy(buf, iblk + (blks - i_lblks) * DEV_BSIZE,
-			    min(nsect, i_lblks) * DEV_BSIZE);
-		}
-		if (i_nblks > 0) {
-			status = EFI_CALL(ed->blkio->ReadBlocks,
-			    ed->blkio, ed->mediaid, lba,
-			    ed->blkio->Media->BlockSize * (i_nblks / blks),
-			    buf + (i_lblks * DEV_BSIZE));
-			if (EFI_ERROR(status))
-				goto on_eio;
-		}
-		if (i_tblks > 0) {
-			status = EFI_CALL(ed->blkio->ReadBlocks,
-			    ed->blkio, ed->mediaid, lba + (i_nblks / blks),
-			    ed->blkio->Media->BlockSize, iblk);
-			if (EFI_ERROR(status))
-				goto on_eio;
-			memcpy(buf + (i_lblks + i_nblks) * DEV_BSIZE, iblk,
-			    i_tblks * DEV_BSIZE);
-		}
+		status = ed->blkio->ReadBlocks(ed->blkio, ed->mediaid, start,
+		    size, data);
+		if (EFI_ERROR(status))
+			goto on_eio;
+		memcpy(buf, data + DEV_BSIZE * (off - start * blks),
+		    DEV_BSIZE * nsect);
 		break;
 	case F_WRITE:
 		if (ed->blkio->Media->ReadOnly)
 			goto on_eio;
-		if (i_lblks > 0) {
-			status = EFI_CALL(ed->blkio->ReadBlocks,
-			    ed->blkio, ed->mediaid, lba - 1,
-			    ed->blkio->Media->BlockSize, iblk);
-			if (EFI_ERROR(status))
-				goto on_eio;
-			memcpy(iblk + (blks - i_lblks) * DEV_BSIZE, buf,
-			    min(nsect, i_lblks) * DEV_BSIZE);
-			status = EFI_CALL(ed->blkio->WriteBlocks,
-			    ed->blkio, ed->mediaid, lba - 1,
-			    ed->blkio->Media->BlockSize, iblk);
-		}
-		if (i_nblks > 0) {
-			status = EFI_CALL(ed->blkio->WriteBlocks,
-			    ed->blkio, ed->mediaid, lba,
-			    ed->blkio->Media->BlockSize * (i_nblks / blks),
-			    buf + (i_lblks * DEV_BSIZE));
+		if (off % blks != 0 || nsect % blks != 0) {
+			status = ed->blkio->ReadBlocks(ed->blkio, ed->mediaid,
+			    start, size, data);
 			if (EFI_ERROR(status))
 				goto on_eio;
 		}
-		if (i_tblks > 0) {
-			status = EFI_CALL(ed->blkio->ReadBlocks,
-			    ed->blkio, ed->mediaid, lba + (i_nblks / blks),
-			    ed->blkio->Media->BlockSize, iblk);
-			if (EFI_ERROR(status))
-				goto on_eio;
-			memcpy(iblk, buf + (i_lblks + i_nblks) * DEV_BSIZE,
-			    i_tblks * DEV_BSIZE);
-			status = EFI_CALL(ed->blkio->WriteBlocks,
-			    ed->blkio, ed->mediaid, lba + (i_nblks / blks),
-			    ed->blkio->Media->BlockSize, iblk);
-		}
+		memcpy(data + DEV_BSIZE * (off - start * blks), buf,
+		    DEV_BSIZE * nsect);
+		status = ed->blkio->WriteBlocks(ed->blkio, ed->mediaid, start,
+		    size, data);
+		if (EFI_ERROR(status))
+			goto on_eio;
 		break;
 	}
-	return (EFI_SUCCESS);
 
 on_eio:
+	BS->FreePages(addr, EFI_SIZE_TO_PAGES(size));
+
 	return (status);
 }
 
@@ -221,12 +173,11 @@ gpt_chk_mbr(struct dos_partition *dp, u_int64_t dsize)
 		found++;
 		if (dp2->dp_typ != DOSPTYP_EFI)
 			continue;
+		if (letoh32(dp2->dp_start) != GPTSECTOR)
+			continue;
 		psize = letoh32(dp2->dp_size);
-		if (psize == (dsize - 1) ||
-		    psize == UINT32_MAX) {
-			if (letoh32(dp2->dp_start) == 1)
-				efi++;
-		}
+		if (psize <= (dsize - GPTSECTOR) || psize == UINT32_MAX)
+			efi++;
 	}
 	if (found == 1 && efi == 1)
 		return (0);
@@ -354,8 +305,8 @@ findopenbsd_gpt(efi_diskinfo_t ed, const char **err)
 		return (-1);
 	}
 
-	/* LBA1: GPT Header */
-	lba = 1;
+	/* GPT Header */
+	lba = GPTSECTOR;
 	status = efid_io(F_READ, ed, EFI_SECTOBLK(ed, lba), EFI_BLKSPERSEC(ed),
 	    buf);
 	if (EFI_ERROR(status)) {
@@ -740,7 +691,7 @@ efiopen(struct open_file *f, ...)
 }
 
 int
-efistrategy(void *devdata, int rw, daddr32_t blk, size_t size, void *buf,
+efistrategy(void *devdata, int rw, daddr_t blk, size_t size, void *buf,
     size_t *rsize)
 {
 	struct diskinfo *dip = (struct diskinfo *)devdata;

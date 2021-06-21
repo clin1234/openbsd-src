@@ -1,4 +1,4 @@
-/* $OpenBSD: tty.c,v 1.386 2020/11/09 10:54:28 nicm Exp $ */
+/* $OpenBSD: tty.c,v 1.393 2021/06/10 07:59:31 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -98,7 +98,7 @@ tty_init(struct tty *tty, struct client *c)
 	memset(tty, 0, sizeof *tty);
 	tty->client = c;
 
-	tty->cstyle = 0;
+	tty->cstyle = SCREEN_CURSOR_DEFAULT;
 	tty->ccolour = xstrdup("");
 
 	if (tcgetattr(c->fd, &tty->tio) != 0)
@@ -249,8 +249,8 @@ tty_open(struct tty *tty, char **cause)
 {
 	struct client	*c = tty->client;
 
-	tty->term = tty_term_create(tty, c->term_name, &c->term_features,
-	    c->fd, cause);
+	tty->term = tty_term_create(tty, c->term_name, c->term_caps,
+	    c->term_ncaps, &c->term_features, cause);
 	if (tty->term == NULL) {
 		tty_close(tty);
 		return (-1);
@@ -392,10 +392,10 @@ tty_stop_tty(struct tty *tty)
 	tty_raw(tty, tty_term_string(tty->term, TTYC_SGR0));
 	tty_raw(tty, tty_term_string(tty->term, TTYC_RMKX));
 	tty_raw(tty, tty_term_string(tty->term, TTYC_CLEAR));
-	if (tty_term_has(tty->term, TTYC_SS) && tty->cstyle != 0) {
+	if (tty->cstyle != SCREEN_CURSOR_DEFAULT) {
 		if (tty_term_has(tty->term, TTYC_SE))
 			tty_raw(tty, tty_term_string(tty->term, TTYC_SE));
-		else
+		else if (tty_term_has(tty->term, TTYC_SS))
 			tty_raw(tty, tty_term_string1(tty->term, TTYC_SS, 0));
 	}
 	if (tty->mode & MODE_BRACKETPASTE)
@@ -657,41 +657,100 @@ tty_force_cursor_colour(struct tty *tty, const char *ccolour)
 void
 tty_update_mode(struct tty *tty, int mode, struct screen *s)
 {
-	struct client	*c = tty->client;
-	int		 changed;
-
-	if (s != NULL && strcmp(s->ccolour, tty->ccolour) != 0)
-		tty_force_cursor_colour(tty, s->ccolour);
+	struct client		*c = tty->client;
+	int			 changed;
+	enum screen_cursor_style cstyle = tty->cstyle;
 
 	if (tty->flags & TTY_NOCURSOR)
 		mode &= ~MODE_CURSOR;
 
 	changed = mode ^ tty->mode;
-	if (changed != 0)
-		log_debug("%s: update mode %x to %x", c->name, tty->mode, mode);
+	if (log_get_level() != 0 && changed != 0) {
+		log_debug("%s: current mode %s", c->name,
+		    screen_mode_to_string(tty->mode));
+		log_debug("%s: setting mode %s", c->name,
+		    screen_mode_to_string(mode));
+	}
 
-	if (changed & MODE_BLINKING) {
-		if (tty_term_has(tty->term, TTYC_CVVIS))
-			tty_putcode(tty, TTYC_CVVIS);
-		else
-			tty_putcode(tty, TTYC_CNORM);
-		changed |= MODE_CURSOR;
+	if (s != NULL) {
+		if (strcmp(s->ccolour, tty->ccolour) != 0)
+			tty_force_cursor_colour(tty, s->ccolour);
+		cstyle = s->cstyle;
 	}
-	if (changed & MODE_CURSOR) {
-		if (mode & MODE_CURSOR)
-			tty_putcode(tty, TTYC_CNORM);
-		else
+	if (~mode & MODE_CURSOR) {
+		/* Cursor now off - set as invisible. */
+		if (changed & MODE_CURSOR)
 			tty_putcode(tty, TTYC_CIVIS);
-	}
-	if (s != NULL && tty->cstyle != s->cstyle) {
-		if (tty_term_has(tty->term, TTYC_SS)) {
-			if (s->cstyle == 0 && tty_term_has(tty->term, TTYC_SE))
-				tty_putcode(tty, TTYC_SE);
-			else
-				tty_putcode1(tty, TTYC_SS, s->cstyle);
+	} else if ((changed & (MODE_CURSOR|MODE_BLINKING)) ||
+	    cstyle != tty->cstyle) {
+		/*
+		 * Cursor now on, blinking flag changed or style changed. Start
+		 * by setting the cursor to normal.
+		 */
+		tty_putcode(tty, TTYC_CNORM);
+		switch (cstyle) {
+		case SCREEN_CURSOR_DEFAULT:
+			/*
+			 * If the old style wasn't default, then reset it to
+			 * default.
+			 */
+			if (tty->cstyle != SCREEN_CURSOR_DEFAULT) {
+				if (tty_term_has(tty->term, TTYC_SE))
+					tty_putcode(tty, TTYC_SE);
+				else
+					tty_putcode1(tty, TTYC_SS, 0);
+			}
+
+			/* Set the cursor as very visible if necessary. */
+			if (mode & MODE_BLINKING)
+				tty_putcode(tty, TTYC_CVVIS);
+			break;
+		case SCREEN_CURSOR_BLOCK:
+			/*
+			 * Set style to either block blinking (1) or steady (2)
+			 * if supported, otherwise just check the blinking
+			 * flag.
+			 */
+			if (tty_term_has(tty->term, TTYC_SS)) {
+				if (mode & MODE_BLINKING)
+					tty_putcode1(tty, TTYC_SS, 1);
+				else
+					tty_putcode1(tty, TTYC_SS, 2);
+			} else if (mode & MODE_BLINKING)
+				tty_putcode(tty, TTYC_CVVIS);
+			break;
+		case SCREEN_CURSOR_UNDERLINE:
+			/*
+			 * Set style to either underline blinking (3) or steady
+			 * (4) if supported, otherwise just check the blinking
+			 * flag.
+			 */
+			if (tty_term_has(tty->term, TTYC_SS)) {
+				if (mode & MODE_BLINKING)
+					tty_putcode1(tty, TTYC_SS, 3);
+				else
+					tty_putcode1(tty, TTYC_SS, 4);
+			} else if (mode & MODE_BLINKING)
+				tty_putcode(tty, TTYC_CVVIS);
+			break;
+		case SCREEN_CURSOR_BAR:
+			/*
+			 * Set style to either bar blinking (5) or steady (6)
+			 * if supported, otherwise just check the blinking
+			 * flag.
+			 */
+			if (tty_term_has(tty->term, TTYC_SS)) {
+				if (mode & MODE_BLINKING)
+					tty_putcode1(tty, TTYC_SS, 5);
+				else
+					tty_putcode1(tty, TTYC_SS, 6);
+			} else if (mode & MODE_BLINKING)
+				tty_putcode(tty, TTYC_CVVIS);
+			break;
 		}
-		tty->cstyle = s->cstyle;
+		tty->cstyle = cstyle;
 	}
+
 	if ((changed & ALL_MOUSE_MODES) &&
 	    tty_term_has(tty->term, TTYC_KMOUS)) {
 		/*
@@ -946,13 +1005,8 @@ tty_redraw_region(struct tty *tty, const struct tty_ctx *ctx)
 		return;
 	}
 
-	if (ctx->ocy < ctx->orupper || ctx->ocy > ctx->orlower) {
-		for (i = ctx->ocy; i < ctx->sy; i++)
-			tty_draw_pane(tty, ctx, i);
-	} else {
-		for (i = ctx->orupper; i <= ctx->orlower; i++)
-			tty_draw_pane(tty, ctx, i);
-	}
+	for (i = ctx->orupper; i <= ctx->orlower; i++)
+		tty_draw_pane(tty, ctx, i);
 }
 
 /* Is this position visible in the pane? */
@@ -1531,20 +1585,9 @@ tty_cmd_deletecharacter(struct tty *tty, const struct tty_ctx *ctx)
 void
 tty_cmd_clearcharacter(struct tty *tty, const struct tty_ctx *ctx)
 {
-	if (ctx->bigger) {
-		tty_draw_pane(tty, ctx, ctx->ocy);
-		return;
-	}
-
 	tty_default_attributes(tty, &ctx->defaults, ctx->palette, ctx->bg);
 
-	tty_cursor_pane(tty, ctx, ctx->ocx, ctx->ocy);
-
-	if (tty_term_has(tty->term, TTYC_ECH) &&
-	    !tty_fake_bce(tty, &ctx->defaults, 8))
-		tty_putcode1(tty, TTYC_ECH, ctx->num);
-	else
-		tty_repeat_space(tty, ctx->num);
+	tty_clear_pane_line(tty, ctx, ctx->ocy, ctx->ocx, ctx->num, ctx->bg);
 }
 
 void
@@ -2447,7 +2490,7 @@ tty_check_fg(struct tty *tty, int *palette, struct grid_cell *gc)
 	/* Is this a 256-colour colour? */
 	if (gc->fg & COLOUR_FLAG_256) {
 		/* And not a 256 colour mode? */
-		if (colours != 256) {
+		if (colours < 256) {
 			gc->fg = colour_256to16(gc->fg);
 			if (gc->fg & 8) {
 				gc->fg &= 7;
@@ -2500,7 +2543,7 @@ tty_check_bg(struct tty *tty, int *palette, struct grid_cell *gc)
 		 * palette. Bold background doesn't exist portably, so just
 		 * discard the bold bit if set.
 		 */
-		if (colours != 256) {
+		if (colours < 256) {
 			gc->bg = colour_256to16(gc->bg);
 			if (gc->bg & 8) {
 				gc->bg &= 7;

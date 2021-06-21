@@ -1,4 +1,4 @@
-/*	$OpenBSD: dired.c,v 1.93 2019/07/11 18:20:18 lum Exp $	*/
+/*	$OpenBSD: dired.c,v 1.100 2021/05/02 14:13:17 lum Exp $	*/
 
 /* This file is in the public domain. */
 
@@ -53,6 +53,7 @@ static int	 d_refreshbuffer(int, int);
 static int	 d_filevisitalt(int, int);
 static int	 d_gotofile(int, int);
 static void	 reaper(int);
+static int	 gotofile(char*);
 static struct buffer	*refreshbuffer(struct buffer *);
 static int	 createlist(struct buffer *);
 static void	 redelete(struct buffer *);
@@ -219,6 +220,7 @@ dired_init(void)
 	funmap_add(d_refreshbuffer, "dired-revert", 0);
 	funmap_add(d_backpage, "dired-scroll-down", 0);
 	funmap_add(d_forwpage, "dired-scroll-up", 0);
+	funmap_add(d_shell_command, "dired-shell-command", 1);
 	funmap_add(d_undel, "dired-unmark", 0);
 	funmap_add(d_undelbak, "dired-unmark-backward", 0);
 	funmap_add(d_killbuffer_cmd, "quit-window", 0);
@@ -243,7 +245,7 @@ dired(int f, int n)
 			dname[0] = '\0';
 	}
 
-	if ((bufp = eread("Dired: ", dname, NFILEN,
+	if ((bufp = eread("Dired (directory): ", dname, NFILEN,
 	    EFDEF | EFNEW | EFCR)) == NULL)
 		return (ABORT);
 	if (bufp[0] == '\0')
@@ -479,9 +481,9 @@ d_copy(int f, int n)
 	topath = adjustname(toname, TRUE);
 	if (stat(topath, &statbuf) == 0) {
 		if (S_ISDIR(statbuf.st_mode)) {
-			off = snprintf(toname, sizeof(toname), "%s/%s",
+			ret = snprintf(toname, sizeof(toname), "%s/%s",
 			    topath, sname);
-			if (off < 0 || off >= sizeof(toname) - 1) {
+			if (ret < 0 || ret >= sizeof(toname) - 1) {
 				dobeep();
 				ewprintf("Directory name too long");
 				return (FALSE);
@@ -489,6 +491,8 @@ d_copy(int f, int n)
 			topath = adjustname(toname, TRUE);
 		}
 	}
+	if (topath == NULL)
+		return (FALSE);
 	if (strcmp(frname, topath) == 0) {
 		ewprintf("Cannot copy to same file: %s", frname);
 		return (TRUE);
@@ -523,7 +527,7 @@ d_rename(int f, int n)
 	off = strlcpy(toname, curbp->b_fname, sizeof(toname));
 	if (off >= sizeof(toname) - 1) {	/* can't happen, really */
 		dobeep();
-		ewprintf("Directory name too long");
+		ewprintf("Name too long");
 		return (FALSE);
 	}
 	(void)xbasename(sname, frname, NFILEN);
@@ -537,9 +541,9 @@ d_rename(int f, int n)
 	topath = adjustname(toname, TRUE);
 	if (stat(topath, &statbuf) == 0) {
 		if (S_ISDIR(statbuf.st_mode)) {
-			off = snprintf(toname, sizeof(toname), "%s/%s",
+			ret = snprintf(toname, sizeof(toname), "%s/%s",
 			    topath, sname);
-			if (off < 0 || off >= sizeof(toname) - 1) {
+			if (ret < 0 || ret >= sizeof(toname) - 1) {
 				dobeep();
 				ewprintf("Directory name too long");
 				return (FALSE);
@@ -547,6 +551,8 @@ d_rename(int f, int n)
 			topath = adjustname(toname, TRUE);
 		}
 	}
+	if (topath == NULL)
+		return (FALSE);
 	if (strcmp(frname, topath) == 0) {
 		ewprintf("Cannot move to same file: %s", frname);
 		return (TRUE);
@@ -694,11 +700,12 @@ d_exec(int space, struct buffer *bp, const char *input, const char *cmd, ...)
 		if ((fin = fdopen(fds[0], "r")) == NULL)
 			goto out;
 		while (fgets(buf, sizeof(buf), fin) != NULL) {
-			cp = strrchr(buf, '\n');
+			cp = strrchr(buf, *bp->b_nlchr);
 			if (cp == NULL && !feof(fin)) {	/* too long a line */
 				int c;
 				addlinef(bp, "%*s%s...", space, "", buf);
-				while ((c = getc(fin)) != EOF && c != '\n')
+				while ((c = getc(fin)) != EOF &&
+				    c != *bp->b_nlchr)
 					;
 				continue;
 			} else if (cp)
@@ -814,7 +821,7 @@ refreshbuffer(struct buffer *bp)
 static int
 d_makename(struct line *lp, char *fn, size_t len)
 {
-	int	 start, nlen;
+	int	 start, nlen, ret;
 	char	*namep;
 
 	if (d_warpdot(lp, &start) == FALSE)
@@ -822,7 +829,8 @@ d_makename(struct line *lp, char *fn, size_t len)
 	namep = &lp->l_text[start];
 	nlen = llength(lp) - start;
 
-	if (snprintf(fn, len, "%s%.*s", curbp->b_fname, nlen, namep) >= len)
+	ret = snprintf(fn, len, "%s%.*s", curbp->b_fname, nlen, namep);
+	if (ret < 0 || ret >= (int)len)
 		return (ABORT); /* Name is too long. */
 
 	/* Return TRUE if the entry is a directory. */
@@ -922,6 +930,9 @@ dired_(char *dname)
 		if (errno == EACCES) {
 			dobeep();
 			ewprintf("Permission denied: %s", dname);
+		} else {
+			dobeep();
+			ewprintf("Error opening: %s", dname);
 		}
 		return (NULL);
 	}
@@ -1069,7 +1080,10 @@ createlist(struct buffer *bp)
 				free(d2);
 				return (ABORT);
 			}
-			SLIST_INSERT_AFTER(d1, d2, entry);
+			if (!d1)
+				SLIST_INSERT_HEAD(&delhead, d2, entry);
+			else
+				SLIST_INSERT_AFTER(d1, d2, entry);
 			d1 = d2;				
 		}
 		ret = TRUE;
@@ -1079,14 +1093,50 @@ createlist(struct buffer *bp)
 }
 
 int
+dired_jump(int f, int n)
+{
+	struct buffer   *bp;
+	const char	*modename;
+	char             dname[NFILEN], *fname;
+	int              ret, i;
+
+	/*
+	 * We use fundamental mode in dired, so just check we aren't in
+	 * dired mode for this specific function. Seems like a corner
+	 * case at the moment.
+	 */
+	for (i = 0; i <= curbp->b_nmodes; i++) {
+		modename = curbp->b_modes[i]->p_name;
+		if (strncmp(modename, "dired", 5) == 0)
+			return (dobeep_msg("In dired mode already"));
+	}
+
+	if (getbufcwd(dname, sizeof(dname)) != TRUE)
+		return (FALSE);
+
+	fname = curbp->b_fname;
+
+	if ((bp = dired_(dname)) == NULL)
+		return (FALSE);
+	curbp = bp;
+
+	ret = showbuffer(bp, curwp, WFFULL | WFMODE);
+	if (ret != TRUE)
+		return ret;
+
+	fname = adjustname(fname, TRUE);
+	if (fname != NULL)
+		gotofile(fname);
+
+	return (TRUE);
+}
+
+int
 d_gotofile(int f, int n)
 {
-	struct line	*lp, *nlp;
-	struct buffer   *curbp;
 	size_t		 lenfpath;
-	char		 fpath[NFILEN], fname[NFILEN];
-	char		*p, *fpth, *fnp = NULL;
-	int		 tmp;
+	char		 fpath[NFILEN];
+	char		*fpth, *fnp = NULL;
 
 	if (getbufcwd(fpath, sizeof(fpath)) != TRUE)
 		fpath[0] = '\0';
@@ -1098,13 +1148,23 @@ d_gotofile(int f, int n)
 	else if (fnp[0] == '\0')
 		return (FALSE);
 
-	fpth = adjustname(fpath, TRUE);		/* Removes last '/' if	*/
-	if (strlen(fpth) == lenfpath - 1) {	/* directory, hence -1.	*/
+	fpth = adjustname(fpath, TRUE);		/* Removes last '/' if dir...  */
+	if (fpth == NULL || strlen(fpth) == lenfpath - 1) { /* ...hence -1.    */
 		ewprintf("No file to find");	/* Current directory given so  */
 		return (TRUE);			/* return at present location. */
 	}
+	return gotofile(fpth);
+}
+
+int
+gotofile(char *fpth)
+{
+	struct line	*lp, *nlp;
+	char		 fname[NFILEN];
+	char		*p;
+	int		 tmp;
+
 	(void)xbasename(fname, fpth, NFILEN);
-	curbp = curwp->w_bufp;
 	tmp = 0;
 	for (lp = bfirstlp(curbp); lp != curbp->b_headp; lp = nlp) {
 		tmp++;

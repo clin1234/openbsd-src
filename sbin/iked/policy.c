@@ -1,6 +1,7 @@
-/*	$OpenBSD: policy.c,v 1.70 2020/09/09 21:25:42 tobhe Exp $	*/
+/*	$OpenBSD: policy.c,v 1.81 2021/04/09 09:15:04 tobhe Exp $	*/
 
 /*
+ * Copyright (c) 2020-2021 Tobias Heider <tobhe@openbsd.org>
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
  * Copyright (c) 2001 Daniel Hartmeier
  *
@@ -21,6 +22,8 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/tree.h>
+
+#include <netinet/in.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +51,7 @@ static __inline int
 static __inline int
 	 ts_insert_unique(struct iked_addr *, struct iked_tss *, int);
 
+static int	policy_test_flows(struct iked_policy *, struct iked_policy *);
 static int	proposals_match(struct iked_proposal *, struct iked_proposal *,
 		    struct iked_transform **, int);
 
@@ -75,7 +79,8 @@ policy_init(struct iked *env)
  */
 int
 policy_lookup(struct iked *env, struct iked_message *msg,
-    struct iked_proposals *proposals)
+    struct iked_proposals *proposals, struct iked_flows *flows,
+    int nflows)
 {
 	struct iked_policy	 pol;
 	char			*s, idstr[IKED_ID_SIZE];
@@ -91,6 +96,9 @@ policy_lookup(struct iked *env, struct iked_message *msg,
 	if (proposals != NULL)
 		pol.pol_proposals = *proposals;
 	pol.pol_af = msg->msg_peer.ss_family;
+	if (flows)
+		pol.pol_flows = *flows;
+	pol.pol_nflows = nflows;
 	if (msg->msg_flags & IKED_MSG_FLAGS_USE_TRANSPORT)
 		pol.pol_flags |= IKED_POLICY_TRANSPORT;
 	memcpy(&pol.pol_peer.addr, &msg->msg_peer, sizeof(msg->msg_peer));
@@ -121,6 +129,80 @@ policy_lookup(struct iked *env, struct iked_message *msg,
 }
 
 /*
+ * Lookup an iked policy matching the SA sa and store a pointer
+ * to the found policy in SA.
+ *
+ * Returns 0 on success and -1 if no matching policy was
+ * found
+ */
+int
+policy_lookup_sa(struct iked *env, struct iked_sa *sa)
+{
+	struct iked_policy	 pol, *pol_found;
+	struct iked_id		*lid, *pid;
+	char			*s, idstr[IKED_ID_SIZE];
+
+	/*
+	 * The SA should never be without policy. In the case of
+	 * 'ikectl reload' the policy is no longer in sc_policies
+	 * but is kept alive by the reference from the sa.
+	 */
+	if (sa->sa_policy == NULL) {
+		log_warn("%s: missing SA policy.", SPI_SA(sa, __func__));
+		return (-1);
+	}
+
+	bzero(&pol, sizeof(pol));
+	pol.pol_proposals = sa->sa_proposals;
+	pol.pol_af = sa->sa_peer.addr_af;
+	if (sa->sa_used_transport_mode)
+		pol.pol_flags |= IKED_POLICY_TRANSPORT;
+	memcpy(&pol.pol_peer.addr, &sa->sa_peer.addr, sizeof(sa->sa_peer.addr));
+	memcpy(&pol.pol_local.addr, &sa->sa_local.addr, sizeof(sa->sa_local.addr));
+	pol.pol_flows = sa->sa_policy->pol_flows;
+	pol.pol_nflows = sa->sa_policy->pol_nflows;
+
+	if (sa->sa_hdr.sh_initiator) {
+		lid = &sa->sa_iid;
+		pid = &sa->sa_rid;
+	} else {
+		lid = &sa->sa_rid;
+		pid = &sa->sa_iid;
+	}
+
+	if (pid->id_type &&
+	    ikev2_print_id(pid, idstr, IKED_ID_SIZE) == 0 &&
+	    (s = strchr(idstr, '/')) != NULL) {
+		pol.pol_peerid.id_type = pid->id_type;
+		pol.pol_peerid.id_length = strlen(s+1);
+		strlcpy(pol.pol_peerid.id_data, s+1,
+		    sizeof(pol.pol_peerid.id_data));
+		log_debug("%s: peerid '%s'", __func__, s+1);
+	}
+
+	if (lid->id_type &&
+	    ikev2_print_id(lid, idstr, IKED_ID_SIZE) == 0 &&
+	    (s = strchr(idstr, '/')) != NULL) {
+		pol.pol_localid.id_type = lid->id_type;
+		pol.pol_localid.id_length = strlen(s+1);
+		strlcpy(pol.pol_localid.id_data, s+1,
+		    sizeof(pol.pol_localid.id_data));
+		log_debug("%s: localid '%s'", __func__, s+1);
+	}
+
+	/* Try to find a matching policy for this message */
+	if ((pol_found = policy_test(env, &pol)) != NULL) {
+		log_debug("%s: found policy '%s'", SPI_SA(sa, __func__),
+		    pol_found->pol_name);
+		sa->sa_policy = pol_found;
+		return (0);
+	}
+
+	/* No policy found */
+	return (-1);
+}
+
+/*
  * Find a policy matching the query policy key in the global env.
  * If multiple matching policies are found the policy with the highest
  * priority is selected.
@@ -131,7 +213,6 @@ struct iked_policy *
 policy_test(struct iked *env, struct iked_policy *key)
 {
 	struct iked_policy	*p = NULL, *pol = NULL;
-	struct iked_flow	*flowkey;
 	unsigned int		 cnt = 0;
 
 	p = TAILQ_FIRST(&env->sc_policies);
@@ -155,15 +236,10 @@ policy_test(struct iked *env, struct iked_policy *key)
 			p = p->pol_skip[IKED_SKIP_SRC_ADDR];
 		else {
 			/*
-			 * Check if a specific flow is requested
-			 * (eg. for acquire messages from the kernel)
-			 * and find a matching flow.
+			 * Check if flows are requested and if they
+			 * are compatible.
 			 */
-			if (key->pol_nflows &&
-			    (flowkey = RB_MIN(iked_flows,
-			    &key->pol_flows)) != NULL &&
-			    RB_FIND(iked_flows, &p->pol_flows,
-			    flowkey) == NULL) {
+			if (key->pol_nflows && policy_test_flows(key, p)) {
 				p = TAILQ_NEXT(p, pol_entry);
 				continue;
 			}
@@ -174,6 +250,18 @@ policy_test(struct iked *env, struct iked_policy *key)
 			    memcmp(key->pol_peerid.id_data,
 			    p->pol_peerid.id_data,
 			    sizeof(key->pol_peerid.id_data)) != 0)) {
+				p = TAILQ_NEXT(p, pol_entry);
+				continue;
+			}
+
+			/* make sure the local ID matches */
+			if (key->pol_localid.id_type &&
+			    p->pol_localid.id_type &&
+			    (key->pol_localid.id_type != p->pol_localid.id_type ||
+			    memcmp(key->pol_localid.id_data,
+			    p->pol_localid.id_data,
+			    sizeof(key->pol_localid.id_data)) != 0)) {
+				log_info("%s: localid mismatch", __func__);
 				p = TAILQ_NEXT(p, pol_entry);
 				continue;
 			}
@@ -207,6 +295,19 @@ policy_test(struct iked *env, struct iked_policy *key)
 	return (pol);
 }
 
+static int
+policy_test_flows(struct iked_policy *key, struct iked_policy *p)
+{
+	struct iked_flow	*f;
+
+	for (f = RB_MIN(iked_flows, &key->pol_flows); f != NULL;
+	    f = RB_NEXT(iked_flows, &key->pol_flows, f))
+		if (RB_FIND(iked_flows, &p->pol_flows, f) == NULL)
+			return (-1);
+
+	return (0);
+}
+
 #define	IKED_SET_SKIP_STEPS(i)						\
 	do {								\
 		while (head[i] != cur) {				\
@@ -229,16 +330,16 @@ policy_calc_skip_steps(struct iked_policies *policies)
 	while (cur != NULL) {
 		if (cur->pol_flags & IKED_POLICY_SKIP)
 			IKED_SET_SKIP_STEPS(IKED_SKIP_FLAGS);
-		else if (cur->pol_af != AF_UNSPEC &&
+		if (cur->pol_af != AF_UNSPEC &&
 		    prev->pol_af != AF_UNSPEC &&
 		    cur->pol_af != prev->pol_af)
 			IKED_SET_SKIP_STEPS(IKED_SKIP_AF);
-		else if (cur->pol_ipproto && prev->pol_ipproto &&
+		if (cur->pol_ipproto && prev->pol_ipproto &&
 		    cur->pol_ipproto != prev->pol_ipproto)
 			IKED_SET_SKIP_STEPS(IKED_SKIP_PROTO);
-		else if (IKED_ADDR_NEQ(&cur->pol_peer, &prev->pol_peer))
+		if (IKED_ADDR_NEQ(&cur->pol_peer, &prev->pol_peer))
 			IKED_SET_SKIP_STEPS(IKED_SKIP_DST_ADDR);
-		else if (IKED_ADDR_NEQ(&cur->pol_local, &prev->pol_local))
+		if (IKED_ADDR_NEQ(&cur->pol_local, &prev->pol_local))
 			IKED_SET_SKIP_STEPS(IKED_SKIP_SRC_ADDR);
 
 		prev = cur;
@@ -331,7 +432,7 @@ sa_stateflags(struct iked_sa *sa, unsigned int flags)
 }
 
 int
-sa_stateok(struct iked_sa *sa, int state)
+sa_stateok(const struct iked_sa *sa, int state)
 {
 	unsigned int	 require;
 
@@ -566,6 +667,124 @@ sa_address(struct iked_sa *sa, struct iked_addr *addr, struct sockaddr *peer)
 		log_debug("%s: invalid address", __func__);
 		return (-1);
 	}
+	return (0);
+}
+
+int
+sa_configure_iface(struct iked *env, struct iked_sa *sa, int add)
+{
+	struct iked_flow	*saflow;
+	struct iovec		 iov[4];
+	int			 iovcnt;
+	struct sockaddr		*caddr;
+	struct sockaddr_in	*addr;
+	struct sockaddr_in	 mask;
+	struct sockaddr_in6	*addr6;
+	struct sockaddr_in6	 mask6;
+	int			 rdomain;
+
+	if (sa->sa_policy == NULL || sa->sa_policy->pol_iface == 0)
+		return (0);
+
+	if (!sa->sa_cp_addr && !sa->sa_cp_addr6)
+		return (0);
+
+	if (sa->sa_cp_addr) {
+		iovcnt = 0;
+		addr = (struct sockaddr_in *)&sa->sa_cp_addr->addr;
+		iov[0].iov_base = addr;
+		iov[0].iov_len = sizeof(*addr);
+		iovcnt++;
+
+		bzero(&mask, sizeof(mask));
+		mask.sin_addr.s_addr =
+		    prefixlen2mask(sa->sa_cp_addr->addr_mask ?
+		    sa->sa_cp_addr->addr_mask : 32);
+		mask.sin_family = AF_INET;
+		mask.sin_len = sizeof(mask);
+		iov[1].iov_base = &mask;
+		iov[1].iov_len = sizeof(mask);
+		iovcnt++;
+
+		iov[2].iov_base = &sa->sa_policy->pol_iface;
+		iov[2].iov_len = sizeof(sa->sa_policy->pol_iface);
+		iovcnt++;
+
+		if(proc_composev(&env->sc_ps, PROC_PARENT,
+		    add ? IMSG_IF_ADDADDR : IMSG_IF_DELADDR,
+		    iov, iovcnt))
+			return (-1);
+	}
+	if (sa->sa_cp_addr6) {
+		iovcnt = 0;
+		addr6 = (struct sockaddr_in6 *)&sa->sa_cp_addr6->addr;
+		iov[0].iov_base = addr6;
+		iov[0].iov_len = sizeof(*addr6);
+		iovcnt++;
+
+		bzero(&mask6, sizeof(mask6));
+		prefixlen2mask6(sa->sa_cp_addr6->addr_mask ?
+		    sa->sa_cp_addr6->addr_mask : 128,
+		    (uint32_t *)&mask6.sin6_addr.s6_addr);
+		mask6.sin6_family = AF_INET6;
+		mask6.sin6_len = sizeof(mask6);
+		iov[1].iov_base = &mask6;
+		iov[1].iov_len = sizeof(mask6);
+		iovcnt++;
+
+		iov[2].iov_base = &sa->sa_policy->pol_iface;
+		iov[2].iov_len = sizeof(sa->sa_policy->pol_iface);
+		iovcnt++;
+
+		if(proc_composev(&env->sc_ps, PROC_PARENT,
+		    add ? IMSG_IF_ADDADDR : IMSG_IF_DELADDR,
+		    iov, iovcnt))
+			return (-1);
+	}
+
+	if (add) {
+		/* Add direct route to peer */
+		if (vroute_setcloneroute(env, getrtable(),
+		    (struct sockaddr *)&sa->sa_peer.addr, 0, NULL))
+			return (-1);
+	} else {
+		if (vroute_setdelroute(env, getrtable(),
+		    (struct sockaddr *)&sa->sa_peer.addr,
+		    0, NULL))
+			return (-1);
+	}
+
+	TAILQ_FOREACH(saflow, &sa->sa_flows, flow_entry) {
+		rdomain = saflow->flow_rdomain == -1 ?
+		    getrtable() : saflow->flow_rdomain;
+
+		switch(saflow->flow_src.addr_af) {
+		case AF_INET:
+			caddr = (struct sockaddr *)&sa->sa_cp_addr->addr;
+			break;
+		case AF_INET6:
+			caddr = (struct sockaddr *)&sa->sa_cp_addr6->addr;
+			break;
+		default:
+			return (-1);
+		}
+		if (sockaddr_cmp((struct sockaddr *)&saflow->flow_src.addr,
+		    caddr, -1) != 0)
+			continue;
+
+		if (add) {
+			if (vroute_setaddroute(env, rdomain,
+			    (struct sockaddr *)&saflow->flow_dst.addr,
+			    saflow->flow_dst.addr_mask, caddr))
+				return (-1);
+		} else {
+			if (vroute_setdelroute(env, rdomain,
+			    (struct sockaddr *)&saflow->flow_dst.addr,
+			    saflow->flow_dst.addr_mask, caddr))
+				return (-1);
+		}
+	}
+
 	return (0);
 }
 
@@ -862,7 +1081,7 @@ proposals_negotiate(struct iked_proposals *result, struct iked_proposals *local,
 
 		if (config_add_transform(prop, chosen[i].xform_type,
 		    chosen[i].xform_id, chosen[i].xform_length,
-		    chosen[i].xform_keylength) == NULL)
+		    chosen[i].xform_keylength) != 0)
 			break;
 	}
 
@@ -874,7 +1093,7 @@ proposals_match(struct iked_proposal *local, struct iked_proposal *peer,
     struct iked_transform **xforms, int rekey)
 {
 	struct iked_transform	*tpeer, *tlocal;
-	unsigned int		 i, j, type, score, requiredh = 0, noauth = 0;
+	unsigned int		 i, j, type, score, requiredh = 0, nodh = 0, noauth = 0;
 	uint8_t			 protoid = peer->prop_protoid;
 	uint8_t			 peerxfs[IKEV2_XFORMTYPE_MAX];
 
@@ -911,8 +1130,19 @@ proposals_match(struct iked_proposal *local, struct iked_proposal *peer,
 			 */
 			if (rekey && requiredh == 0 &&
 			    protoid == IKEV2_SAPROTO_ESP &&
-			    tlocal->xform_type == IKEV2_XFORMTYPE_DH)
+			    tlocal->xform_type == IKEV2_XFORMTYPE_DH &&
+			    tlocal->xform_id != IKEV2_XFORMDH_NONE)
 				requiredh = 1;
+
+			/*
+			 * If none is an explicit option, don't require
+			 * DH group. Overrides requiredh = 1.
+			 */
+			if (rekey && nodh == 0 &&
+			    protoid == IKEV2_SAPROTO_ESP &&
+			    tlocal->xform_type == IKEV2_XFORMTYPE_DH &&
+			    tlocal->xform_id == IKEV2_XFORMDH_NONE)
+				nodh = 1;
 
 			/* Compare peer and local proposals */
 			if (tpeer->xform_type != tlocal->xform_type ||
@@ -952,7 +1182,7 @@ proposals_match(struct iked_proposal *local, struct iked_proposal *peer,
 			break;
 		} else if (protoid == IKEV2_SAPROTO_ESP && xforms[i] == NULL &&
 		    (i == IKEV2_XFORMTYPE_ENCR || i == IKEV2_XFORMTYPE_ESN ||
-		    (requiredh && i == IKEV2_XFORMTYPE_DH))) {
+		    (requiredh && !nodh && i == IKEV2_XFORMTYPE_DH))) {
 			score = 0;
 			break;
 		} else if (peerxfs[i] && xforms[i] == NULL) {

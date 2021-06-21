@@ -1,4 +1,4 @@
-/*	$OpenBSD: vioqcow2.c,v 1.14 2020/10/19 19:06:49 naddy Exp $	*/
+/*	$OpenBSD: vioqcow2.c,v 1.16 2021/06/16 16:55:02 dv Exp $	*/
 
 /*
  * Copyright (c) 2018 Ori Bernstein <ori@eigenstate.org>
@@ -19,20 +19,18 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
-#include <machine/vmmvar.h>
 #include <dev/pci/pcireg.h>
+#include <machine/vmmvar.h>
 
+#include <assert.h>
+#include <err.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <libgen.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <assert.h>
-#include <libgen.h>
-#include <err.h>
-#include <errno.h>
 
-#include "vmd.h"
-#include "vmm.h"
 #include "virtio.h"
 
 #define QCOW2_COMPRESSED	0x4000000000000000ull
@@ -634,27 +632,7 @@ int
 virtio_qcow2_create(const char *imgfile_path,
     const char *base_path, long imgsize)
 {
-	struct qcheader {
-		char magic[4];
-		uint32_t version;
-		uint64_t backingoff;
-		uint32_t backingsz;
-		uint32_t clustershift;
-		uint64_t disksz;
-		uint32_t cryptmethod;
-		uint32_t l1sz;
-		uint64_t l1off;
-		uint64_t refoff;
-		uint32_t refsz;
-		uint32_t snapcount;
-		uint64_t snapsz;
-		/* v3 additions */
-		uint64_t incompatfeatures;
-		uint64_t compatfeatures;
-		uint64_t autoclearfeatures;
-		uint32_t reforder;
-		uint32_t headersz;
-	} __packed hdr, basehdr;
+	struct qcheader hdr, basehdr;
 	int fd, ret;
 	ssize_t base_len;
 	uint64_t l1sz, refsz, disksz, initsz, clustersz;
@@ -729,7 +707,7 @@ virtio_qcow2_create(const char *imgfile_path,
 	if (ftruncate(fd, (off_t)initsz + clustersz) == -1)
 		goto error;
 
-	/* 
+	/*
 	 * Paranoia: if our disk image takes more than one cluster
 	 * to refcount the initial image, fail.
 	 */

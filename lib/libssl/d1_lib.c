@@ -1,4 +1,4 @@
-/* $OpenBSD: d1_lib.c,v 1.51 2020/10/03 17:54:27 jsing Exp $ */
+/* $OpenBSD: d1_lib.c,v 1.56 2021/06/19 16:52:47 jsing Exp $ */
 /*
  * DTLS implementation written by Nagendra Modadugu
  * (nagendra@cs.stanford.edu) for the OpenSSL project 2005.
@@ -67,6 +67,7 @@
 
 #include <openssl/objects.h>
 
+#include "dtls_locl.h"
 #include "pqueue.h"
 #include "ssl_locl.h"
 
@@ -196,6 +197,12 @@ dtls1_clear(SSL *s)
 		memset(s->d1, 0, sizeof(*s->d1));
 		s->d1->internal = internal;
 
+		D1I(s)->r_epoch =
+		    tls12_record_layer_initial_epoch(s->internal->rl);
+
+		D1I(s)->processed_rcds.epoch = D1I(s)->r_epoch;
+		D1I(s)->unprocessed_rcds.epoch = D1I(s)->r_epoch + 1;
+
 		if (s->server) {
 			D1I(s)->cookie_len = sizeof(D1I(s)->cookie);
 		}
@@ -251,14 +258,15 @@ dtls1_ctrl(SSL *s, int cmd, long larg, void *parg)
 const SSL_CIPHER *
 dtls1_get_cipher(unsigned int u)
 {
-	const SSL_CIPHER *ciph = ssl3_get_cipher(u);
+	const SSL_CIPHER *cipher;
 
-	if (ciph != NULL) {
-		if (ciph->algorithm_enc == SSL_RC4)
-			return NULL;
-	}
+	if ((cipher = ssl3_get_cipher(u)) == NULL)
+		return NULL;
 
-	return ciph;
+	if (cipher->algorithm_enc == SSL_RC4)
+		return NULL;
+
+	return cipher;
 }
 
 void
@@ -422,25 +430,4 @@ dtls1_listen(SSL *s, struct sockaddr *client)
 
 	(void)BIO_dgram_get_peer(SSL_get_rbio(s), client);
 	return 1;
-}
-
-void
-dtls1_build_sequence_number(unsigned char *dst, unsigned char *seq,
-    unsigned short epoch)
-{
-	CBB cbb;
-
-	if (!CBB_init_fixed(&cbb, dst, SSL3_SEQUENCE_SIZE))
-		goto err;
-	if (!CBB_add_u16(&cbb, epoch))
-		goto err;
-	if (!CBB_add_bytes(&cbb, &seq[2], SSL3_SEQUENCE_SIZE - 2))
-		goto err;
-	if (!CBB_finish(&cbb, NULL, NULL))
-		goto err;
-
-	return;
-
- err:
-	CBB_cleanup(&cbb);
 }

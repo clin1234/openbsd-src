@@ -1,4 +1,4 @@
-/*	$OpenBSD: exdwusb.c,v 1.2 2019/08/29 14:19:27 kettenis Exp $	*/
+/*	$OpenBSD: exdwusb.c,v 1.4 2021/03/25 04:12:01 jsg Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -16,15 +16,14 @@
  */
 
 #include <sys/param.h>
-#include <sys/systm.h>
 #include <sys/device.h>
 
-#include <machine/bus.h>
 #include <machine/fdt.h>
 
 #include <arm/simplebus/simplebusvar.h>
 
 #include <dev/ofw/openfirm.h>
+#include <dev/ofw/ofw_clock.h>
 #include <dev/ofw/fdt.h>
 
 struct exdwusb_softc {
@@ -55,6 +54,8 @@ exdwusb_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct exdwusb_softc *sc = (struct exdwusb_softc *)self;
 	struct fdt_attach_args *faa = aux;
+
+	clock_enable_all(faa->fa_node);
 
 	simplebus_attach(parent, &sc->sc_sbus.sc_dev, faa);
 }

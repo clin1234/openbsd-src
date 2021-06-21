@@ -1,4 +1,4 @@
-/*	$OpenBSD: editor.c,v 1.363 2019/11/19 06:20:37 otto Exp $	*/
+/*	$OpenBSD: editor.c,v 1.368 2021/05/30 19:02:30 kettenis Exp $	*/
 
 /*
  * Copyright (c) 1997-2000 Todd C. Miller <millert@openbsd.org>
@@ -172,7 +172,7 @@ void	zero_partitions(struct disklabel *);
 u_int64_t max_partition_size(struct disklabel *, int);
 void	display_edit(struct disklabel *, char);
 void	psize(u_int64_t sz, char unit, struct disklabel *lp);
-char	*get_token(char **, size_t *);
+char	*get_token(char **);
 int	apply_unit(double, u_char, u_int64_t *);
 int	parse_sizespec(const char *, double *, char **);
 int	parse_sizerange(char *, u_int64_t *, u_int64_t *);
@@ -571,8 +571,8 @@ editor_allocspace(struct disklabel *lp_org)
 		pstart = DL_GETPOFFSET(pp);
 		pend = pstart + psz;
 		if (i != RAW_PART && psz != 0 &&
-		    ((pstart >= starting_sector && pstart <= ending_sector) ||
-		    (pend > starting_sector && pend < ending_sector))) {
+		    ((pstart >= starting_sector && pstart < ending_sector) ||
+		    (pend > starting_sector && pend <= ending_sector))) {
 			overlap = 1;
 			break;
 		}
@@ -605,7 +605,7 @@ again:
 
 	/* bump max swap based on phys mem, little physmem gets 2x swap */
 	if (index == 0 && alloc_table == alloc_table_default) {
-		if (physmem / DEV_BSIZE < MEG(256))
+		if (physmem && physmem / DEV_BSIZE < MEG(256))
 			alloc[1].minsz = alloc[1].maxsz = 2 * (physmem /
 			    DEV_BSIZE);
 		else
@@ -2331,8 +2331,8 @@ void
 parse_autotable(char *filename)
 {
 	FILE	*cfile;
-	size_t	 len;
-	char	*buf, *t;
+	size_t	 linesize = 0;
+	char	*line = NULL, *buf, *t;
 	uint	 idx = 0, pctsum = 0;
 	struct space_allocation *sa;
 
@@ -2342,7 +2342,7 @@ parse_autotable(char *filename)
 		err(1, NULL);
 	alloc_table_nitems = 1;
 
-	while ((buf = fgetln(cfile, &len)) != NULL) {
+	while (getline(&line, &linesize, cfile) != -1) {
 		if ((alloc_table[0].table = reallocarray(alloc_table[0].table,
 		    idx + 1, sizeof(*sa))) == NULL)
 			err(1, NULL);
@@ -2350,13 +2350,14 @@ parse_autotable(char *filename)
 		memset(sa, 0, sizeof(*sa));
 		idx++;
 
-		if ((sa->mp = get_token(&buf, &len)) == NULL ||
+		buf = line;
+		if ((sa->mp = get_token(&buf)) == NULL ||
 		    (sa->mp[0] != '/' && strcmp(sa->mp, "swap")))
 			errx(1, "%s: parse error on line %u", filename, idx);
-		if ((t = get_token(&buf, &len)) == NULL ||
+		if ((t = get_token(&buf)) == NULL ||
 		    parse_sizerange(t, &sa->minsz, &sa->maxsz) == -1)
 			errx(1, "%s: parse error on line %u", filename, idx);
-		if ((t = get_token(&buf, &len)) != NULL &&
+		if ((t = get_token(&buf)) != NULL &&
 		    parse_pct(t, &sa->rate) == -1)
 			errx(1, "%s: parse error on line %u", filename, idx);
 		if (sa->minsz > sa->maxsz)
@@ -2367,29 +2368,27 @@ parse_autotable(char *filename)
 	if (pctsum > 100)
 		errx(1, "%s: sum of extra space allocation > 100%%", filename);
 	alloc_table[0].sz = idx;
+	free(line);
 	fclose(cfile);
 }
 
 char *
-get_token(char **s, size_t *len)
+get_token(char **s)
 {
 	char	*p, *r;
 	size_t	 tlen = 0;
 
 	p = *s;
-	while (*len > 0 && !isspace((u_char)*s[0])) {
+	while (**s != '\0' && !isspace((u_char)**s)) {
 		(*s)++;
-		(*len)--;
 		tlen++;
 	}
 	if (tlen == 0)
 		return (NULL);
 
 	/* eat whitespace */
-	while (*len > 0 && isspace((u_char)*s[0])) {
+	while (isspace((u_char)**s))
 		(*s)++;
-		(*len)--;
-	}
 
 	if ((r = strndup(p, tlen)) == NULL)
 		err(1, NULL);

@@ -1,5 +1,7 @@
-#	$OpenBSD: Slaacctl.py,v 1.2 2019/12/27 09:17:07 florian Exp $
+# $OpenBSD: Slaacctl.py,v 1.4 2021/04/14 12:32:56 bluhm Exp $
+
 # Copyright (c) 2017 Florian Obser <florian@openbsd.org>
+# Copyright (c) 2020 Alexander Bluhm <bluhm@openbsd.org>
 #
 # Permission to use, copy, modify, and distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
@@ -24,7 +26,7 @@ class ShowInterface(object):
 		self.debug = debug
 		self.index = None
 		self.running = None
-		self.privacy = None
+		self.temporary = None
 		self.lladdr = None
 		self.linklocal = None
 		self.RAs = []
@@ -32,7 +34,7 @@ class ShowInterface(object):
 		self.def_router_proposals = []
 		self.rdns_proposals = []
 		self.out = subprocess.check_output(['slaacctl', '-s', self.sock,
-		    'sh', 'in', self.ifname])
+		    'sh', 'in', self.ifname], encoding='UTF-8')
 		self.parse(self.out)
 
 	def __str__(self):
@@ -41,7 +43,7 @@ class ShowInterface(object):
 		rep[self.ifname] = iface
 		iface['index'] = self.index
 		iface['running'] = self.running
-		iface['privacy'] = self.privacy
+		iface['temporary'] = self.temporary
 		iface['lladdr'] = self.lladdr
 		iface['linklocal'] = self.linklocal
 		iface['RAs'] = self.RAs
@@ -57,10 +59,10 @@ class ShowInterface(object):
 		addr_proposal = None
 		def_router_proposal = None
 		rdns_proposal = None
-		lines = str.split("\n")
+		lines = str.splitlines()
 		for line in lines:
 			if self.debug == 1:
-				print line
+				print(line)
 			if re.match("^\s*$", line):
 				pass
 			elif state == 'START':
@@ -71,10 +73,10 @@ class ShowInterface(object):
 				state = 'IFINFO'
 			elif state == 'IFINFO':
 				m = re.match("^\s+index:\s+(\d+)\s+running:"
-				    + "\s+(\w+)\s+privacy:\s+(\w+)", line)
+				    + "\s+(\w+)\s+temporary:\s+(\w+)", line)
 				self.index = m.group(1)
 				self.running = m.group(2)
-				self.privacy = m.group(3)
+				self.temporary = m.group(3)
 				state = 'IFLLADDR'
 			elif state == 'IFLLADDR':
 				self.lladdr = re.match("^\s+lladdr:\s+(.*)",
@@ -167,7 +169,7 @@ class ShowInterface(object):
 				state = 'RAOPTIONS'
 			elif state == 'ADDRESS_PROPOSAL':
 				is_id = re.match("^\s+id:\s+(\d+), "
-				    + "state:\s+(.+), privacy: (.+)", line)
+				    + "state:\s+(.+), temporary: (.+)", line)
 				is_defrouter = re.match("\s+Default router "
 				    + "proposals", line)
 				if is_id:
@@ -176,7 +178,7 @@ class ShowInterface(object):
 					    addr_proposal)
 					addr_proposal['id'] = is_id.group(1)
 					addr_proposal['state'] = is_id.group(2)
-					addr_proposal['privacy'] = \
+					addr_proposal['temporary'] = \
 					    is_id.group(3)
 					state = 'ADDRESS_PROPOSAL_LIFETIME'
 				elif is_defrouter:

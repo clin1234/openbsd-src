@@ -1,4 +1,4 @@
-/*	$OpenBSD: tree.c,v 1.6 2018/12/23 16:06:24 gilles Exp $	*/
+/*	$OpenBSD: tree.c,v 1.8 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2012 Eric Faurot <eric@openbsd.org>
@@ -16,15 +16,13 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
 #include <sys/tree.h>
 
-#include <err.h>
 #include <inttypes.h>
 #include <stdlib.h>
-#include <limits.h>
 
 #include "tree.h"
+#include "log.h"
 
 struct treeentry {
 	SPLAY_ENTRY(treeentry)	 entry;
@@ -54,7 +52,7 @@ tree_set(struct tree *t, uint64_t id, void *data)
 	key.id = id;
 	if ((entry = SPLAY_FIND(_tree, &t->tree, &key)) == NULL) {
 		if ((entry = malloc(sizeof *entry)) == NULL)
-			err(1, "tree_set: malloc");
+			fatal("tree_set: malloc");
 		entry->id = id;
 		SPLAY_INSERT(_tree, &t->tree, entry);
 		old = NULL;
@@ -73,11 +71,11 @@ tree_xset(struct tree *t, uint64_t id, void *data)
 	struct treeentry	*entry;
 
 	if ((entry = malloc(sizeof *entry)) == NULL)
-		err(1, "tree_xset: malloc");
+		fatal("tree_xset: malloc");
 	entry->id = id;
 	entry->data = data;
 	if (SPLAY_INSERT(_tree, &t->tree, entry))
-		errx(1, "tree_xset(%p, 0x%016"PRIx64 ")", t, id);
+		fatalx("tree_xset(%p, 0x%016"PRIx64 ")", t, id);
 	t->count += 1;
 }
 
@@ -100,7 +98,7 @@ tree_xget(struct tree *t, uint64_t id)
 
 	key.id = id;
 	if ((entry = SPLAY_FIND(_tree, &t->tree, &key)) == NULL)
-		errx(1, "tree_get(%p, 0x%016"PRIx64 ")", t, id);
+		fatalx("tree_get(%p, 0x%016"PRIx64 ")", t, id);
 
 	return (entry->data);
 }
@@ -131,7 +129,7 @@ tree_xpop(struct tree *t, uint64_t id)
 
 	key.id = id;
 	if ((entry = SPLAY_FIND(_tree, &t->tree, &key)) == NULL)
-		errx(1, "tree_xpop(%p, 0x%016" PRIx64 ")", t, id);
+		fatalx("tree_xpop(%p, 0x%016" PRIx64 ")", t, id);
 
 	data = entry->data;
 	SPLAY_REMOVE(_tree, &t->tree, entry);
@@ -238,7 +236,7 @@ tree_merge(struct tree *dst, struct tree *src)
 		entry = SPLAY_ROOT(&src->tree);
 		SPLAY_REMOVE(_tree, &src->tree, entry);
 		if (SPLAY_INSERT(_tree, &dst->tree, entry))
-			errx(1, "tree_merge: duplicate");
+			fatalx("tree_merge: duplicate");
 	}
 	dst->count += src->count;
 	src->count = 0;

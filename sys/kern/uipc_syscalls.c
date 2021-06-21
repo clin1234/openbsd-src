@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_syscalls.c,v 1.187 2020/09/29 11:48:54 claudio Exp $	*/
+/*	$OpenBSD: uipc_syscalls.c,v 1.192 2021/06/02 11:30:23 mvs Exp $	*/
 /*	$NetBSD: uipc_syscalls.c,v 1.19 1996/02/09 19:00:48 christos Exp $	*/
 
 /*
@@ -308,7 +308,7 @@ doaccept(struct proc *p, int sock, struct sockaddr *name, socklen_t *anamelen,
 	    : (flags & SOCK_NONBLOCK ? FNONBLOCK : 0);
 
 	/* connection has been removed from the listen queue */
-	KNOTE(&head->so_rcv.sb_sel.si_note, NOTE_SUBMIT);
+	KNOTE(&head->so_rcv.sb_sel.si_note, 0);
 
 	fp->f_type = DTYPE_SOCKET;
 	fp->f_flag = FREAD | FWRITE | nflag;
@@ -465,13 +465,13 @@ sys_socketpair(struct proc *p, void *v, register_t *retval)
 	fp2->f_data = so2;
 	error = copyout(sv, SCARG(uap, rsv), 2 * sizeof (int));
 	if (error == 0) {
+		fdinsert(fdp, sv[0], cloexec, fp1);
+		fdinsert(fdp, sv[1], cloexec, fp2);
+		fdpunlock(fdp);
 #ifdef KTRACE
 		if (KTRPOINT(p, KTR_STRUCT))
 			ktrfds(p, sv, 2);
 #endif
-		fdinsert(fdp, sv[0], cloexec, fp1);
-		fdinsert(fdp, sv[1], cloexec, fp2);
-		fdpunlock(fdp);
 		FRELE(fp1, p);
 		FRELE(fp2, p);
 		return (0);
@@ -645,7 +645,7 @@ sendit(struct proc *p, int s, struct msghdr *mp, int flags, register_t *retsize)
 			    mp->msg_controllen);
 #endif
 	} else
-		control = 0;
+		control = NULL;
 #ifdef KTRACE
 	if (KTRPOINT(p, KTR_GENIO)) {
 		ktriov = mallocarray(auio.uio_iovcnt, sizeof(struct iovec),
@@ -782,7 +782,7 @@ recvit(struct proc *p, int s, struct msghdr *mp, caddr_t namelenp,
 	struct mbuf *from = NULL, *control = NULL;
 #ifdef KTRACE
 	struct iovec *ktriov = NULL;
-	int iovlen = 0;
+	int iovlen = 0, kmsgflags;
 #endif
 
 	if ((error = getsock(p, s, &fp)) != 0)
@@ -812,6 +812,7 @@ recvit(struct proc *p, int s, struct msghdr *mp, caddr_t namelenp,
 
 		memcpy(ktriov, auio.uio_iov, iovlen);
 	}
+	kmsgflags = mp->msg_flags;
 #endif
 	len = auio.uio_resid;
 	if (fp->f_flag & FNONBLOCK)
@@ -873,8 +874,14 @@ recvit(struct proc *p, int s, struct msghdr *mp, caddr_t namelenp,
 				}
 				error = copyout(mtod(m, caddr_t), cp, i);
 #ifdef KTRACE
-				if (KTRPOINT(p, KTR_STRUCT) && error == 0 && i)
+				if (KTRPOINT(p, KTR_STRUCT) && error == 0 && i) {
+					/* msg_flags potentially incorrect */
+					int rmsgflags = mp->msg_flags;
+
+					mp->msg_flags = kmsgflags;
 					ktrcmsghdr(p, mtod(m, char *), i);
+					mp->msg_flags = rmsgflags;
+				}
 #endif
 				if (m->m_next)
 					i = ALIGN(i);
@@ -1164,13 +1171,14 @@ sys_setrtable(struct proc *p, void *v, register_t *retval)
 	struct sys_setrtable_args /* {
 		syscallarg(int) rtableid;
 	} */ *uap = v;
+	u_int ps_rtableid = p->p_p->ps_rtableid;
 	int rtableid, error;
 
 	rtableid = SCARG(uap, rtableid);
 
-	if (p->p_p->ps_rtableid == (u_int)rtableid)
+	if (ps_rtableid == rtableid)
 		return (0);
-	if (p->p_p->ps_rtableid != 0 && (error = suser(p)) != 0)
+	if (ps_rtableid != 0 && (error = suser(p)) != 0)
 		return (error);
 	if (rtableid < 0 || !rtable_exists((u_int)rtableid))
 		return (EINVAL);

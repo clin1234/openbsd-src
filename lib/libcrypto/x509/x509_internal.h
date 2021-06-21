@@ -1,4 +1,4 @@
-/* $OpenBSD: x509_internal.h,v 1.4 2020/11/11 18:49:34 jsing Exp $ */
+/* $OpenBSD: x509_internal.h,v 1.7 2021/03/12 15:53:38 tb Exp $ */
 /*
  * Copyright (c) 2020 Bob Beck <beck@openbsd.org>
  *
@@ -51,8 +51,9 @@ struct x509_constraints_name {
 
 struct x509_constraints_names {
 	struct x509_constraints_name **names;
-	size_t names_len;
 	size_t names_count;
+	size_t names_len;
+	size_t names_max;
 };
 
 struct x509_verify_chain {
@@ -65,6 +66,7 @@ struct x509_verify_ctx {
 	X509_STORE_CTX *xsc;
 	struct x509_verify_chain **chains;	/* Validated chains */
 	size_t chains_count;
+	int dump_chain;			/* Dump current chain without erroring */
 	STACK_OF(X509) *roots;		/* Trusted roots for this validation */
 	STACK_OF(X509) *intermediates;	/* Intermediates provided by peer */
 	time_t *check_time;		/* Time for validity checks */
@@ -73,8 +75,8 @@ struct x509_verify_ctx {
 	size_t max_depth;		/* Max chain depth for validation */
 	size_t max_sigs;		/* Max number of signature checks */
 	size_t sig_checks;		/* Number of signature checks done */
-	size_t error_depth; 		/* Depth of last error seen */
-	int error; 			/* Last error seen */
+	size_t error_depth;		/* Depth of last error seen */
+	int error;			/* Last error seen */
 };
 
 int ASN1_time_tm_clamp_notafter(struct tm *tm);
@@ -100,7 +102,7 @@ int x509_constraints_names_add(struct x509_constraints_names *names,
 struct x509_constraints_names *x509_constraints_names_dup(
     struct x509_constraints_names *names);
 void x509_constraints_names_clear(struct x509_constraints_names *names);
-struct x509_constraints_names *x509_constraints_names_new(void);
+struct x509_constraints_names *x509_constraints_names_new(size_t names_max);
 void x509_constraints_names_free(struct x509_constraints_names *names);
 int x509_constraints_valid_host(uint8_t *name, size_t len);
 int x509_constraints_valid_sandns(uint8_t *name, size_t len);

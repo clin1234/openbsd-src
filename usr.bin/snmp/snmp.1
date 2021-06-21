@@ -1,4 +1,4 @@
-.\" $OpenBSD: snmp.1,v 1.15 2020/09/14 15:12:27 martijn Exp $
+.\" $OpenBSD: snmp.1,v 1.18 2021/06/20 20:02:14 martijn Exp $
 .\"
 .\" Copyright (c) 2019 Martijn van Duren <martijn@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: September 14 2020 $
+.Dd $Mdocdate: June 20 2021 $
 .Dt SNMP 1
 .Os
 .Sh NAME
@@ -170,7 +170,7 @@ If no size suffix is shown the sizes are in kilobytes.
 Dump the tree of compiled-in MIB objects.
 If
 .Ar oid
-is specified it wil print the objects in the requested output format if
+is specified it will print the objects in the requested output format if
 available, or print a warning if the object can't be found.
 .El
 .Pp
@@ -197,7 +197,7 @@ Options are
 or
 .Cm SHA-512 .
 This option defaults to
-.Cm MD5 .
+.Cm SHA-256 .
 This option is only used by
 .Fl v Cm 3 .
 .It Fl C Ar appopt
@@ -440,6 +440,8 @@ Options are
 .Cm DES
 and
 .Cm AES .
+This option defaults to
+.Cm AES .
 This option is only used by
 .Fl v Cm 3 .
 .It Fl Z Ar boots , Ns Ar time
@@ -524,7 +526,6 @@ A regular string.
 Timeticks in centiseconds.
 .It Cm u
 Unsigned integer.
-Actually a normal integer for compatibility with netsnmp.
 .It Cm x
 A hex string.
 Similar to a decimal string, but in hexadecimal format.

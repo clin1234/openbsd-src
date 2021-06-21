@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_ah.c,v 1.144 2019/09/30 01:53:05 dlg Exp $ */
+/*	$OpenBSD: ip_ah.c,v 1.147 2021/06/18 15:34:21 bluhm Exp $ */
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr) and
@@ -98,6 +98,7 @@ ah_init(struct tdb *tdbp, struct xformsw *xsp, struct ipsecinit *ii)
 {
 	struct auth_hash *thash = NULL;
 	struct cryptoini cria, crin;
+	int error;
 
 	/* Authentication operation. */
 	switch (ii->ii_authalg) {
@@ -162,7 +163,10 @@ ah_init(struct tdb *tdbp, struct xformsw *xsp, struct ipsecinit *ii)
 		cria.cri_next = &crin;
 	}
 
-	return crypto_newsession(&tdbp->tdb_cryptoid, &cria, 0);
+	KERNEL_LOCK();
+	error = crypto_newsession(&tdbp->tdb_cryptoid, &cria, 0);
+	KERNEL_UNLOCK();
+	return error;
 }
 
 /*
@@ -171,7 +175,7 @@ ah_init(struct tdb *tdbp, struct xformsw *xsp, struct ipsecinit *ii)
 int
 ah_zeroize(struct tdb *tdbp)
 {
-	int err;
+	int error;
 
 	if (tdbp->tdb_amxkey) {
 		explicit_bzero(tdbp->tdb_amxkey, tdbp->tdb_amxkeylen);
@@ -179,9 +183,11 @@ ah_zeroize(struct tdb *tdbp)
 		tdbp->tdb_amxkey = NULL;
 	}
 
-	err = crypto_freesession(tdbp->tdb_cryptoid);
+	KERNEL_LOCK();
+	error = crypto_freesession(tdbp->tdb_cryptoid);
+	KERNEL_UNLOCK();
 	tdbp->tdb_cryptoid = 0;
-	return err;
+	return error;
 }
 
 /*
@@ -327,7 +333,7 @@ ah_massage_headers(struct mbuf **m0, int af, int skip, int alg, int out)
 #ifdef INET6
 	case AF_INET6:  /* Ugly... */
 		/* Copy and "cook" the IPv6 header. */
-		m_copydata(m, 0, sizeof(ip6), (caddr_t) &ip6);
+		m_copydata(m, 0, sizeof(ip6), &ip6);
 
 		/* We don't do IPv6 Jumbograms. */
 		if (ip6.ip6_plen == 0) {
@@ -464,8 +470,7 @@ ah_massage_headers(struct mbuf **m0, int af, int skip, int alg, int out)
 					    sizeof(struct in6_addr) *
 					    (rh0->ip6r0_segleft - 1));
 
-					m_copydata(m, 0, sizeof(ip6),
-					    (caddr_t)&ip6);
+					m_copydata(m, 0, sizeof(ip6), &ip6);
 					addr[0] = ip6.ip6_dst;
 					ip6.ip6_dst = finaldst;
 					error = m_copyback(m, 0, sizeof(ip6),
@@ -539,13 +544,12 @@ ah_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 	rplen = AH_FLENGTH + sizeof(u_int32_t);
 
 	/* Save the AH header, we use it throughout. */
-	m_copydata(m, skip + offsetof(struct ah, ah_hl), sizeof(u_int8_t),
-	    (caddr_t) &hl);
+	m_copydata(m, skip + offsetof(struct ah, ah_hl), sizeof(u_int8_t), &hl);
 
 	/* Replay window checking, if applicable. */
 	if (tdb->tdb_wnd > 0) {
 		m_copydata(m, skip + offsetof(struct ah, ah_rpl),
-		    sizeof(u_int32_t), (caddr_t) &btsx);
+		    sizeof(u_int32_t), &btsx);
 		btsx = ntohl(btsx);
 
 		switch (checkreplaywindow(tdb, btsx, &esn, 0)) {
@@ -668,7 +672,7 @@ ah_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 	 * Save the authenticator, the skipped portion of the packet,
 	 * and the AH header.
 	 */
-	m_copydata(m, 0, skip + rplen + ahx->authsize, (caddr_t) (tc + 1));
+	m_copydata(m, 0, skip + rplen + ahx->authsize, tc + 1);
 
 	/* Zeroize the authenticator on the packet. */
 	m_copyback(m, skip + rplen, ahx->authsize, ipseczeroes, M_NOWAIT);
@@ -698,7 +702,10 @@ ah_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 	tc->tc_rdomain = tdb->tdb_rdomain;
 	memcpy(&tc->tc_dst, &tdb->tdb_dst, sizeof(union sockaddr_union));
 
-	return crypto_dispatch(crp);
+	KERNEL_LOCK();
+	error = crypto_dispatch(crp);
+	KERNEL_UNLOCK();
+	return error;
 
  drop:
 	m_freem(m);
@@ -751,7 +758,7 @@ ah_input_cb(struct tdb *tdb, struct tdb_crypto *tc, struct mbuf *m, int clen)
 	/* Replay window checking, if applicable. */
 	if (tdb->tdb_wnd > 0) {
 		m_copydata(m, skip + offsetof(struct ah, ah_rpl),
-		    sizeof(u_int32_t), (caddr_t) &btsx);
+		    sizeof(u_int32_t), &btsx);
 		btsx = ntohl(btsx);
 
 		switch (checkreplaywindow(tdb, btsx, &esn, 1)) {
@@ -890,6 +897,7 @@ ah_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	struct tdb_crypto *tc = NULL;
 	struct mbuf *mi;
 	struct cryptop *crp = NULL;
+	u_int64_t replay64;
 	u_int16_t iplen;
 	int error, rplen, roff;
 	u_int8_t prot;
@@ -1033,7 +1041,7 @@ ah_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	ah = (struct ah *)(mtod(mi, caddr_t) + roff);
 
 	/* Initialize the AH header. */
-	m_copydata(m, protoff, sizeof(u_int8_t), (caddr_t) &ah->ah_nh);
+	m_copydata(m, protoff, sizeof(u_int8_t), &ah->ah_nh);
 	ah->ah_hl = (rplen + ahx->authsize - AH_FLENGTH) / sizeof(u_int32_t);
 	ah->ah_rv = 0;
 	ah->ah_spi = tdb->tdb_spi;
@@ -1041,8 +1049,8 @@ ah_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	/* Zeroize authenticator. */
 	m_copyback(m, skip + rplen, ahx->authsize, ipseczeroes, M_NOWAIT);
 
-	tdb->tdb_rpl++;
-	ah->ah_rpl = htonl((u_int32_t)(tdb->tdb_rpl & 0xffffffff));
+	replay64 = tdb->tdb_rpl++;
+	ah->ah_rpl = htonl((u_int32_t)replay64);
 #if NPFSYNC > 0
 	pfsync_update_tdb(tdb,1);
 #endif
@@ -1071,7 +1079,7 @@ ah_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	if ((tdb->tdb_wnd > 0) && (tdb->tdb_flags & TDBF_ESN)) {
 		u_int32_t esn;
 
-		esn = htonl((u_int32_t)(tdb->tdb_rpl >> 32));
+		esn = htonl((u_int32_t)(replay64 >> 32));
 		memcpy(crda->crd_esn, &esn, 4);
 		crda->crd_flags |= CRD_F_ESN;
 	}
@@ -1086,7 +1094,7 @@ ah_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	}
 
 	/* Save the skipped portion of the packet. */
-	m_copydata(m, 0, skip, (caddr_t) (tc + 1));
+	m_copydata(m, 0, skip, tc + 1);
 
 	/*
 	 * Fix IP header length on the header used for
@@ -1145,7 +1153,10 @@ ah_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	tc->tc_rdomain = tdb->tdb_rdomain;
 	memcpy(&tc->tc_dst, &tdb->tdb_dst, sizeof(union sockaddr_union));
 
-	return crypto_dispatch(crp);
+	KERNEL_LOCK();
+	error = crypto_dispatch(crp);
+	KERNEL_UNLOCK();
+	return error;
 
  drop:
 	m_freem(m);

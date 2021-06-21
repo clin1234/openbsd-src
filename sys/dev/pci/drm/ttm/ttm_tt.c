@@ -282,7 +282,9 @@ int ttm_dma_tt_init(struct ttm_dma_tt *ttm_dma, struct ttm_buffer_object *bo,
 	    &ttm_dma->map)) {
 		km_free(ttm_dma->segs, round_page(ttm->num_pages *
 		    sizeof(bus_dma_segment_t)), &kv_any, &kp_zero);
-		ttm_tt_destroy(ttm);
+		kvfree(ttm->pages);
+		ttm->pages = NULL;
+		ttm_dma->dma_address = NULL;
 		pr_err("Failed allocating page table\n");
 		return -ENOMEM;
 	}
@@ -322,7 +324,12 @@ int ttm_sg_tt_init(struct ttm_dma_tt *ttm_dma, struct ttm_buffer_object *bo,
 	    &ttm_dma->map)) {
 		km_free(ttm_dma->segs, round_page(ttm->num_pages *
 		    sizeof(bus_dma_segment_t)), &kv_any, &kp_zero);
-		ttm_tt_destroy(ttm);
+		if (ttm->pages)
+			kvfree(ttm->pages);
+		else
+			kvfree(ttm_dma->dma_address);
+		ttm->pages = NULL;
+		ttm_dma->dma_address = NULL;
 		pr_err("Failed allocating page table\n");
 		return -ENOMEM;
 	}
@@ -397,7 +404,7 @@ int ttm_tt_swapin(struct ttm_tt *ttm)
 	BUG_ON(swap_storage == NULL);
 
 	TAILQ_INIT(&plist);
-	if (uvm_objwire(swap_storage, 0, ttm->num_pages << PAGE_SHIFT, &plist))
+	if (uvm_obj_wire(swap_storage, 0, ttm->num_pages << PAGE_SHIFT, &plist))
 		goto out_err;
 
 	from_page = TAILQ_FIRST(&plist);
@@ -410,7 +417,7 @@ int ttm_tt_swapin(struct ttm_tt *ttm)
 		from_page = TAILQ_NEXT(from_page, pageq);
 	}
 
-	uvm_objunwire(swap_storage, 0, ttm->num_pages << PAGE_SHIFT);
+	uvm_obj_unwire(swap_storage, 0, ttm->num_pages << PAGE_SHIFT);
 
 	if (!(ttm->page_flags & TTM_PAGE_FLAG_PERSISTENT_SWAP))
 		uao_detach(swap_storage);
@@ -447,7 +454,7 @@ int ttm_tt_swapout(struct ttm_tt *ttm, struct uvm_object *persistent_swap_storag
 	}
 
 	TAILQ_INIT(&plist);
-	if (uvm_objwire(swap_storage, 0, ttm->num_pages << PAGE_SHIFT, &plist))
+	if (uvm_obj_wire(swap_storage, 0, ttm->num_pages << PAGE_SHIFT, &plist))
 		goto out_err;
 
 	to_page = TAILQ_FIRST(&plist);
@@ -464,9 +471,9 @@ int ttm_tt_swapout(struct ttm_tt *ttm, struct uvm_object *persistent_swap_storag
 		to_page = TAILQ_NEXT(to_page, pageq);
 	}
 
-	uvm_objunwire(swap_storage, 0, ttm->num_pages << PAGE_SHIFT);
+	uvm_obj_unwire(swap_storage, 0, ttm->num_pages << PAGE_SHIFT);
 
-	ttm->bdev->driver->ttm_tt_unpopulate(ttm);
+	ttm_tt_unpopulate(ttm);
 	ttm->swap_storage = swap_storage;
 	ttm->page_flags |= TTM_PAGE_FLAG_SWAPPED;
 	if (persistent_swap_storage)

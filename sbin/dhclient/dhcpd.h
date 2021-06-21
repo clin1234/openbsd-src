@@ -1,4 +1,4 @@
-/*	$OpenBSD: dhcpd.h,v 1.288 2020/11/06 21:53:55 krw Exp $	*/
+/*	$OpenBSD: dhcpd.h,v 1.299 2021/03/28 16:23:05 krw Exp $	*/
 
 /*
  * Copyright (c) 2004 Henning Brauer <henning@openbsd.org>
@@ -101,12 +101,12 @@ struct client_config {
 	uint8_t			 requested_options[DHO_COUNT];
 	int			 requested_option_count;
 	int			 required_option_count;
-	time_t			 timeout;
+	time_t			 offer_interval;
 	time_t			 initial_interval;
-	time_t			 link_timeout;
+	time_t			 link_interval;
 	time_t			 retry_interval;
 	time_t			 select_interval;
-	time_t			 reboot_timeout;
+	time_t			 reboot_interval;
 	time_t			 backoff_cutoff;
 	TAILQ_HEAD(, reject_elem) reject_list;
 	char			*filename;
@@ -129,18 +129,22 @@ struct interface_info {
 	int			 rdomain;
 	int			 flags;
 #define IFI_IN_CHARGE		0x01
-#define IFI_AUTOCONF		0x02
 	uint32_t		 mtu;
 	struct dhcp_packet	 recv_packet;
 	struct dhcp_packet	 sent_packet;
 	int			 sent_packet_length;
 	uint32_t		 xid;
-	time_t			 timeout;
-	time_t			 expiry, rebind;
+	struct timespec		 timeout;
+	struct timespec		 reboot_timeout;
+	struct timespec		 expiry;
+	struct timespec		 rebind;
+	struct timespec		 renew;
 	void			(*timeout_func)(struct interface_info *);
 	uint16_t		 secs;
-	time_t			 first_sending;
-	time_t			 startup_time;
+	struct timespec		 first_sending;
+	struct timespec		 link_timeout;
+	struct timespec		 offer_timeout;
+	struct timespec		 select_timeout;
 	enum dhcp_state		 state;
 	struct in_addr		 destination;
 	time_t			 interval;
@@ -215,8 +219,6 @@ extern int			 cmd_opts;
 #define		OPT_VERBOSE	0x02
 #define		OPT_FOREGROUND	0x04
 #define		OPT_RELEASE	0x08
-#define		OPT_CONFPATH	0x10
-#define		OPT_IGNORELIST	0x40
 
 void		 dhcpoffer(struct interface_info *, struct option_data *,
     const char *);
@@ -232,8 +234,6 @@ char		*rfc1035_as_string(unsigned char *, size_t);
 
 /* packet.c */
 void		 assemble_eh_header(struct ether_addr, struct ether_header *);
-ssize_t		 decode_hw_header(unsigned char *, uint32_t,
-    struct ether_addr *);
 ssize_t		 decode_udp_ip_header(unsigned char *, uint32_t,
     struct sockaddr_in *);
 uint32_t	 checksum(unsigned char *, uint32_t, uint32_t);
@@ -241,7 +241,7 @@ uint32_t	 wrapsum(uint32_t);
 
 /* clparse.c */
 void		 init_config(void);
-void		 read_conf(char *, char *, struct ether_addr *);
+void		 read_conf(char *, uint8_t *, struct ether_addr *);
 void		 read_lease_db(struct client_lease_tq *);
 
 /* kroute.c */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvideo.c,v 1.209 2020/07/31 10:49:33 mglocker Exp $ */
+/*	$OpenBSD: uvideo.c,v 1.213 2021/05/31 21:06:48 mglocker Exp $ */
 
 /*
  * Copyright (c) 2008 Robert Nagy <robert@openbsd.org>
@@ -118,7 +118,7 @@ struct uvideo_softc {
 int		uvideo_enable(void *);
 void		uvideo_disable(void *);
 int		uvideo_open(void *, int, int *, uint8_t *, void (*)(void *),
-		    void *arg);
+		    void *);
 int		uvideo_close(void *);
 int		uvideo_match(struct device *, void *, void *);
 void		uvideo_attach(struct device *, struct device *, void *);
@@ -181,8 +181,8 @@ usbd_status	uvideo_vs_decode_stream_header_isight(struct uvideo_softc *,
 		    uint8_t *, int);
 int		uvideo_mmap_queue(struct uvideo_softc *, uint8_t *, int);
 void		uvideo_read(struct uvideo_softc *, uint8_t *, int);
-usbd_status	uvideo_usb_control(struct uvideo_softc *sc, uint8_t rt, uint8_t r,
-		    uint16_t value, uint8_t *data, size_t length);
+usbd_status	uvideo_usb_control(struct uvideo_softc *, uint8_t, uint8_t,
+		    uint16_t, uint8_t *, size_t);
 
 #ifdef UVIDEO_DEBUG
 #include <sys/namei.h>
@@ -307,6 +307,7 @@ struct video_hw_if uvideo_hw_if = {
 #define UVIDEO_FLAG_ISIGHT_STREAM_HEADER	0x1
 #define UVIDEO_FLAG_REATTACH			0x2
 #define UVIDEO_FLAG_VENDOR_CLASS		0x4
+#define UVIDEO_FLAG_NOATTACH			0x8
 struct uvideo_devs {
 	struct usb_devno	 uv_dev;
 	char			*ucode_name;
@@ -381,6 +382,12 @@ struct uvideo_devs {
 	    NULL,
 	    NULL,
 	    UVIDEO_FLAG_VENDOR_CLASS
+	},
+	{   /* Infrared camera not supported */
+	    { USB_VENDOR_CHICONY, USB_PRODUCT_CHICONY_IRCAMERA },
+	    NULL,
+	    NULL,
+	    UVIDEO_FLAG_NOATTACH
 	},
 };
 #define uvideo_lookup(v, p) \
@@ -480,11 +487,7 @@ uvideo_match(struct device *parent, void *match, void *aux)
 	if (id == NULL)
 		return (UMATCH_NONE);
 
-	if (id->bInterfaceClass == UICLASS_VIDEO &&
-	    id->bInterfaceSubClass == UISUBCLASS_VIDEOCONTROL)
-		return (UMATCH_VENDOR_PRODUCT_CONF_IFACE);
-
-	/* quirk devices which we want to attach */
+	/* quirk devices */
 	quirk = uvideo_lookup(uaa->vendor, uaa->product);
 	if (quirk != NULL) {
 		if (quirk->flags & UVIDEO_FLAG_REATTACH)
@@ -495,6 +498,10 @@ uvideo_match(struct device *parent, void *match, void *aux)
 		    id->bInterfaceSubClass == UISUBCLASS_VIDEOCONTROL)
 			return (UMATCH_VENDOR_PRODUCT_CONF_IFACE);
 	}
+
+	if (id->bInterfaceClass == UICLASS_VIDEO &&
+	    id->bInterfaceSubClass == UISUBCLASS_VIDEOCONTROL)
+		return (UMATCH_VENDOR_PRODUCT_CONF_IFACE);
 
 	return (UMATCH_NONE);
 }
@@ -567,6 +574,11 @@ uvideo_attach(struct device *parent, struct device *self, void *aux)
 
 	/* maybe the device has quirks */
 	sc->sc_quirk = uvideo_lookup(uaa->vendor, uaa->product);
+
+	if (sc->sc_quirk && sc->sc_quirk->flags & UVIDEO_FLAG_NOATTACH) {
+		printf("%s: device not supported\n", DEVNAME(sc));
+		return;
+	}
 
 	if (sc->sc_quirk && sc->sc_quirk->ucode_name)
 		config_mountroot(self, uvideo_attach_hook);
@@ -2685,7 +2697,7 @@ uvideo_dump_desc_config(struct uvideo_softc *sc,
 	printf("bLength=%d\n", d->bLength);
 	printf("bDescriptorType=0x%02x\n", d->bDescriptorType);
 	printf("wTotalLength=%d\n", UGETW(d->wTotalLength));
-	printf("bNumInterface=0x%02x\n", d->bNumInterface);
+	printf("bNumInterfaces=0x%02x\n", d->bNumInterfaces);
 	printf("bConfigurationValue=0x%02x\n", d->bConfigurationValue);
 	printf("iConfiguration=0x%02x\n", d->iConfiguration);
 	printf("bmAttributes=0x%02x\n", d->bmAttributes);

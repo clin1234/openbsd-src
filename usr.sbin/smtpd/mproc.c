@@ -1,4 +1,4 @@
-/*	$OpenBSD: mproc.c,v 1.36 2020/03/17 09:01:53 tobhe Exp $	*/
+/*	$OpenBSD: mproc.c,v 1.39 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2012 Eric Faurot <eric@faurot.net>
@@ -16,23 +16,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/tree.h>
-#include <sys/queue.h>
-#include <sys/uio.h>
-
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <arpa/nameser.h>
-
-#include <err.h>
 #include <errno.h>
-#include <event.h>
-#include <imsg.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <limits.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -64,7 +49,7 @@ mproc_fork(struct mproc *p, const char *path, char *argv[])
 			exit(1);
 
 		execv(path, argv);
-		err(1, "execv: %s", path);
+		fatal("execv: %s", path);
 	}
 
 	/* parent process */
@@ -90,7 +75,8 @@ mproc_clear(struct mproc *p)
 {
 	log_debug("debug: clearing p=%s, fd=%d, pid=%d", p->name, p->imsgbuf.fd, p->pid);
 
-	event_del(&p->ev);
+	if (p->events)
+		event_del(&p->ev);
 	close(p->imsgbuf.fd);
 	imsg_clear(&p->imsgbuf);
 }

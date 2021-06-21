@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpd.c,v 1.335 2020/09/23 19:11:50 martijn Exp $	*/
+/*	$OpenBSD: smtpd.c,v 1.340 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -18,41 +18,26 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include <sys/uio.h>
-#include <sys/mman.h>
 
 #include <bsd_auth.h>
 #include <dirent.h>
-#include <err.h>
 #include <errno.h>
-#include <event.h>
 #include <fcntl.h>
 #include <fts.h>
 #include <grp.h>
-#include <imsg.h>
 #include <inttypes.h>
-#include <login_cap.h>
 #include <paths.h>
 #include <poll.h>
 #include <pwd.h>
 #include <signal.h>
-#include <stdio.h>
 #include <syslog.h>
-#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sysexits.h>
-#include <time.h>
+#include <tls.h>
 #include <unistd.h>
-
-#include <openssl/ssl.h>
-#include <openssl/evp.h>
 
 #include "smtpd.h"
 #include "log.h"
@@ -66,7 +51,7 @@ static int smtpd(void);
 static void parent_shutdown(void);
 static void parent_send_config(int, short, void *);
 static void parent_send_config_lka(void);
-static void parent_send_config_pony(void);
+static void parent_send_config_dispatcher(void);
 static void parent_send_config_ca(void);
 static void parent_sig_handler(int, short, void *);
 static void forkmda(struct mproc *, uint64_t, struct deliver *);
@@ -140,7 +125,7 @@ struct mproc	*p_lka = NULL;
 struct mproc	*p_parent = NULL;
 struct mproc	*p_queue = NULL;
 struct mproc	*p_scheduler = NULL;
-struct mproc	*p_pony = NULL;
+struct mproc	*p_dispatcher = NULL;
 struct mproc	*p_ca = NULL;
 
 const char	*backend_queue = "fs";
@@ -269,7 +254,7 @@ parent_imsg(struct mproc *p, struct imsg *imsg)
 		return;
 	}
 
-	errx(1, "parent_imsg: unexpected %s imsg from %s",
+	fatalx("parent_imsg: unexpected %s imsg from %s",
 	    imsg_to_str(imsg->hdr.type), proc_title(p->proc));
 }
 
@@ -289,7 +274,7 @@ parent_shutdown(void)
 	pid_t pid;
 
 	mproc_clear(p_ca);
-	mproc_clear(p_pony);
+	mproc_clear(p_dispatcher);
 	mproc_clear(p_control);
 	mproc_clear(p_lka);
 	mproc_clear(p_scheduler);
@@ -309,17 +294,17 @@ static void
 parent_send_config(int fd, short event, void *p)
 {
 	parent_send_config_lka();
-	parent_send_config_pony();
+	parent_send_config_dispatcher();
 	parent_send_config_ca();
 	purge_config(PURGE_PKI);
 }
 
 static void
-parent_send_config_pony(void)
+parent_send_config_dispatcher(void)
 {
-	log_debug("debug: parent_send_config: configuring pony process");
-	m_compose(p_pony, IMSG_CONF_START, 0, 0, -1, NULL, 0);
-	m_compose(p_pony, IMSG_CONF_END, 0, 0, -1, NULL, 0);
+	log_debug("debug: parent_send_config: configuring dispatcher process");
+	m_compose(p_dispatcher, IMSG_CONF_START, 0, 0, -1, NULL, 0);
+	m_compose(p_dispatcher, IMSG_CONF_END, 0, 0, -1, NULL, 0);
 }
 
 void
@@ -437,13 +422,13 @@ parent_sig_handler(int sig, short event, void *p)
 				    "for session %016"PRIx64 ": %s",
 				    child->mda_id, cause);
 
-				m_create(p_pony, IMSG_MDA_DONE, 0, 0,
+				m_create(p_dispatcher, IMSG_MDA_DONE, 0, 0,
 				    child->mda_out);
-				m_add_id(p_pony, child->mda_id);
-				m_add_int(p_pony, mda_status);
-				m_add_int(p_pony, mda_sysexit);
-				m_add_string(p_pony, cause);
-				m_close(p_pony);
+				m_add_id(p_dispatcher, child->mda_id);
+				m_add_int(p_dispatcher, mda_status);
+				m_add_int(p_dispatcher, mda_sysexit);
+				m_add_string(p_dispatcher, cause);
+				m_close(p_dispatcher);
 
 				break;
 
@@ -484,17 +469,16 @@ main(int argc, char *argv[])
 	char		*rexec = NULL;
 	struct smtpd	*conf;
 
-	if ((conf = config_default()) == NULL)
-		err(1, NULL);
-
-	env = conf;
-
 	flags = 0;
 	opts = 0;
 	debug = 0;
 	tracing = 0;
 
 	log_init(1, LOG_MAIL);
+
+	if ((conf = config_default()) == NULL)
+		fatal("config_default");
+	env = conf;
 
 	TAILQ_INIT(&offline_q);
 
@@ -609,14 +593,14 @@ main(int argc, char *argv[])
 
 	env->sc_opts |= opts;
 
-	ssl_init();
+	tls_init();
 
 	if (parse_config(conf, conffile, opts))
 		exit(1);
 
 	if (strlcpy(env->sc_conffile, conffile, PATH_MAX)
 	    >= PATH_MAX)
-		errx(1, "config file exceeds PATH_MAX");
+		fatalx("config file exceeds PATH_MAX");
 
 	if (env->sc_opts & SMTPD_OPT_NOACTION) {
 		if (env->sc_queue_key &&
@@ -635,7 +619,7 @@ main(int argc, char *argv[])
 
 	/* check for root privileges */
 	if (geteuid())
-		errx(1, "need root privileges");
+		fatalx("need root privileges");
 
 	log_init(foreground_log, LOG_MAIL);
 	log_trace_verbose(tracing);
@@ -647,7 +631,7 @@ main(int argc, char *argv[])
 	log_debug("debug: using \"%s\" stat backend", backend_stat);
 
 	if (env->sc_hostname[0] == '\0')
-		errx(1, "machine does not have a hostname set");
+		fatalx("machine does not have a hostname set");
 	env->sc_uptime = time(NULL);
 
 	if (rexec == NULL) {
@@ -659,12 +643,12 @@ main(int argc, char *argv[])
 
 				password = getpass("queue key: ");
 				if (password == NULL)
-					err(1, "getpass");
+					fatal("getpass");
 
 				env->sc_queue_key = strdup(password);
 				explicit_bzero(password, strlen(password));
 				if (env->sc_queue_key == NULL)
-					err(1, "strdup");
+					fatal("strdup");
 			}
 			else {
 				char   *buf = NULL;
@@ -673,7 +657,7 @@ main(int argc, char *argv[])
 
 				if (strcasecmp(env->sc_queue_key, "stdin") == 0) {
 					if ((len = getline(&buf, &sz, stdin)) == -1)
-						err(1, "getline");
+						fatal("getline");
 					if (buf[len - 1] == '\n')
 						buf[len - 1] = '\0';
 					env->sc_queue_key = buf;
@@ -685,7 +669,7 @@ main(int argc, char *argv[])
 
 		if (!foreground)
 			if (daemon(0, 0) == -1)
-				err(1, "failed to daemonize");
+				fatal("failed to daemonize");
 
 		/* setup all processes */
 
@@ -698,8 +682,8 @@ main(int argc, char *argv[])
 		p_lka = start_child(save_argc, save_argv, "lka");
 		p_lka->proc = PROC_LKA;
 
-		p_pony = start_child(save_argc, save_argv, "pony");
-		p_pony->proc = PROC_PONY;
+		p_dispatcher = start_child(save_argc, save_argv, "dispatcher");
+		p_dispatcher->proc = PROC_DISPATCHER;
 
 		p_queue = start_child(save_argc, save_argv, "queue");
 		p_queue->proc = PROC_QUEUE;
@@ -709,12 +693,12 @@ main(int argc, char *argv[])
 
 		setup_peers(p_control, p_ca);
 		setup_peers(p_control, p_lka);
-		setup_peers(p_control, p_pony);
+		setup_peers(p_control, p_dispatcher);
 		setup_peers(p_control, p_queue);
 		setup_peers(p_control, p_scheduler);
-		setup_peers(p_pony, p_ca);
-		setup_peers(p_pony, p_lka);
-		setup_peers(p_pony, p_queue);
+		setup_peers(p_dispatcher, p_ca);
+		setup_peers(p_dispatcher, p_lka);
+		setup_peers(p_dispatcher, p_queue);
 		setup_peers(p_queue, p_lka);
 		setup_peers(p_queue, p_scheduler);
 
@@ -730,7 +714,7 @@ main(int argc, char *argv[])
 		setup_done(p_ca);
 		setup_done(p_control);
 		setup_done(p_lka);
-		setup_done(p_pony);
+		setup_done(p_dispatcher);
 		setup_done(p_queue);
 		setup_done(p_scheduler);
 
@@ -755,7 +739,7 @@ main(int argc, char *argv[])
 
 		env->sc_stat = stat_backend_lookup(backend_stat);
 		if (env->sc_stat == NULL)
-			errx(1, "could not find stat backend \"%s\"", backend_stat);
+			fatalx("could not find stat backend \"%s\"", backend_stat);
 
 		return control();
 	}
@@ -767,11 +751,11 @@ main(int argc, char *argv[])
 		return lka();
 	}
 
-	else if (!strcmp(rexec, "pony")) {
-		smtpd_process = PROC_PONY;
+	else if (!strcmp(rexec, "dispatcher")) {
+		smtpd_process = PROC_DISPATCHER;
 		setup_proc();
 
-		return pony();
+		return dispatcher();
 	}
 
 	else if (!strcmp(rexec, "queue")) {
@@ -782,7 +766,7 @@ main(int argc, char *argv[])
 			env->sc_comp = compress_backend_lookup("gzip");
 
 		if (!queue_init(backend_queue, 1))
-			errx(1, "could not initialize queue backend");
+			fatalx("could not initialize queue backend");
 
 		return queue();
 	}
@@ -978,8 +962,8 @@ setup_peer(enum smtp_proc_type proc, pid_t pid, int sock)
 	case PROC_SCHEDULER:
 		pp = &p_scheduler;
 		break;
-	case PROC_PONY:
-		pp = &p_pony;
+	case PROC_DISPATCHER:
+		pp = &p_dispatcher;
 		break;
 	case PROC_CA:
 		pp = &p_ca;
@@ -1050,7 +1034,7 @@ smtpd(void) {
 	child_add(p_control->pid, CHILD_DAEMON, proc_title(PROC_CONTROL));
 	child_add(p_lka->pid, CHILD_DAEMON, proc_title(PROC_LKA));
 	child_add(p_scheduler->pid, CHILD_DAEMON, proc_title(PROC_SCHEDULER));
-	child_add(p_pony->pid, CHILD_DAEMON, proc_title(PROC_PONY));
+	child_add(p_dispatcher->pid, CHILD_DAEMON, proc_title(PROC_DISPATCHER));
 	child_add(p_ca->pid, CHILD_DAEMON, proc_title(PROC_CA));
 
 	event_init();
@@ -1069,7 +1053,7 @@ smtpd(void) {
 	config_peer(PROC_LKA);
 	config_peer(PROC_QUEUE);
 	config_peer(PROC_CA);
-	config_peer(PROC_PONY);
+	config_peer(PROC_DISPATCHER);
 
 	evtimer_set(&config_ev, parent_send_config, NULL);
 	memset(&tv, 0, sizeof(tv));
@@ -1087,7 +1071,7 @@ smtpd(void) {
 
 	if (pledge("stdio rpath wpath cpath fattr tmppath "
 	    "getpw sendfd proc exec id inet chown unix", NULL) == -1)
-		err(1, "pledge");
+		fatal("pledge");
 
 	event_dispatch();
 	fatalx("exited event loop");
@@ -1188,7 +1172,7 @@ fork_proc_backend(const char *key, const char *conf, const char *procname)
 			procname = name;
 
 		execl(path, procname, arg, (char *)NULL);
-		err(1, "execl: %s", path);
+		fatal("execl: %s", path);
 	}
 
 	/* parent process */
@@ -1309,24 +1293,24 @@ fork_filter_process(const char *name, const char *command, const char *user, con
 	if (user == NULL)
 		user = SMTPD_USER;
 	if ((pw = getpwnam(user)) == NULL)
-		err(1, "getpwnam");
+		fatal("getpwnam");
 
 	if (group) {
 		if ((gr = getgrnam(group)) == NULL)
-			err(1, "getgrnam");
+			fatal("getgrnam");
 	}
 	else {
 		if ((gr = getgrgid(pw->pw_gid)) == NULL)
-			err(1, "getgrgid");
+			fatal("getgrgid");
 	}
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, sp) == -1)
-		err(1, "socketpair");
+		fatal("socketpair");
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, errfd) == -1)
-		err(1, "socketpair");
+		fatal("socketpair");
 
 	if ((pid = fork()) == -1)
-		err(1, "fork");
+		fatal("fork");
 
 	/* parent passes the child fd over to lka */
 	if (pid > 0) {
@@ -1350,24 +1334,24 @@ fork_filter_process(const char *name, const char *command, const char *user, con
 
 	if (chroot_path) {
 		if (chroot(chroot_path) != 0 || chdir("/") != 0)
-			err(1, "chroot: %s", chroot_path);
+			fatal("chroot: %s", chroot_path);
 	}
 
 	if (setgroups(1, &gr->gr_gid) ||
 	    setresgid(gr->gr_gid, gr->gr_gid, gr->gr_gid) ||
 	    setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid))
-		err(1, "fork_filter_process: cannot drop privileges");
+		fatal("fork_filter_process: cannot drop privileges");
 
 	if (closefrom(STDERR_FILENO + 1) == -1)
-		err(1, "closefrom");
+		fatal("closefrom");
 	if (setsid() == -1)
-		err(1, "setsid");
+		fatal("setsid");
 	if (signal(SIGPIPE, SIG_DFL) == SIG_ERR ||
 	    signal(SIGINT, SIG_DFL) == SIG_ERR ||
 	    signal(SIGTERM, SIG_DFL) == SIG_ERR ||
 	    signal(SIGCHLD, SIG_DFL) == SIG_ERR ||
 	    signal(SIGHUP, SIG_DFL) == SIG_ERR)
-		err(1, "signal");
+		fatal("signal");
 
 	if (command[0] == '/')
 		execr = snprintf(exec, sizeof(exec), "exec %s", command);
@@ -1375,7 +1359,7 @@ fork_filter_process(const char *name, const char *command, const char *user, con
 		execr = snprintf(exec, sizeof(exec), "exec %s/%s", 
 		    PATH_LIBEXEC, command);
 	if (execr >= (int) sizeof(exec))
-		errx(1, "%s: exec path too long", name);
+		fatalx("%s: exec path too long", name);
 
 	/*
 	 * Wait for lka to acknowledge that it received the fd.
@@ -1386,9 +1370,9 @@ fork_filter_process(const char *name, const char *command, const char *user, con
 	 * never going to be read from we can shutdown(2) the write-end in lka.
 	 */
 	if (read(STDERR_FILENO, &buf, 1) != 0)
-		errx(1, "lka didn't properly close write end of error socket");
+		fatalx("lka didn't properly close write end of error socket");
 	if (system(exec) == -1)
-		err(1, NULL);
+		fatal("system");
 
 	/* there's no successful exit from a processor */
 	_exit(1);
@@ -1421,12 +1405,12 @@ forkmda(struct mproc *p, uint64_t id, struct deliver *deliver)
 			(void)snprintf(ebuf, sizeof ebuf,
 			    "delivery user '%s' does not exist",
 			    dsp->u.local.user);
-			m_create(p_pony, IMSG_MDA_DONE, 0, 0, -1);
-			m_add_id(p_pony, id);
-			m_add_int(p_pony, MDA_PERMFAIL);
-			m_add_int(p_pony, EX_NOUSER);
-			m_add_string(p_pony, ebuf);
-			m_close(p_pony);
+			m_create(p_dispatcher, IMSG_MDA_DONE, 0, 0, -1);
+			m_add_id(p_dispatcher, id);
+			m_add_int(p_dispatcher, MDA_PERMFAIL);
+			m_add_int(p_dispatcher, EX_NOUSER);
+			m_add_string(p_dispatcher, ebuf);
+			m_close(p_dispatcher);
 			return;
 		}
 		pw_name = pw->pw_name;
@@ -1451,23 +1435,23 @@ forkmda(struct mproc *p, uint64_t id, struct deliver *deliver)
 	if (pw_uid == 0 && !dsp->u.local.is_mbox) {
 		(void)snprintf(ebuf, sizeof ebuf, "not allowed to deliver to: %s",
 		    deliver->userinfo.username);
-		m_create(p_pony, IMSG_MDA_DONE, 0, 0, -1);
-		m_add_id(p_pony, id);
-		m_add_int(p_pony, MDA_PERMFAIL);
-		m_add_int(p_pony, EX_NOPERM);
-		m_add_string(p_pony, ebuf);
-		m_close(p_pony);
+		m_create(p_dispatcher, IMSG_MDA_DONE, 0, 0, -1);
+		m_add_id(p_dispatcher, id);
+		m_add_int(p_dispatcher, MDA_PERMFAIL);
+		m_add_int(p_dispatcher, EX_NOPERM);
+		m_add_string(p_dispatcher, ebuf);
+		m_close(p_dispatcher);
 		return;
 	}
 
 	if (pipe(pipefd) == -1) {
 		(void)snprintf(ebuf, sizeof ebuf, "pipe: %s", strerror(errno));
-		m_create(p_pony, IMSG_MDA_DONE, 0, 0, -1);
-		m_add_id(p_pony, id);
-		m_add_int(p_pony, MDA_TEMPFAIL);
-		m_add_int(p_pony, EX_OSERR);
-		m_add_string(p_pony, ebuf);
-		m_close(p_pony);
+		m_create(p_dispatcher, IMSG_MDA_DONE, 0, 0, -1);
+		m_add_id(p_dispatcher, id);
+		m_add_int(p_dispatcher, MDA_TEMPFAIL);
+		m_add_int(p_dispatcher, EX_OSERR);
+		m_add_string(p_dispatcher, ebuf);
+		m_close(p_dispatcher);
 		return;
 	}
 
@@ -1476,12 +1460,12 @@ forkmda(struct mproc *p, uint64_t id, struct deliver *deliver)
 	allout = mkstemp(sfn);
 	if (allout == -1) {
 		(void)snprintf(ebuf, sizeof ebuf, "mkstemp: %s", strerror(errno));
-		m_create(p_pony, IMSG_MDA_DONE, 0, 0, -1);
-		m_add_id(p_pony, id);
-		m_add_int(p_pony, MDA_TEMPFAIL);
-		m_add_int(p_pony, EX_OSERR);
-		m_add_string(p_pony, ebuf);
-		m_close(p_pony);
+		m_create(p_dispatcher, IMSG_MDA_DONE, 0, 0, -1);
+		m_add_id(p_dispatcher, id);
+		m_add_int(p_dispatcher, MDA_TEMPFAIL);
+		m_add_int(p_dispatcher, EX_OSERR);
+		m_add_string(p_dispatcher, ebuf);
+		m_close(p_dispatcher);
 		close(pipefd[0]);
 		close(pipefd[1]);
 		return;
@@ -1491,12 +1475,12 @@ forkmda(struct mproc *p, uint64_t id, struct deliver *deliver)
 	pid = fork();
 	if (pid == -1) {
 		(void)snprintf(ebuf, sizeof ebuf, "fork: %s", strerror(errno));
-		m_create(p_pony, IMSG_MDA_DONE, 0, 0, -1);
-		m_add_id(p_pony, id);
-		m_add_int(p_pony, MDA_TEMPFAIL);
-		m_add_int(p_pony, EX_OSERR);
-		m_add_string(p_pony, ebuf);
-		m_close(p_pony);
+		m_create(p_dispatcher, IMSG_MDA_DONE, 0, 0, -1);
+		m_add_id(p_dispatcher, id);
+		m_add_int(p_dispatcher, MDA_TEMPFAIL);
+		m_add_int(p_dispatcher, EX_OSERR);
+		m_add_string(p_dispatcher, ebuf);
+		m_close(p_dispatcher);
 		close(pipefd[0]);
 		close(pipefd[1]);
 		close(allout);
@@ -1520,25 +1504,25 @@ forkmda(struct mproc *p, uint64_t id, struct deliver *deliver)
 		mda_mbox_init(deliver);
 
 	if (chdir(pw_dir) == -1 && chdir("/") == -1)
-		err(1, "chdir");
+		fatal("chdir");
 	if (setgroups(1, &pw_gid) ||
 	    setresgid(pw_gid, pw_gid, pw_gid) ||
 	    setresuid(pw_uid, pw_uid, pw_uid))
-		err(1, "forkmda: cannot drop privileges");
+		fatal("forkmda: cannot drop privileges");
 	if (dup2(pipefd[0], STDIN_FILENO) == -1 ||
 	    dup2(allout, STDOUT_FILENO) == -1 ||
 	    dup2(allout, STDERR_FILENO) == -1)
-		err(1, "forkmda: dup2");
+		fatal("forkmda: dup2");
 	if (closefrom(STDERR_FILENO + 1) == -1)
-		err(1, "closefrom");
+		fatal("closefrom");
 	if (setsid() == -1)
-		err(1, "setsid");
+		fatal("setsid");
 	if (signal(SIGPIPE, SIG_DFL) == SIG_ERR ||
 	    signal(SIGINT, SIG_DFL) == SIG_ERR ||
 	    signal(SIGTERM, SIG_DFL) == SIG_ERR ||
 	    signal(SIGCHLD, SIG_DFL) == SIG_ERR ||
 	    signal(SIGHUP, SIG_DFL) == SIG_ERR)
-		err(1, "signal");
+		fatal("signal");
 
 	/* avoid hangs by setting 5m timeout */
 	alarm(300);
@@ -1912,10 +1896,10 @@ proc_title(enum smtp_proc_type proc)
 		return "control";
 	case PROC_SCHEDULER:
 		return "scheduler";
-	case PROC_PONY:
-		return "pony express";
+	case PROC_DISPATCHER:
+		return "dispatcher";
 	case PROC_CA:
-		return "klondike";
+		return "crypto";
 	case PROC_CLIENT:
 		return "client";
 	case PROC_PROCESSOR:
@@ -1938,8 +1922,8 @@ proc_name(enum smtp_proc_type proc)
 		return "control";
 	case PROC_SCHEDULER:
 		return "scheduler";
-	case PROC_PONY:
-		return "pony";
+	case PROC_DISPATCHER:
+		return "dispatcher";
 	case PROC_CA:
 		return "ca";
 	case PROC_CLIENT:
@@ -2001,10 +1985,6 @@ imsg_to_str(int type)
 	CASE(IMSG_GETADDRINFO_END);
 	CASE(IMSG_GETNAMEINFO);
 	CASE(IMSG_RES_QUERY);
-
-	CASE(IMSG_CERT_INIT);
-	CASE(IMSG_CERT_CERTIFICATE);
-	CASE(IMSG_CERT_VERIFY);
 
 	CASE(IMSG_SETUP_KEY);
 	CASE(IMSG_SETUP_PEER);

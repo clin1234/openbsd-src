@@ -1,4 +1,4 @@
-/*	$OpenBSD: phb.c,v 1.18 2020/10/25 14:11:16 kettenis Exp $	*/
+/*	$OpenBSD: phb.c,v 1.21 2020/12/20 21:03:53 kettenis Exp $	*/
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -444,7 +444,7 @@ phb_setup_tce_table(struct phb_softc *sc)
 		tce_page_shift = MAX(tce_page_shift, tce_sizes[i]);
 	free(tce_sizes, M_TEMP, len);
 
-	/* Bail out if we don't support 2G pages. */
+	/* Bail out if we don't support 1G pages. */
 	if (tce_page_shift < 30)
 		return;
 
@@ -459,7 +459,7 @@ phb_setup_tce_table(struct phb_softc *sc)
 
 	/* Allocate the TCE table. */
 	sc->sc_tce_table = phb_dmamem_alloc(sc->sc_dmat,
-	    tce_table_size, PAGE_SIZE);
+	    tce_table_size, tce_table_size);
 	if (sc->sc_tce_table == NULL) {
 		printf(": can't allocate DMA translation table\n");
 		return;
@@ -808,7 +808,7 @@ phb_dmamap_load_raw(bus_dma_tag_t t, bus_dmamap_t map,
 		return error;
 
 	/* For each segment. */
-	for (seg = 0; seg < nsegs; seg++) {
+	for (seg = 0; seg < map->dm_nsegs; seg++) {
 		map->dm_segs[seg].ds_addr = map->dm_segs[seg]._ds_paddr;
 		if (sc->sc_tce_table) 
 			map->dm_segs[seg].ds_addr += PHB_DMA_OFFSET;

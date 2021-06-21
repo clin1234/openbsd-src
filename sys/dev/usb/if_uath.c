@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_uath.c,v 1.85 2020/07/10 13:22:21 patrick Exp $	*/
+/*	$OpenBSD: if_uath.c,v 1.87 2021/02/25 02:48:20 dlg Exp $	*/
 
 /*-
  * Copyright (c) 2006
@@ -587,7 +587,7 @@ uath_alloc_rx_data_list(struct uath_softc *sc)
 			error = ENOMEM;
 			goto fail;
 		}
-		MCLGETI(data->m, M_DONTWAIT, NULL, sc->rxbufsz);
+		MCLGETL(data->m, M_DONTWAIT, sc->rxbufsz);
 		if (!(data->m->m_flags & M_EXT)) {
 			printf("%s: could not allocate rx mbuf cluster\n",
 			    sc->sc_dev.dv_xname);
@@ -1201,7 +1201,7 @@ uath_data_rxeof(struct usbd_xfer *xfer, void *priv,
 		ifp->if_ierrors++;
 		goto skip;
 	}
-	MCLGETI(mnew, M_DONTWAIT, NULL, sc->rxbufsz);
+	MCLGETL(mnew, M_DONTWAIT, sc->rxbufsz);
 	if (!(mnew->m_flags & M_EXT)) {
 		printf("%s: could not allocate rx mbuf cluster\n",
 		    sc->sc_dev.dv_xname);
@@ -1398,14 +1398,14 @@ uath_tx_data(struct uath_softc *sc, struct mbuf *m0, struct ieee80211_node *ni)
 		*frm++ = (iv >> 16) & 0xff;
 		*frm++ = ic->ic_wep_txkey << 6;
 
-		m_copydata(m0, sizeof (struct ieee80211_frame),
-		    m0->m_pkthdr.len - sizeof (struct ieee80211_frame), frm);
+		m_copydata(m0, sizeof(struct ieee80211_frame),
+		    m0->m_pkthdr.len - sizeof(struct ieee80211_frame), frm);
 
 		paylen  += IEEE80211_WEP_IVLEN + IEEE80211_WEP_KIDLEN;
 		xferlen += IEEE80211_WEP_IVLEN + IEEE80211_WEP_KIDLEN;
 		totlen = xferlen + IEEE80211_WEP_CRCLEN;
 	} else {
-		m_copydata(m0, 0, m0->m_pkthdr.len, (uint8_t *)(desc + 1));
+		m_copydata(m0, 0, m0->m_pkthdr.len, desc + 1);
 		totlen = xferlen;
 	}
 

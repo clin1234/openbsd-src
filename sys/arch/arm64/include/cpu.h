@@ -1,4 +1,4 @@
-/* $OpenBSD: cpu.h,v 1.18 2020/06/05 23:16:24 naddy Exp $ */
+/* $OpenBSD: cpu.h,v 1.21 2021/06/02 00:39:26 cheloha Exp $ */
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -135,6 +135,8 @@ struct cpu_info {
 #ifdef GPROF
 	struct gmonparam	*ci_gmon;
 #endif
+
+	char			ci_panicbuf[512];
 };
 
 #define CPUF_PRIMARY 		(1<<0)
@@ -255,15 +257,6 @@ void svc_handler	(trapframe_t *);
 void board_startup(void);
 
 // functions to manipulate interrupt state
-static __inline uint32_t
-get_daif()
-{
-	uint32_t daif;
-	
-	__asm volatile ("mrs %x0, daif": "=r"(daif));
-	return daif;
-}
-
 static __inline void
 restore_daif(uint32_t daif)
 {
@@ -271,37 +264,25 @@ restore_daif(uint32_t daif)
 }
 
 static __inline void
-enable_irq_daif()
+enable_irq_daif(void)
 {
-	__asm volatile ("msr daifclr, #2");
+	__asm volatile ("msr daifclr, #3");
 }
 
 static __inline void
-disable_irq_daif()
+disable_irq_daif(void)
 {
-	__asm volatile ("msr daifset, #2");
+	__asm volatile ("msr daifset, #3");
 }
 
 static __inline uint32_t
-disable_irq_daif_ret()
+disable_irq_daif_ret(void)
 {
 	uint32_t daif;
 	__asm volatile ("mrs %x0, daif": "=r"(daif));
-	__asm volatile ("msr daifset, #2");
+	__asm volatile ("msr daifset, #3");
 	return daif;
 }
-
-#define get_interrupts(mask)						\
-	(__get_daif())
-
-#define disable_interrupts()						\
-	disable_irq_daif_ret()
-
-#define enable_interrupts()						\
-	enable_irq_daif()
-
-#define restore_interrupts(old_daif)					\
-	restore_daif(old_daif)
 
 static inline void
 intr_enable(void)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_map.c,v 1.269 2020/10/19 08:19:46 mpi Exp $	*/
+/*	$OpenBSD: uvm_map.c,v 1.277 2021/06/17 16:10:39 mpi Exp $	*/
 /*	$NetBSD: uvm_map.c,v 1.86 2000/11/27 08:40:03 chs Exp $	*/
 
 /*
@@ -183,7 +183,6 @@ void			 uvm_map_splitentry(struct vm_map*,
 			    struct vm_map_entry*, struct vm_map_entry*,
 			    vaddr_t);
 vsize_t			 uvm_map_boundary(struct vm_map*, vaddr_t, vaddr_t);
-int			 uvm_mapent_bias(struct vm_map*, struct vm_map_entry*);
 
 /*
  * uvm_vmspace_fork helper functions.
@@ -492,12 +491,13 @@ uvm_mapent_addr_remove(struct vm_map *map, struct vm_map_entry *entry)
 /*
  * uvm_map_reference: add reference to a map
  *
- * XXX check map reference counter lock
+ * => map need not be locked
  */
-#define uvm_map_reference(_map)						\
-	do {								\
-		map->ref_count++;					\
-	} while (0)
+void
+uvm_map_reference(struct vm_map *map)
+{
+	atomic_inc_int(&map->ref_count);
+}
 
 /*
  * Calculate the dused delta.
@@ -668,7 +668,7 @@ uvm_map_sel_limits(vaddr_t *min, vaddr_t *max, vsize_t sz, int guardpg,
 
 		/*
 		 * Fixup: it's possible that pmap_min and pmap_max
-		 * cross eachother. In this case, try to find one
+		 * cross each other. In this case, try to find one
 		 * address that is allowed.
 		 * (This usually happens in biased case.)
 		 */
@@ -1001,7 +1001,7 @@ uvm_mapanon(struct vm_map *map, vaddr_t *addr, vsize_t sz,
 	 */
 	new = uvm_mapent_alloc(map, flags);
 	if (new == NULL)
-		return(ENOMEM);
+		return ENOMEM;
 
 	vm_map_lock(map);
 	first = last = NULL;
@@ -1104,10 +1104,8 @@ uvm_mapanon(struct vm_map *map, vaddr_t *addr, vsize_t sz,
 	if (flags & UVM_FLAG_CONCEAL)
 		entry->etype |= UVM_ET_CONCEAL;
 	if (flags & UVM_FLAG_OVERLAY) {
-		KERNEL_LOCK();
 		entry->aref.ar_pageoff = 0;
 		entry->aref.ar_amap = amap_alloc(sz, M_WAITOK, 0);
-		KERNEL_UNLOCK();
 	}
 
 	/* Update map and process statistics. */
@@ -1232,7 +1230,7 @@ uvm_map(struct vm_map *map, vaddr_t *addr, vsize_t sz,
 	 */
 	new = uvm_mapent_alloc(map, flags);
 	if (new == NULL)
-		return(ENOMEM);
+		return ENOMEM;
 
 	if (flags & UVM_FLAG_TRYLOCK) {
 		if (vm_map_lock_try(map) == FALSE) {
@@ -1476,14 +1474,14 @@ uvm_mapent_isjoinable(struct vm_map *map, struct vm_map_entry *e1,
 	if (e2->aref.ar_amap && amap_refs(e2->aref.ar_amap) != 1)
 		return 0;
 
-	/* Apprently, e1 and e2 match. */
+	/* Apparently, e1 and e2 match. */
 	return 1;
 }
 
 /*
  * Join support function.
  *
- * Returns the merged entry on succes.
+ * Returns the merged entry on success.
  * Returns NULL if the merge failed.
  */
 struct vm_map_entry*
@@ -1762,7 +1760,7 @@ uvm_mapent_alloc(struct vm_map *map, int flags)
 
 	RBT_POISON(uvm_map_addr, me, UVMMAP_DEADBEEF);
 out:
-	return(me);
+	return me;
 }
 
 /*
@@ -2833,9 +2831,7 @@ uvm_map_splitentry(struct vm_map *map, struct vm_map_entry *orig,
 		orig->end = next->start = split;
 
 		if (next->aref.ar_amap) {
-			KERNEL_LOCK();
 			amap_splitref(&orig->aref, &next->aref, adj);
-			KERNEL_UNLOCK();
 		}
 		if (UVM_ET_ISSUBMAP(orig)) {
 			uvm_map_reference(next->object.sub_map);
@@ -3159,10 +3155,8 @@ print_uaddr:
  * uvm_object_printit: actually prints the object
  */
 void
-uvm_object_printit(uobj, full, pr)
-	struct uvm_object *uobj;
-	boolean_t full;
-	int (*pr)(const char *, ...);
+uvm_object_printit(struct uvm_object *uobj, boolean_t full,
+    int (*pr)(const char *, ...))
 {
 	struct vm_page *pg;
 	int cnt = 0;
@@ -3199,10 +3193,8 @@ static const char page_flagbits[] =
 	"\27ENCRYPT\31PMAP0\32PMAP1\33PMAP2\34PMAP3\35PMAP4\36PMAP5";
 
 void
-uvm_page_printit(pg, full, pr)
-	struct vm_page *pg;
-	boolean_t full;
-	int (*pr)(const char *, ...);
+uvm_page_printit(struct vm_page *pg, boolean_t full,
+    int (*pr)(const char *, ...))
 {
 	struct vm_page *tpg;
 	struct uvm_object *uobj;
@@ -4238,7 +4230,7 @@ uvm_map_submap(struct vm_map *map, vaddr_t start, vaddr_t end,
 		result = EINVAL;
 
 	vm_map_unlock(map);
-	return(result);
+	return result;
 }
 
 /*
@@ -4301,7 +4293,7 @@ uvm_map_deallocate(vm_map_t map)
 	int c;
 	struct uvm_map_deadq dead;
 
-	c = --map->ref_count;
+	c = atomic_dec_int_nv(&map->ref_count);
 	if (c > 0) {
 		return;
 	}
@@ -4682,12 +4674,14 @@ uvm_map_clean(struct vm_map *map, vaddr_t start, vaddr_t end, int flags)
 		cp_start = MAX(entry->start, start);
 		cp_end = MIN(entry->end, end);
 
+		amap_lock(amap);
 		for (; cp_start != cp_end; cp_start += PAGE_SIZE) {
 			anon = amap_lookup(&entry->aref,
 			    cp_start - entry->start);
 			if (anon == NULL)
 				continue;
 
+			KASSERT(anon->an_lock == amap->am_lock);
 			pg = anon->an_page;
 			if (pg == NULL) {
 				continue;
@@ -4743,6 +4737,7 @@ deactivate_it:
 				panic("uvm_map_clean: weird flags");
 			}
 		}
+		amap_unlock(amap);
 
 flush_object:
 		cp_start = MAX(entry->start, start);
@@ -5377,39 +5372,6 @@ out:
 		*addr_p = addr;
 	return error;
 }
-
-/*
- * Determine allocation bias.
- *
- * Returns 1 if we should bias to high addresses, -1 for a bias towards low
- * addresses, or 0 for no bias.
- * The bias mechanism is intended to avoid clashing with brk() and stack
- * areas.
- */
-int
-uvm_mapent_bias(struct vm_map *map, struct vm_map_entry *entry)
-{
-	vaddr_t start, end;
-
-	start = VMMAP_FREE_START(entry);
-	end = VMMAP_FREE_END(entry);
-
-	/* Stay at the top of brk() area. */
-	if (end >= map->b_start && start < map->b_end)
-		return 1;
-	/* Stay at the far end of the stack area. */
-	if (end >= map->s_start && start < map->s_end) {
-#ifdef MACHINE_STACK_GROWS_UP
-		return 1;
-#else
-		return -1;
-#endif
-	}
-
-	/* No bias, this area is meant for us. */
-	return 0;
-}
-
 
 boolean_t
 vm_map_lock_try_ln(struct vm_map *map, char *file, int line)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpivar.h,v 1.111 2020/08/27 01:08:55 jmatthew Exp $	*/
+/*	$OpenBSD: acpivar.h,v 1.114 2021/03/15 22:44:57 patrick Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -69,8 +69,8 @@ struct acpi_attach_args {
 	uint64_t	 aaa_size[4];
 	bus_space_tag_t	 aaa_bst[4];
 	int		 aaa_naddr;
-	uint32_t	 aaa_irq[4];
-	uint32_t	 aaa_irq_flags[4];
+	uint32_t	 aaa_irq[8];
+	uint32_t	 aaa_irq_flags[8];
 	int		 aaa_nirq;
 };
 
@@ -405,9 +405,12 @@ struct aml_node *acpi_find_pci(pci_chipset_tag_t, pcitag_t);
 
 void	*acpi_intr_establish(int, int, int, int (*)(void *), void *,
 	    const char *);
+void	acpi_intr_disestablish(void *);
 
 struct acpi_q *acpi_maptable(struct acpi_softc *sc, paddr_t,
 	    const char *, const char *, const char *, int);
+
+bus_dma_tag_t acpi_iommu_device_map(struct aml_node *, bus_dma_tag_t);
 
 #endif
 

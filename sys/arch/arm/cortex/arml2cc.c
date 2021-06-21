@@ -1,4 +1,4 @@
-/* $OpenBSD: arml2cc.c,v 1.5 2016/08/22 01:42:00 jsg Exp $ */
+/* $OpenBSD: arml2cc.c,v 1.7 2021/05/16 15:10:19 deraadt Exp $ */
 /*
  * Copyright (c) 2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -17,12 +17,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/queue.h>
-#include <sys/malloc.h>
 #include <sys/device.h>
-#include <sys/evcount.h>
-#include <sys/socket.h>
-#include <sys/timeout.h>
 #include <machine/intr.h>
 #include <machine/bus.h>
 #include <arm/cpufunc.h>
@@ -150,7 +145,7 @@ arml2cc_attach(struct device *parent, struct device *self, void *args)
 	arml2cc_sc = sc;
 
 	if (bus_space_read_4(sc->sc_iot, sc->sc_ioh, L2C_CTL))
-		panic("L2 Cache controller was already enabled\n");
+		panic("L2 Cache controller was already enabled");
 
 	sc->sc_dcache_line_size = 32 << (bus_space_read_4(sc->sc_iot, sc->sc_ioh, L2C_CACHE_TYPE) & L2C_CACHE_TYPE_LINESIZE);
 	sc->sc_waymask = (8 << ((bus_space_read_4(sc->sc_iot, sc->sc_ioh, L2C_AUXCTL)

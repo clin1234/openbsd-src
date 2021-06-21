@@ -1,4 +1,4 @@
-/*	$OpenBSD: octeonvar.h,v 1.49 2020/09/04 15:18:05 visa Exp $	*/
+/*	$OpenBSD: octeonvar.h,v 1.53 2021/03/11 11:16:59 jsg Exp $	*/
 /*	$NetBSD: maltavar.h,v 1.3 2002/03/18 10:10:16 simonb Exp $	*/
 
 /*-
@@ -202,23 +202,29 @@ enum cnmac_stat {
 	cnmac_stat_count
 };
 
-/*
- * Octeon board types known to work with OpenBSD/octeon.
- * NB: BOARD_TYPE_UBIQUITI_E100 is also used by other vendors, but we don't run
- * on those boards yet.
- */
-#define	BOARD_TYPE_CN3010_EVB_HS5	11
-#define	BOARD_TYPE_UBIQUITI_E100	20002
-#define	BOARD_TYPE_UBIQUITI_E200	20003
-#define	BOARD_TYPE_UBIQUITI_E120	20004
-#define	BOARD_TYPE_UBIQUITI_E220	20005
-#define	BOARD_TYPE_UBIQUITI_E1000	20010
-#define	BOARD_TYPE_RHINOLABS_SHASTA	20012
-#define	BOARD_TYPE_DSR_500		20015
-#define	BOARD_TYPE_UBIQUITI_E300	20300
-
 #if defined(_KERNEL) || defined(_STANDALONE)
 #define OCTEON_ARGV_MAX 64
+
+/*
+ * OCTEON board types recognized by OpenBSD/octeon.
+ *
+ * It is fine to use BOARD_UNKNOWN when the board does not need
+ * special treatment.
+ */
+enum octeon_board {
+	BOARD_UNKNOWN,
+	BOARD_CHECKPOINT_N100,
+	BOARD_CN3010_EVB_HS5,
+	BOARD_DLINK_DSR_500,
+	BOARD_NETGEAR_UTM25,
+	BOARD_RHINOLABS_UTM8,
+	BOARD_UBIQUITI_E100,
+	BOARD_UBIQUITI_E120,
+	BOARD_UBIQUITI_E200,
+	BOARD_UBIQUITI_E220,
+	BOARD_UBIQUITI_E300,
+	BOARD_UBIQUITI_E1000,
+};
 
 struct boot_desc {
 	uint32_t	desc_ver;
@@ -306,6 +312,7 @@ struct octeon_bootmem_block {
 	uint64_t	size;
 };
 
+extern enum octeon_board octeon_board;
 extern struct boot_desc *octeon_boot_desc;
 extern struct boot_info *octeon_boot_info;
 
@@ -377,7 +384,7 @@ octeon_xkphys_write_8(paddr_t address, uint64_t value)
 
 	/*
 	 * XXX
-	 * This if would be better writen as:
+	 * This if would be better written as:
 	 * if ((address & 0xffffff0000000000ULL) == OCTEON_MIO_BOOT_BASE) {
 	 * but octeonreg.h can't be included here and we want this inlined
 	 *

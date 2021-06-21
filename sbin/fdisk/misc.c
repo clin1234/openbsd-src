@@ -1,4 +1,4 @@
-/*	$OpenBSD: misc.c,v 1.63 2019/07/03 03:24:01 deraadt Exp $	*/
+/*	$OpenBSD: misc.c,v 1.68 2021/06/20 18:44:19 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -22,6 +22,7 @@
 #include <ctype.h>
 #include <err.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,20 +65,18 @@ unit_lookup(char *units)
 int
 string_from_line(char *buf, size_t buflen)
 {
-	char *line;
-	size_t sz;
+	static char *line;
+	static size_t sz;
+	ssize_t len;
 
-	line = fgetln(stdin, &sz);
-	if (line == NULL)
+	len = getline(&line, &sz, stdin);
+	if (len == -1)
 		return (1);
 
-	if (line[sz - 1] == '\n')
-		sz--;
-	if (sz >= buflen)
-		sz = buflen - 1;
+	if (line[len - 1] == '\n')
+		line[len - 1] = '\0';
 
-	memcpy(buf, line, sz);
-	buf[sz] = '\0';
+	strlcpy(buf, line, buflen);
 
 	return (0);
 }
@@ -202,8 +201,8 @@ ask_yn(const char *str)
 /*
  * adapted from sbin/disklabel/editor.c
  */
-u_int64_t
-getuint64(char *prompt, u_int64_t oval, u_int64_t minval, u_int64_t maxval)
+uint64_t
+getuint64(char *prompt, uint64_t oval, uint64_t minval, uint64_t maxval)
 {
 	const int secsize = unit_types[SECTORS].conversion;
 	char buf[BUFSIZ], *endptr, *p, operator = '\0';
@@ -320,13 +319,13 @@ getuint64(char *prompt, u_int64_t oval, u_int64_t minval, u_int64_t maxval)
 		}
 	} while (1);
 
-	return((u_int64_t)d);
+	return((uint64_t)d);
 }
 
 char *
 ask_string(const char *prompt, const char *oval)
 {
-	static char buf[37];
+	static char buf[UUID_STR_LEN + 1];
 
 	buf[0] = '\0';
 	printf("%s: [%s] ", prompt, oval ? oval : "");
@@ -350,11 +349,11 @@ ask_string(const char *prompt, const char *oval)
  *  in Hacker's Delight), the Hacker's Assistant, and any code submitted
  *  by readers. Submitters implicitly agree to this."
  */
-u_int32_t
-crc32(const u_char *buf, const u_int32_t size)
+uint32_t
+crc32(const u_char *buf, const uint32_t size)
 {
 	int j;
-	u_int32_t i, byte, crc, mask;
+	uint32_t i, byte, crc, mask;
 
 	crc = 0xFFFFFFFF;
 
@@ -371,7 +370,7 @@ crc32(const u_char *buf, const u_int32_t size)
 }
 
 char *
-utf16le_to_string(u_int16_t *utf)
+utf16le_to_string(const uint16_t *utf)
 {
 	static char name[GPTPARTNAMESIZE];
 	int i;
@@ -387,10 +386,10 @@ utf16le_to_string(u_int16_t *utf)
 	return (name);
 }
 
-u_int16_t *
-string_to_utf16le(char *ch)
+uint16_t *
+string_to_utf16le(const char *ch)
 {
-	static u_int16_t utf[GPTPARTNAMESIZE];
+	static uint16_t utf[GPTPARTNAMESIZE];
 	int i;
 
 	for (i = 0; i < GPTPARTNAMESIZE; i++) {
@@ -402,4 +401,53 @@ string_to_utf16le(char *ch)
 		utf[i - 1] = 0;
 
 	return (utf);
+}
+
+void
+parse_b(const char *arg, uint32_t *blocks, uint32_t *offset, uint8_t *type)
+{
+	const char *errstr;
+	char *poffset, *ptype;
+	uint32_t blockcount, blockoffset;
+	uint8_t partitiontype;
+
+	blockoffset = 64;
+	partitiontype = DOSPTYP_EFISYS;
+	ptype = NULL;
+
+	/* First number: # of sectors in boot partition. */
+	poffset = strchr(arg, '@');
+	if (poffset != NULL)
+		*poffset++ = '\0';
+	if (poffset != NULL) {
+		ptype = strchr(poffset, ':');
+		if (ptype != NULL)
+			*ptype++ = '\0';
+	}
+
+	blockcount = strtonum(arg, 64, UINT32_MAX, &errstr);
+	if (errstr)
+		errx(1, "Block argument %s [64..%u].",
+		    errstr, UINT32_MAX);
+
+	if (poffset == NULL)
+		goto done;
+
+	blockoffset = strtonum(poffset, 64, UINT32_MAX, &errstr);
+	if (errstr)
+		errx(1, "Block offset argument %s "
+		    "[64..%u].", errstr, UINT32_MAX);
+
+	if (ptype == NULL)
+		goto done;
+
+	if (strlen(ptype) != 2 || !(isxdigit(*ptype) && isxdigit(*(ptype + 1))))
+		errx(1, "Block type is not 2 digit hex value");
+
+	partitiontype = strtol(ptype, NULL, 16);
+
+ done:
+	*blocks = blockcount;
+	*offset = blockoffset;
+	*type = partitiontype;
 }

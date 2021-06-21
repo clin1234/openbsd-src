@@ -1,4 +1,4 @@
-/*	$OpenBSD: frontend.c,v 1.36 2020/09/17 18:18:07 semarie Exp $	*/
+/*	$OpenBSD: frontend.c,v 1.56 2021/05/01 11:53:06 florian Exp $	*/
 
 /*
  * Copyright (c) 2017 Florian Obser <florian@openbsd.org>
@@ -88,10 +88,10 @@ void		 icmp6_receive(int, short, void *);
 int		 get_flags(char *);
 int		 get_xflags(char *);
 int		 get_ifrdomain(char *);
-void		 get_lladdr(char *, struct ether_addr *, struct sockaddr_in6 *);
 struct iface	*get_iface_by_id(uint32_t);
 void		 remove_iface(uint32_t);
 struct icmp6_ev	*get_icmp6ev_by_rdomain(int);
+void		 unref_icmp6ev(struct iface *);
 void		 set_icmp6sock(int, int);
 void		 send_solicitation(uint32_t);
 #ifndef	SMALL
@@ -100,8 +100,8 @@ const char	*flags_to_str(int);
 #endif	/* SMALL */
 
 LIST_HEAD(, iface)		 interfaces;
-struct imsgev			*iev_main;
-struct imsgev			*iev_engine;
+static struct imsgev		*iev_main;
+static struct imsgev		*iev_engine;
 struct event			 ev_route;
 struct msghdr			 sndmhdr;
 struct iovec			 sndiov[4];
@@ -142,21 +142,19 @@ frontend(int debug, int verbose)
 	log_init(debug, LOG_DAEMON);
 	log_setverbose(verbose);
 
-#ifndef	SMALL
-	control_state.fd = -1;
-#endif	/* SMALL */
-
 	if ((pw = getpwnam(SLAACD_USER)) == NULL)
 		fatal("getpwnam");
 
-	if (chroot(pw->pw_dir) == -1)
-		fatal("chroot");
 	if (chdir("/") == -1)
 		fatal("chdir(\"/\")");
 
-	slaacd_process = PROC_FRONTEND;
-	setproctitle("%s", log_procnames[slaacd_process]);
-	log_procinit(log_procnames[slaacd_process]);
+	if (unveil("/", "") == -1)
+		fatal("unveil(\"/\", \"\")");
+	if (unveil(NULL, NULL) == -1)
+		fatal("unveil(NULL, NULL)");
+
+	setproctitle("%s", "frontend");
+	log_procinit("frontend");
 
 	if ((ioctlsock = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0)) == -1)
 		fatal("socket");
@@ -357,17 +355,12 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			break;
 #ifndef	SMALL
 		case IMSG_CONTROLFD:
-			if (control_state.fd != -1)
-				fatalx("%s: received unexpected controlsock",
-				    __func__);
 			if ((fd = imsg.fd) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "control fd but didn't receive any",
 				    __func__);
-			control_state.fd = fd;
 			/* Listen on control socket. */
-			TAILQ_INIT(&ctl_conns);
-			control_listen();
+			control_listen(fd);
 			break;
 		case IMSG_CTL_END:
 			control_imsg_relay(&imsg);
@@ -464,7 +457,7 @@ get_flags(char *if_name)
 {
 	struct ifreq		 ifr;
 
-	(void) strlcpy(ifr.ifr_name, if_name, sizeof(ifr.ifr_name));
+	strlcpy(ifr.ifr_name, if_name, sizeof(ifr.ifr_name));
 	if (ioctl(ioctlsock, SIOCGIFFLAGS, (caddr_t)&ifr) == -1) {
 		log_warn("SIOCGIFFLAGS");
 		return -1;
@@ -477,7 +470,7 @@ get_xflags(char *if_name)
 {
 	struct ifreq		 ifr;
 
-	(void) strlcpy(ifr.ifr_name, if_name, sizeof(ifr.ifr_name));
+	strlcpy(ifr.ifr_name, if_name, sizeof(ifr.ifr_name));
 	if (ioctl(ioctlsock, SIOCGIFXFLAGS, (caddr_t)&ifr) == -1) {
 		log_warn("SIOCGIFXFLAGS");
 		return -1;
@@ -490,7 +483,7 @@ get_ifrdomain(char *if_name)
 {
 	struct ifreq		 ifr;
 
-	(void) strlcpy(ifr.ifr_name, if_name, sizeof(ifr.ifr_name));
+	strlcpy(ifr.ifr_name, if_name, sizeof(ifr.ifr_name));
 	if (ioctl(ioctlsock, SIOCGIFRDOMAIN, (caddr_t)&ifr) == -1) {
 		log_warn("SIOCGIFRDOMAIN");
 		return -1;
@@ -502,46 +495,37 @@ void
 update_iface(uint32_t if_index, char* if_name)
 {
 	struct iface		*iface;
-	struct icmp6_ev		*icmp6ev;
+	struct ifaddrs		*ifap, *ifa;
 	struct imsg_ifinfo	 imsg_ifinfo;
+	struct sockaddr_dl	*sdl;
+	struct sockaddr_in6	*sin6;
 	int			 flags, xflags, ifrdomain;
 
 	if ((flags = get_flags(if_name)) == -1 || (xflags =
 	    get_xflags(if_name)) == -1)
 		return;
 
-	if (!(xflags & IFXF_AUTOCONF6))
+	if (!(xflags & (IFXF_AUTOCONF6 | IFXF_AUTOCONF6TEMP)))
 		return;
 
 	if((ifrdomain = get_ifrdomain(if_name)) == -1)
 		return;
 
-	if ((iface = get_iface_by_id(if_index)) == NULL) {
+	iface = get_iface_by_id(if_index);
+
+	if (iface != NULL) {
+		if (iface->rdomain != ifrdomain) {
+			unref_icmp6ev(iface);
+			iface->rdomain = ifrdomain;
+			iface->icmp6ev = get_icmp6ev_by_rdomain(ifrdomain);
+		}
+	} else {
 		if ((iface = calloc(1, sizeof(*iface))) == NULL)
 			fatal("calloc");
 		iface->if_index = if_index;
 		iface->rdomain = ifrdomain;
+		iface->icmp6ev = get_icmp6ev_by_rdomain(ifrdomain);
 
-		if ((icmp6ev = get_icmp6ev_by_rdomain(ifrdomain)) == NULL) {
-			if ((icmp6ev = calloc(1, sizeof(*icmp6ev))) == NULL)
-				fatal("calloc");
-			icmp6ev->rcviov[0].iov_base = (caddr_t)icmp6ev->answer;
-			icmp6ev->rcviov[0].iov_len = sizeof(icmp6ev->answer);
-			icmp6ev->rcvmhdr.msg_name = (caddr_t)&icmp6ev->from;
-			icmp6ev->rcvmhdr.msg_namelen = sizeof(icmp6ev->from);
-			icmp6ev->rcvmhdr.msg_iov = icmp6ev->rcviov;
-			icmp6ev->rcvmhdr.msg_iovlen = 1;
-			icmp6ev->rcvmhdr.msg_controllen =
-			    CMSG_SPACE(sizeof(struct in6_pktinfo)) +
-			    CMSG_SPACE(sizeof(int));
-			if ((icmp6ev->rcvmhdr.msg_control = malloc(icmp6ev->
-			    rcvmhdr.msg_controllen)) == NULL)
-				fatal("malloc");
-			frontend_imsg_compose_main(IMSG_OPEN_ICMP6SOCK, 0,
-			    &ifrdomain, sizeof(ifrdomain));
-		}
-		iface->icmp6ev = icmp6ev;
-		iface->icmp6ev->refcnt++;
 		LIST_INSERT_HEAD(&interfaces, iface, entries);
 	}
 
@@ -551,12 +535,52 @@ update_iface(uint32_t if_index, char* if_name)
 	imsg_ifinfo.rdomain = ifrdomain;
 	imsg_ifinfo.running = (flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP |
 	    IFF_RUNNING);
-	imsg_ifinfo.autoconfprivacy = !(xflags & IFXF_INET6_NOPRIVACY);
+	imsg_ifinfo.autoconf = (xflags & IFXF_AUTOCONF6);
+	imsg_ifinfo.temporary = (xflags & IFXF_AUTOCONF6TEMP);
 	imsg_ifinfo.soii = !(xflags & IFXF_INET6_NOSOII);
-	get_lladdr(if_name, &imsg_ifinfo.hw_address, &imsg_ifinfo.ll_address);
 
-	memcpy(&iface->hw_address, &imsg_ifinfo.hw_address,
-	    sizeof(iface->hw_address));
+	if (getifaddrs(&ifap) != 0)
+		fatal("getifaddrs");
+
+	for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+		if (strcmp(if_name, ifa->ifa_name) != 0)
+			continue;
+		if (ifa->ifa_addr == NULL)
+			continue;
+
+		switch(ifa->ifa_addr->sa_family) {
+		case AF_LINK:
+			imsg_ifinfo.link_state =
+			    ((struct if_data *)ifa->ifa_data)->ifi_link_state;
+			sdl = (struct sockaddr_dl *)ifa->ifa_addr;
+			if (sdl->sdl_type != IFT_ETHER ||
+			    sdl->sdl_alen != ETHER_ADDR_LEN)
+				continue;
+			memcpy(iface->hw_address.ether_addr_octet,
+			    LLADDR(sdl), ETHER_ADDR_LEN);
+			memcpy(imsg_ifinfo.hw_address.ether_addr_octet,
+			    LLADDR(sdl), ETHER_ADDR_LEN);
+		case AF_INET6:
+			sin6 = (struct sockaddr_in6 *)ifa->ifa_addr;
+#ifdef __KAME__
+			if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) &&
+			    sin6->sin6_scope_id == 0) {
+				sin6->sin6_scope_id = ntohs(*(u_int16_t *)
+				    &sin6->sin6_addr.s6_addr[2]);
+				sin6->sin6_addr.s6_addr[2] =
+				    sin6->sin6_addr.s6_addr[3] = 0;
+			}
+#endif
+			if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
+				memcpy(&imsg_ifinfo.ll_address, sin6,
+				    sizeof(imsg_ifinfo.ll_address));
+			break;
+		default:
+			break;
+		}
+	}
+
+	freeifaddrs(ifap);
 
 	frontend_imsg_compose_main(IMSG_UPDATE_IF, 0, &imsg_ifinfo,
 	    sizeof(imsg_ifinfo));
@@ -571,23 +595,17 @@ update_autoconf_addresses(uint32_t if_index, char* if_name)
 	struct ifaddrs		*ifap, *ifa;
 	struct in6_addrlifetime *lifetime;
 	struct sockaddr_in6	*sin6;
-	struct imsg_link_state	 imsg_link_state;
 	time_t			 t;
 	int			 xflags;
 
 	if ((xflags = get_xflags(if_name)) == -1)
 		return;
 
-	if (!(xflags & IFXF_AUTOCONF6))
+	if (!(xflags & (IFXF_AUTOCONF6 | IFXF_AUTOCONF6TEMP)))
 		return;
 
 	memset(&imsg_addrinfo, 0, sizeof(imsg_addrinfo));
 	imsg_addrinfo.if_index = if_index;
-	get_lladdr(if_name, &imsg_addrinfo.hw_address,
-	    &imsg_addrinfo.ll_address);
-
-	memset(&imsg_link_state, 0, sizeof(imsg_link_state));
-	imsg_link_state.if_index = if_index;
 
 	if (getifaddrs(&ifap) != 0)
 		fatal("getifaddrs");
@@ -595,10 +613,8 @@ update_autoconf_addresses(uint32_t if_index, char* if_name)
 	for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
 		if (strcmp(if_name, ifa->ifa_name) != 0)
 			continue;
-
-		if (ifa->ifa_addr->sa_family == AF_LINK)
-			imsg_link_state.link_state =
-			    ((struct if_data *)ifa->ifa_data)->ifi_link_state;
+		if (ifa->ifa_addr == NULL)
+			continue;
 
 		if (ifa->ifa_addr->sa_family != AF_INET6)
 			continue;
@@ -610,7 +626,7 @@ update_autoconf_addresses(uint32_t if_index, char* if_name)
 		imsg_addrinfo.addr = *sin6;
 
 		memset(&ifr6, 0, sizeof(ifr6));
-		(void) strlcpy(ifr6.ifr_name, if_name, sizeof(ifr6.ifr_name));
+		strlcpy(ifr6.ifr_name, if_name, sizeof(ifr6.ifr_name));
 		memcpy(&ifr6.ifr_addr, sin6, sizeof(ifr6.ifr_addr));
 
 		if (ioctl(ioctlsock, SIOCGIFAFLAG_IN6, (caddr_t)&ifr6) == -1) {
@@ -622,11 +638,11 @@ update_autoconf_addresses(uint32_t if_index, char* if_name)
 		    IN6_IFF_TEMPORARY)))
 			continue;
 
-		imsg_addrinfo.privacy = ifr6.ifr_ifru.ifru_flags6 &
+		imsg_addrinfo.temporary = ifr6.ifr_ifru.ifru_flags6 &
 		    IN6_IFF_TEMPORARY ? 1 : 0;
 
 		memset(&ifr6, 0, sizeof(ifr6));
-		(void) strlcpy(ifr6.ifr_name, if_name, sizeof(ifr6.ifr_name));
+		strlcpy(ifr6.ifr_name, if_name, sizeof(ifr6.ifr_name));
 		memcpy(&ifr6.ifr_addr, sin6, sizeof(ifr6.ifr_addr));
 
 		if (ioctl(ioctlsock, SIOCGIFNETMASK_IN6, (caddr_t)&ifr6) ==
@@ -639,7 +655,7 @@ update_autoconf_addresses(uint32_t if_index, char* if_name)
 		    ->sin6_addr;
 
 		memset(&ifr6, 0, sizeof(ifr6));
-		(void) strlcpy(ifr6.ifr_name, if_name, sizeof(ifr6.ifr_name));
+		strlcpy(ifr6.ifr_name, if_name, sizeof(ifr6.ifr_name));
 		memcpy(&ifr6.ifr_addr, sin6, sizeof(ifr6.ifr_addr));
 		lifetime = &ifr6.ifr_ifru.ifru_lifetime;
 
@@ -666,35 +682,29 @@ update_autoconf_addresses(uint32_t if_index, char* if_name)
 
 	}
 	freeifaddrs(ifap);
-
-	log_debug("%s: %s link state down? %s", __func__, if_name,
-	    imsg_link_state.link_state == LINK_STATE_DOWN ? "yes" : "no");
-
-	frontend_imsg_compose_main(IMSG_UPDATE_LINK_STATE, 0,
-	    &imsg_link_state, sizeof(imsg_link_state));
 }
 
 const char*
 flags_to_str(int flags)
 {
 	static char	buf[sizeof(" anycast tentative duplicated detached "
-			    "deprecated autoconf autoconfprivacy")];
+			    "deprecated autoconf temporary")];
 
 	buf[0] = '\0';
 	if (flags & IN6_IFF_ANYCAST)
-		(void)strlcat(buf, " anycast", sizeof(buf));
+		strlcat(buf, " anycast", sizeof(buf));
 	if (flags & IN6_IFF_TENTATIVE)
-		(void)strlcat(buf, " tentative", sizeof(buf));
+		strlcat(buf, " tentative", sizeof(buf));
 	if (flags & IN6_IFF_DUPLICATED)
-		(void)strlcat(buf, " duplicated", sizeof(buf));
+		strlcat(buf, " duplicated", sizeof(buf));
 	if (flags & IN6_IFF_DETACHED)
-		(void)strlcat(buf, " detached", sizeof(buf));
+		strlcat(buf, " detached", sizeof(buf));
 	if (flags & IN6_IFF_DEPRECATED)
-		(void)strlcat(buf, " deprecated", sizeof(buf));
+		strlcat(buf, " deprecated", sizeof(buf));
 	if (flags & IN6_IFF_AUTOCONF)
-		(void)strlcat(buf, " autoconf", sizeof(buf));
+		strlcat(buf, " autoconf", sizeof(buf));
 	if (flags & IN6_IFF_TEMPORARY)
-		(void)strlcat(buf, " autoconfprivacy", sizeof(buf));
+		strlcat(buf, " temporary", sizeof(buf));
 
 	return (buf);
 }
@@ -790,7 +800,8 @@ handle_route_message(struct rt_msghdr *rtm, struct sockaddr **rti_info)
 			    &if_index, sizeof(if_index));
 		} else {
 			xflags = get_xflags(if_name);
-			if (xflags == -1 || !(xflags & IFXF_AUTOCONF6)) {
+			if (xflags == -1 || !(xflags & (IFXF_AUTOCONF6 |
+			    IFXF_AUTOCONF6TEMP))) {
 				log_debug("RTM_IFINFO: %s(%d) no(longer) "
 				   "autoconf6", if_name, ifm->ifm_index);
 				if_index = ifm->ifm_index;
@@ -837,8 +848,7 @@ handle_route_message(struct rt_msghdr *rtm, struct sockaddr **rti_info)
 				break;
 
 			memset(&ifr6, 0, sizeof(ifr6));
-			(void) strlcpy(ifr6.ifr_name, if_name,
-			    sizeof(ifr6.ifr_name));
+			strlcpy(ifr6.ifr_name, if_name, sizeof(ifr6.ifr_name));
 			memcpy(&ifr6.ifr_addr, sin6, sizeof(ifr6.ifr_addr));
 
 			if (ioctl(ioctlsock, SIOCGIFAFLAG_IN6, (caddr_t)&ifr6)
@@ -888,14 +898,17 @@ handle_route_message(struct rt_msghdr *rtm, struct sockaddr **rti_info)
 		memcpy(&del_route.gw, rti_info[RTAX_GATEWAY],
 		    sizeof(del_route.gw));
 		in6 = &del_route.gw.sin6_addr;
+#ifdef __KAME__
 		/* XXX from route(8) p_sockaddr() */
-		if (IN6_IS_ADDR_LINKLOCAL(in6) ||
+		if ((IN6_IS_ADDR_LINKLOCAL(in6) ||
 		    IN6_IS_ADDR_MC_LINKLOCAL(in6) ||
-		    IN6_IS_ADDR_MC_INTFACELOCAL(in6)) {
+		    IN6_IS_ADDR_MC_INTFACELOCAL(in6)) &&
+		    del_route.gw.sin6_scope_id == 0) {
 			del_route.gw.sin6_scope_id =
 			    (u_int32_t)ntohs(*(u_short *) &in6->s6_addr[2]);
 			*(u_short *)&in6->s6_addr[2] = 0;
 		}
+#endif
 		frontend_imsg_compose_engine(IMSG_DEL_ROUTE,
 		    0, 0, &del_route, sizeof(del_route));
 		log_debug("RTM_DELETE: %s[%u]", if_name,
@@ -937,47 +950,6 @@ get_rtaddrs(int addrs, struct sockaddr *sa, struct sockaddr **rti_info)
 }
 
 void
-get_lladdr(char *if_name, struct ether_addr *mac, struct sockaddr_in6 *ll)
-{
-	struct ifaddrs		*ifap, *ifa;
-	struct sockaddr_dl	*sdl;
-	struct sockaddr_in6	*sin6;
-
-	if (getifaddrs(&ifap) != 0)
-		fatal("getifaddrs");
-
-	for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
-		if (strcmp(if_name, ifa->ifa_name) != 0)
-			continue;
-
-		switch(ifa->ifa_addr->sa_family) {
-		case AF_LINK:
-			sdl = (struct sockaddr_dl *)ifa->ifa_addr;
-			if (sdl->sdl_type != IFT_ETHER ||
-			    sdl->sdl_alen != ETHER_ADDR_LEN)
-				continue;
-
-			memcpy(mac->ether_addr_octet, LLADDR(sdl),
-			    ETHER_ADDR_LEN);
-			break;
-		case AF_INET6:
-			sin6 = (struct sockaddr_in6 *)ifa->ifa_addr;
-			if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr)) {
-				sin6->sin6_scope_id = ntohs(*(u_int16_t *)
-				    &sin6->sin6_addr.s6_addr[2]);
-				sin6->sin6_addr.s6_addr[2] =
-				    sin6->sin6_addr.s6_addr[3] = 0;
-				memcpy(ll, sin6, sizeof(*ll));
-			}
-			break;
-		default:
-			break;
-		}
-	}
-	freeifaddrs(ifap);
-}
-
-void
 icmp6_receive(int fd, short events, void *arg)
 {
 	struct imsg_ra		 ra;
@@ -987,7 +959,10 @@ icmp6_receive(int fd, short events, void *arg)
 	struct cmsghdr		*cm;
 	ssize_t			 len;
 	int			 if_index = 0, *hlimp = NULL;
-	char			 ntopbuf[INET6_ADDRSTRLEN], ifnamebuf[IFNAMSIZ];
+	char			 ntopbuf[INET6_ADDRSTRLEN];
+#ifndef SMALL
+	char			 ifnamebuf[IFNAMSIZ];
+#endif	/* SMALL */
 
 	icmp6ev = arg;
 	if ((len = recvmsg(fd, &icmp6ev->rcvmhdr, 0)) == -1) {
@@ -1106,14 +1081,7 @@ remove_iface(uint32_t if_index)
 
 	LIST_REMOVE(iface, entries);
 
-	if (iface->icmp6ev != NULL) {
-		iface->icmp6ev->refcnt--;
-		if (iface->icmp6ev->refcnt == 0) {
-			event_del(&iface->icmp6ev->ev);
-			close(EVENT_FD(&iface->icmp6ev->ev));
-			free(iface->icmp6ev);
-		}
-	}
+	unref_icmp6ev(iface);
 	free(iface);
 }
 
@@ -1121,13 +1089,52 @@ struct icmp6_ev*
 get_icmp6ev_by_rdomain(int rdomain)
 {
 	struct iface	*iface;
+	struct icmp6_ev	*icmp6ev = NULL;
 
 	LIST_FOREACH (iface, &interfaces, entries) {
-		if (iface->rdomain == rdomain)
-			return (iface->icmp6ev);
+		if (iface->rdomain == rdomain) {
+			icmp6ev = iface->icmp6ev;
+			break;
+		}
 	}
 
-	return (NULL);
+	if (icmp6ev == NULL) {
+		if ((icmp6ev = calloc(1, sizeof(*icmp6ev))) == NULL)
+			fatal("calloc");
+		icmp6ev->rcviov[0].iov_base = (caddr_t)icmp6ev->answer;
+		icmp6ev->rcviov[0].iov_len = sizeof(icmp6ev->answer);
+		icmp6ev->rcvmhdr.msg_name = (caddr_t)&icmp6ev->from;
+		icmp6ev->rcvmhdr.msg_namelen = sizeof(icmp6ev->from);
+		icmp6ev->rcvmhdr.msg_iov = icmp6ev->rcviov;
+		icmp6ev->rcvmhdr.msg_iovlen = 1;
+		icmp6ev->rcvmhdr.msg_controllen =
+		    CMSG_SPACE(sizeof(struct in6_pktinfo)) +
+		    CMSG_SPACE(sizeof(int));
+		if ((icmp6ev->rcvmhdr.msg_control = malloc(icmp6ev->
+		    rcvmhdr.msg_controllen)) == NULL)
+			fatal("malloc");
+		frontend_imsg_compose_main(IMSG_OPEN_ICMP6SOCK, 0,
+		    &rdomain, sizeof(rdomain));
+	}
+	icmp6ev->refcnt++;
+	return (icmp6ev);
+}
+
+void
+unref_icmp6ev(struct iface *iface)
+{
+	struct icmp6_ev *icmp6ev = iface->icmp6ev;
+
+	iface->icmp6ev = NULL;
+
+	if (icmp6ev != NULL) {
+		icmp6ev->refcnt--;
+		if (icmp6ev->refcnt == 0) {
+			event_del(&icmp6ev->ev);
+			close(EVENT_FD(&icmp6ev->ev));
+			free(icmp6ev);
+		}
+	}
 }
 
 void
@@ -1146,9 +1153,14 @@ set_icmp6sock(int icmp6sock, int rdomain)
 		}
 	}
 
-	if (icmp6sock != -1)
-		fatalx("received unneeded ICMPv6 socket for rdomain %d",
-		    rdomain);
+	if (icmp6sock != -1) {
+		/*
+		 * The interface disappeared or changed rdomain while we were
+		 * waiting for the parent process to open the raw socket.
+		 */
+		close(icmp6sock);
+		return;
+	}
 
 	LIST_FOREACH (iface, &interfaces, entries) {
 		if (event_initialized(&iface->icmp6ev->ev) &&

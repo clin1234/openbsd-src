@@ -1,4 +1,4 @@
-/*	$OpenBSD: an.c,v 1.76 2020/07/10 13:26:37 patrick Exp $	*/
+/*	$OpenBSD: an.c,v 1.78 2021/02/25 02:48:20 dlg Exp $	*/
 /*	$NetBSD: an.c,v 1.34 2005/06/20 02:49:18 atatat Exp $	*/
 /*
  * Copyright (c) 1997, 1998, 1999
@@ -681,10 +681,10 @@ an_wait(struct an_softc *sc)
 	int i;
 
 	CSR_WRITE_2(sc, AN_COMMAND, AN_CMD_NOOP2);
-	for (i = 0; i < 3*hz; i++) {
+	for (i = 0; i < 3000; i += 100) {
 		if (CSR_READ_2(sc, AN_EVENT_STAT) & AN_EV_CMD)
 			break;
-		(void)tsleep(sc, PWAIT, "anatch", 1);
+		tsleep_nsec(sc, PWAIT, "anatch", MSEC_TO_NSEC(100));
 	}
 	CSR_WRITE_2(sc, AN_EVENT_ACK, AN_EV_CMD);
 }
@@ -781,7 +781,7 @@ an_mwrite_bap(struct an_softc *sc, int id, int off, struct mbuf *m, int totlen)
 		len = min(m->m_len, totlen);
 
 		if ((mtod(m, u_long) & 0x1) || (len & 0x1)) {
-			m_copydata(m, 0, totlen, (caddr_t)&sc->sc_buf.sc_txbuf);
+			m_copydata(m, 0, totlen, &sc->sc_buf.sc_txbuf);
 			cnt = (totlen + 1) / 2;
 			an_swap16((u_int16_t *)&sc->sc_buf.sc_txbuf, cnt); 
 			CSR_WRITE_MULTI_STREAM_2(sc, AN_DATA0,
@@ -1126,7 +1126,7 @@ an_start(struct ifnet *ifp)
 		if (ic->ic_flags & IEEE80211_F_WEPON)
 			wh->i_fc[1] |= IEEE80211_FC1_WEP;
 		m_copydata(m, 0, sizeof(struct ieee80211_frame),
-		    (caddr_t)&frmhdr.an_whdr);
+		    &frmhdr.an_whdr);
 		an_swap16((u_int16_t *)&frmhdr.an_whdr, sizeof(struct ieee80211_frame)/2);
 
 		/* insert payload length in front of llc/snap */

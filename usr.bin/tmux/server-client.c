@@ -1,4 +1,4 @@
-/* $OpenBSD: server-client.c,v 1.365 2020/10/30 18:54:23 nicm Exp $ */
+/* $OpenBSD: server-client.c,v 1.375 2021/06/10 07:43:44 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -42,20 +42,16 @@ static void	server_client_repeat_timer(int, short, void *);
 static void	server_client_click_timer(int, short, void *);
 static void	server_client_check_exit(struct client *);
 static void	server_client_check_redraw(struct client *);
+static void	server_client_check_modes(struct client *);
 static void	server_client_set_title(struct client *);
 static void	server_client_reset_state(struct client *);
 static int	server_client_assume_paste(struct session *);
+static void	server_client_update_latest(struct client *);
 
 static void	server_client_dispatch(struct imsg *, void *);
 static void	server_client_dispatch_command(struct client *, struct imsg *);
 static void	server_client_dispatch_identify(struct client *, struct imsg *);
 static void	server_client_dispatch_shell(struct client *);
-static void	server_client_dispatch_write_ready(struct client *,
-		    struct imsg *);
-static void	server_client_dispatch_read_data(struct client *,
-		    struct imsg *);
-static void	server_client_dispatch_read_done(struct client *,
-		    struct imsg *);
 
 /* Compare client windows. */
 static int
@@ -279,6 +275,40 @@ server_client_open(struct client *c, char **cause)
 	return (0);
 }
 
+/* Lost an attached client. */
+static void
+server_client_attached_lost(struct client *c)
+{
+	struct session	*s = c->session;
+	struct window	*w;
+	struct client	*loop;
+	struct client	*found;
+
+	log_debug("lost attached client %p", c);
+
+	/*
+	 * By this point the session in the client has been cleared so walk all
+	 * windows to find any with this client as the latest.
+	 */
+	RB_FOREACH(w, windows, &windows) {
+		if (w->latest != c)
+			continue;
+
+		found = NULL;
+		TAILQ_FOREACH(loop, &clients, entry) {
+			s = loop->session;
+			if (loop == c || s == NULL || s->curw->window != w)
+				continue;
+			if (found == NULL ||
+			    timercmp(&loop->activity_time, &found->activity_time,
+			    >))
+				found = loop;
+		}
+		if (found != NULL)
+			server_client_update_latest(found);
+	}
+}
+
 /* Lost a client. */
 void
 server_client_lost(struct client *c)
@@ -304,6 +334,11 @@ server_client_lost(struct client *c)
 	TAILQ_REMOVE(&clients, c, entry);
 	log_debug("lost client %p", c);
 
+	if (c->flags & CLIENT_ATTACHED) {
+		server_client_attached_lost(c);
+		notify_client("client-detached", c);
+	}
+
 	if (c->flags & CLIENT_CONTROL)
 		control_stop(c);
 	if (c->flags & CLIENT_TERMINAL)
@@ -312,6 +347,7 @@ server_client_lost(struct client *c)
 
 	free(c->term_name);
 	free(c->term_type);
+	tty_term_free_list(c->term_caps, c->term_ncaps);
 
 	status_free(c);
 
@@ -1312,7 +1348,11 @@ server_client_handle_key(struct client *c, struct key_event *event)
 	 * immediately rather than queued.
 	 */
 	if (~c->flags & CLIENT_READONLY) {
-		status_message_clear(c);
+		if (c->message_string != NULL) {
+			if (c->message_ignore_keys)
+				return (0);
+			status_message_clear(c);
+		}
 		if (c->overlay_key != NULL) {
 			switch (c->overlay_key(c, event)) {
 			case 0:
@@ -1355,6 +1395,7 @@ server_client_loop(void)
 	TAILQ_FOREACH(c, &clients, entry) {
 		server_client_check_exit(c);
 		if (c->session != NULL) {
+			server_client_check_modes(c);
 			server_client_check_redraw(c);
 			server_client_reset_state(c);
 		}
@@ -1409,83 +1450,78 @@ server_client_resize_timer(__unused int fd, __unused short events, void *data)
 	evtimer_del(&wp->resize_timer);
 }
 
-/* Start the resize timer. */
-static void
-server_client_start_resize_timer(struct window_pane *wp)
-{
-	struct timeval	tv = { .tv_usec = 250000 };
-
-	log_debug("%s: %%%u resize timer started", __func__, wp->id);
-	evtimer_add(&wp->resize_timer, &tv);
-}
-
-/* Force timer event. */
-static void
-server_client_force_timer(__unused int fd, __unused short events, void *data)
-{
-	struct window_pane	*wp = data;
-
-	log_debug("%s: %%%u force timer expired", __func__, wp->id);
-	evtimer_del(&wp->force_timer);
-	wp->flags |= PANE_RESIZENOW;
-}
-
-/* Start the force timer. */
-static void
-server_client_start_force_timer(struct window_pane *wp)
-{
-	struct timeval	tv = { .tv_usec = 10000 };
-
-	log_debug("%s: %%%u force timer started", __func__, wp->id);
-	evtimer_add(&wp->force_timer, &tv);
-}
-
 /* Check if pane should be resized. */
 static void
 server_client_check_pane_resize(struct window_pane *wp)
 {
+	struct window_pane_resize	*r;
+	struct window_pane_resize	*r1;
+	struct window_pane_resize	*first;
+	struct window_pane_resize	*last;
+	struct timeval			 tv = { .tv_usec = 250000 };
+
+	if (TAILQ_EMPTY(&wp->resize_queue))
+		return;
+
 	if (!event_initialized(&wp->resize_timer))
 		evtimer_set(&wp->resize_timer, server_client_resize_timer, wp);
-	if (!event_initialized(&wp->force_timer))
-		evtimer_set(&wp->force_timer, server_client_force_timer, wp);
-
-	if (~wp->flags & PANE_RESIZE)
+	if (evtimer_pending(&wp->resize_timer, NULL))
 		return;
+
 	log_debug("%s: %%%u needs to be resized", __func__, wp->id);
-
-	if (evtimer_pending(&wp->resize_timer, NULL)) {
-		log_debug("%s: %%%u resize timer is running", __func__, wp->id);
-		return;
+	TAILQ_FOREACH(r, &wp->resize_queue, entry) {
+		log_debug("queued resize: %ux%u -> %ux%u", r->osx, r->osy,
+		    r->sx, r->sy);
 	}
-	server_client_start_resize_timer(wp);
 
-	if (~wp->flags & PANE_RESIZEFORCE) {
-		/*
-		 * The timer is not running and we don't need to force a
-		 * resize, so just resize immediately.
-		 */
-		log_debug("%s: resizing %%%u now", __func__, wp->id);
-		window_pane_send_resize(wp, 0);
-		wp->flags &= ~PANE_RESIZE;
+	/*
+	 * There are three cases that matter:
+	 *
+	 * - Only one resize. It can just be applied.
+	 *
+	 * - Multiple resizes and the ending size is different from the
+	 *   starting size. We can discard all resizes except the most recent.
+	 *
+	 * - Multiple resizes and the ending size is the same as the starting
+	 *   size. We must resize at least twice to force the application to
+	 *   redraw. So apply the first and leave the last on the queue for
+	 *   next time.
+	 */
+	first = TAILQ_FIRST(&wp->resize_queue);
+	last = TAILQ_LAST(&wp->resize_queue, window_pane_resizes);
+	if (first == last) {
+		/* Only one resize. */
+		window_pane_send_resize(wp, first->sx, first->sy);
+		TAILQ_REMOVE(&wp->resize_queue, first, entry);
+		free(first);
+	} else if (last->sx != first->osx || last->sy != first->osy) {
+		/* Multiple resizes ending up with a different size. */
+		window_pane_send_resize(wp, last->sx, last->sy);
+		TAILQ_FOREACH_SAFE(r, &wp->resize_queue, entry, r1) {
+			TAILQ_REMOVE(&wp->resize_queue, r, entry);
+			free(r);
+		}
 	} else {
 		/*
-		 * The timer is not running, but we need to force a resize. If
-		 * the force timer has expired, resize to the real size now.
-		 * Otherwise resize to the force size and start the timer.
+		 * Multiple resizes ending up with the same size. There will
+		 * not be more than one to the same size in succession so we
+		 * can just use the last-but-one on the list and leave the last
+		 * for later. We reduce the time until the next check to avoid
+		 * a long delay between the resizes.
 		 */
-		if (wp->flags & PANE_RESIZENOW) {
-			log_debug("%s: resizing %%%u after forced resize",
-			    __func__, wp->id);
-			window_pane_send_resize(wp, 0);
-			wp->flags &= ~(PANE_RESIZE|PANE_RESIZEFORCE|PANE_RESIZENOW);
-		} else if (!evtimer_pending(&wp->force_timer, NULL)) {
-			log_debug("%s: forcing resize of %%%u", __func__,
-			    wp->id);
-			window_pane_send_resize(wp, 1);
-			server_client_start_force_timer(wp);
+		r = TAILQ_PREV(last, window_pane_resizes, entry);
+		window_pane_send_resize(wp, r->sx, r->sy);
+		TAILQ_FOREACH_SAFE(r, &wp->resize_queue, entry, r1) {
+			if (r == last)
+				break;
+			TAILQ_REMOVE(&wp->resize_queue, r, entry);
+			free(r);
 		}
+		tv.tv_usec = 10000;
 	}
+	evtimer_add(&wp->resize_timer, &tv);
 }
+
 
 /* Check pane buffer size. */
 static void
@@ -1658,7 +1694,10 @@ server_client_reset_state(struct client *c)
 		s = wp->screen;
 	if (s != NULL)
 		mode = s->mode;
-	log_debug("%s: client %s mode %x", __func__, c->name, mode);
+	if (log_get_level() != 0) {
+		log_debug("%s: client %s mode %s", __func__, c->name,
+		    screen_mode_to_string(mode));
+	}
 
 	/* Reset region and margin. */
 	tty_region_off(tty);
@@ -1772,18 +1811,15 @@ server_client_check_exit(struct client *c)
 		if (EVBUFFER_LENGTH(cf->buffer) != 0)
 			return;
 	}
-
-	if (c->flags & CLIENT_ATTACHED)
-		notify_client("client-detached", c);
 	c->flags |= CLIENT_EXITED;
 
 	switch (c->exit_type) {
 	case CLIENT_EXIT_RETURN:
-		if (c->exit_message != NULL) {
+		if (c->exit_message != NULL)
 			msize = strlen(c->exit_message) + 1;
-			size = (sizeof c->retval) + msize;
-		} else
-			size = (sizeof c->retval);
+		else
+			msize = 0;
+		size = (sizeof c->retval) + msize;
 		data = xmalloc(size);
 		memcpy(data, &c->retval, sizeof c->retval);
 		if (c->exit_message != NULL)
@@ -1808,6 +1844,28 @@ server_client_redraw_timer(__unused int fd, __unused short events,
     __unused void *data)
 {
 	log_debug("redraw timer fired");
+}
+
+/*
+ * Check if modes need to be updated. Only modes in the current window are
+ * updated and it is done when the status line is redrawn.
+ */
+static void
+server_client_check_modes(struct client *c)
+{
+	struct window			*w = c->session->curw->window;
+	struct window_pane		*wp;
+	struct window_mode_entry	*wme;
+
+	if (c->flags & (CLIENT_CONTROL|CLIENT_SUSPENDED))
+		return;
+	if (~c->flags & CLIENT_REDRAWSTATUS)
+		return;
+	TAILQ_FOREACH(wp, &w->panes, entry) {
+		wme = TAILQ_FIRST(&wp->modes);
+		if (wme != NULL && wme->mode->update != NULL)
+			wme->mode->update(wme);
+	}
 }
 
 /* Check for client redraws. */
@@ -1979,16 +2037,17 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
 
 	switch (imsg->hdr.type) {
+	case MSG_IDENTIFY_CLIENTPID:
+	case MSG_IDENTIFY_CWD:
+	case MSG_IDENTIFY_ENVIRON:
 	case MSG_IDENTIFY_FEATURES:
 	case MSG_IDENTIFY_FLAGS:
 	case MSG_IDENTIFY_LONGFLAGS:
-	case MSG_IDENTIFY_TERM:
-	case MSG_IDENTIFY_TTYNAME:
-	case MSG_IDENTIFY_CWD:
 	case MSG_IDENTIFY_STDIN:
 	case MSG_IDENTIFY_STDOUT:
-	case MSG_IDENTIFY_ENVIRON:
-	case MSG_IDENTIFY_CLIENTPID:
+	case MSG_IDENTIFY_TERM:
+	case MSG_IDENTIFY_TERMINFO:
+	case MSG_IDENTIFY_TTYNAME:
 	case MSG_IDENTIFY_DONE:
 		server_client_dispatch_identify(c, imsg);
 		break;
@@ -2046,13 +2105,13 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 		server_client_dispatch_shell(c);
 		break;
 	case MSG_WRITE_READY:
-		server_client_dispatch_write_ready(c, imsg);
+		file_write_ready(&c->files, imsg);
 		break;
 	case MSG_READ:
-		server_client_dispatch_read_data(c, imsg);
+		file_read_data(&c->files, imsg);
 		break;
 	case MSG_READ_DONE:
-		server_client_dispatch_read_done(c, imsg);
+		file_read_done(&c->files, imsg);
 		break;
 	}
 }
@@ -2182,6 +2241,14 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 			c->term_name = xstrdup(data);
 		log_debug("client %p IDENTIFY_TERM %s", c, data);
 		break;
+	case MSG_IDENTIFY_TERMINFO:
+		if (datalen == 0 || data[datalen - 1] != '\0')
+			fatalx("bad MSG_IDENTIFY_TERMINFO string");
+		c->term_caps = xreallocarray(c->term_caps, c->term_ncaps + 1,
+		    sizeof *c->term_caps);
+		c->term_caps[c->term_ncaps++] = xstrdup(data);
+		log_debug("client %p IDENTIFY_TERMINFO %s", c, data);
+		break;
 	case MSG_IDENTIFY_TTYNAME:
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			fatalx("bad MSG_IDENTIFY_TTYNAME string");
@@ -2278,71 +2345,6 @@ server_client_dispatch_shell(struct client *c)
 	proc_kill_peer(c->peer);
 }
 
-/* Handle write ready message. */
-static void
-server_client_dispatch_write_ready(struct client *c, struct imsg *imsg)
-{
-	struct msg_write_ready	*msg = imsg->data;
-	size_t			 msglen = imsg->hdr.len - IMSG_HEADER_SIZE;
-	struct client_file	 find, *cf;
-
-	if (msglen != sizeof *msg)
-		fatalx("bad MSG_WRITE_READY size");
-	find.stream = msg->stream;
-	if ((cf = RB_FIND(client_files, &c->files, &find)) == NULL)
-		return;
-	if (msg->error != 0) {
-		cf->error = msg->error;
-		file_fire_done(cf);
-	} else
-		file_push(cf);
-}
-
-/* Handle read data message. */
-static void
-server_client_dispatch_read_data(struct client *c, struct imsg *imsg)
-{
-	struct msg_read_data	*msg = imsg->data;
-	size_t			 msglen = imsg->hdr.len - IMSG_HEADER_SIZE;
-	struct client_file	 find, *cf;
-	void			*bdata = msg + 1;
-	size_t			 bsize = msglen - sizeof *msg;
-
-	if (msglen < sizeof *msg)
-		fatalx("bad MSG_READ_DATA size");
-	find.stream = msg->stream;
-	if ((cf = RB_FIND(client_files, &c->files, &find)) == NULL)
-		return;
-
-	log_debug("%s: file %d read %zu bytes", c->name, cf->stream, bsize);
-	if (cf->error == 0) {
-		if (evbuffer_add(cf->buffer, bdata, bsize) != 0) {
-			cf->error = ENOMEM;
-			file_fire_done(cf);
-		} else
-			file_fire_read(cf);
-	}
-}
-
-/* Handle read done message. */
-static void
-server_client_dispatch_read_done(struct client *c, struct imsg *imsg)
-{
-	struct msg_read_done	*msg = imsg->data;
-	size_t			 msglen = imsg->hdr.len - IMSG_HEADER_SIZE;
-	struct client_file	 find, *cf;
-
-	if (msglen != sizeof *msg)
-		fatalx("bad MSG_READ_DONE size");
-	find.stream = msg->stream;
-	if ((cf = RB_FIND(client_files, &c->files, &find)) == NULL)
-		return;
-
-	log_debug("%s: file %d read done", c->name, cf->stream);
-	cf->error = msg->error;
-	file_fire_done(cf);
-}
-
 /* Get client working directory. */
 const char *
 server_client_get_cwd(struct client *c, struct session *s)
@@ -2430,6 +2432,8 @@ server_client_get_flags(struct client *c)
 	*s = '\0';
 	if (c->flags & CLIENT_ATTACHED)
 		strlcat(s, "attached,", sizeof s);
+	if (c->flags & CLIENT_FOCUSED)
+		strlcat(s, "focused,", sizeof s);
 	if (c->flags & CLIENT_CONTROL)
 		strlcat(s, "control-mode,", sizeof s);
 	if (c->flags & CLIENT_IGNORESIZE)

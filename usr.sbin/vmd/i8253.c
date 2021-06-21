@@ -1,4 +1,4 @@
-/* $OpenBSD: i8253.c,v 1.32 2020/06/28 16:52:45 pd Exp $ */
+/* $OpenBSD: i8253.c,v 1.34 2021/06/16 16:55:02 dv Exp $ */
 /*
  * Copyright (c) 2016 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -29,7 +29,6 @@
 #include <unistd.h>
 
 #include "i8253.h"
-#include "proc.h"
 #include "vmd.h"
 #include "vmm.h"
 #include "atomicio.h"
@@ -412,6 +411,9 @@ i8253_restore(int fd, uint32_t vm_id)
 		    &i8253_channel[i]);
 		i8253_reset(i);
 	}
+
+	vm_pipe_init(&dev_pipe, i8253_pipe_dispatch);
+
 	return (0);
 }
 
@@ -421,6 +423,7 @@ i8253_stop()
 	int i;
 	for (i = 0; i < 3; i++)
 		evtimer_del(&i8253_channel[i].timer);
+	event_del(&dev_pipe.read_ev);
 }
 
 void
@@ -430,4 +433,5 @@ i8253_start()
 	for (i = 0; i < 3; i++)
 		if (i8253_channel[i].in_use)
 			i8253_reset(i);
+	event_add(&dev_pipe.read_ev, NULL);
 }

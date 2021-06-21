@@ -1,4 +1,4 @@
-/*	$OpenBSD: ipsec_output.c,v 1.78 2020/09/22 19:20:21 tobhe Exp $ */
+/*	$OpenBSD: ipsec_output.c,v 1.80 2021/06/18 15:34:21 bluhm Exp $ */
 /*
  * The author of this code is Angelos D. Keromytis (angelos@cis.upenn.edu)
  *
@@ -323,7 +323,7 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 					dstopt = 1;
 				} else if (nxt == IPPROTO_ROUTING) {
 					/*
-					 * if we see destionation option next
+					 * if we see destination option next
 					 * time, it must be dest2.
 					 */
 					dstopt = 2;
@@ -390,6 +390,8 @@ ipsec_output_cb(struct cryptop *crp)
 	struct mbuf *m = (struct mbuf *) crp->crp_buf;
 	struct tdb *tdb = NULL;
 	int error, ilen, olen;
+
+	KERNEL_ASSERT_LOCKED();
 
 	if (m == NULL) {
 		DPRINTF(("%s: bogus returned buffer from crypto\n", __func__));

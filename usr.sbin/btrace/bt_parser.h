@@ -1,7 +1,7 @@
-/*	$OpenBSD: bt_parser.h,v 1.10 2020/09/14 18:45:19 jasper Exp $	*/
+/*	$OpenBSD: bt_parser.h,v 1.16 2021/04/22 09:36:39 mpi Exp $	*/
 
 /*
- * Copyright (c) 2019-2020 Martin Pieuchot <mpi@openbsd.org>
+ * Copyright (c) 2019-2021 Martin Pieuchot <mpi@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -41,24 +41,29 @@ struct bt_probe {
 #define bp_unit	bp_func
 };
 
+
 /*
- * Filters correspond to predicates performed in kernel.
- *
- * When a probe fires the check is performed, if it isn't true no event
- * is recorded.
+ * Event filters correspond to checks performed in-kernel.
  */
-struct bt_filter {
-	enum bt_operand {
-		B_OP_NONE = 1,
-		B_OP_EQ,
-		B_OP_NE,
-	}			 bf_op;
-	enum  bt_filtervar {
+struct bt_evtfilter {
+	int			bf_op;
+	enum bt_filtervar {
 		B_FV_NONE = 1,
 		B_FV_PID,
 		B_FV_TID
 	}			 bf_var;
 	uint32_t		 bf_val;
+};
+
+/*
+ * Filters, also known as predicates, describe under which set of
+ * conditions a rule is executed.
+ *
+ * They are performed when a rule is evaluated and events might be
+ * discarded at runtime.
+ */
+struct bt_filter {
+	struct bt_stmt		 *bf_condition;	/* per event condition */
 };
 
 TAILQ_HEAD(bt_ruleq, bt_rule);
@@ -75,6 +80,7 @@ struct bt_rule {
 	struct bt_probe		*br_probe;
 	struct bt_filter	*br_filter;
 	SLIST_HEAD(, bt_stmt)	 br_action;
+	SLIST_HEAD(, bt_var)	 br_variables;	/* local variables */
 
 	enum bt_rtype {
 		 B_RT_BEGIN = 1,
@@ -95,6 +101,12 @@ struct bt_var {
 	SLIST_ENTRY(bt_var)	 bv_next;	/* linkage in global list */
 	const char		*bv_name;	/* name of the variable */
 	struct bt_arg		*bv_value;	/* corresponding value */
+	enum bt_vartype	{
+		B_VT_STR = 1,
+		B_VT_LONG,
+		B_VT_MAP,
+		B_VT_HIST,
+	}			 bv_type;
 };
 
 /*
@@ -107,10 +119,10 @@ struct bt_arg {
 	SLIST_ENTRY(bt_arg)	 ba_next;
 	void			*ba_value;
 	struct bt_arg		*ba_key;	/* key for maps/histograms */
-	enum  bt_argtype {
+	enum bt_argtype {
 		B_AT_STR = 1,			/* C-style string */
 		B_AT_LONG,			/* Number (integer) */
-		B_AT_VAR,			/* global variable (@var) */
+		B_AT_VAR,			/* global/local variable */
 		B_AT_MAP,			/* global map (@map[]) */
 		B_AT_HIST,			/* histogram */
 
@@ -139,12 +151,18 @@ struct bt_arg {
 		B_AT_MF_MIN,			/* @map[key] = min(pid) */
 		B_AT_MF_SUM,			/* @map[key] = sum(@elapsed) */
 
-		B_AT_OP_ADD,
+		B_AT_OP_PLUS,
 		B_AT_OP_MINUS,
 		B_AT_OP_MULT,
 		B_AT_OP_DIVIDE,
-		B_AT_OP_AND,
-		B_AT_OP_OR,
+		B_AT_OP_BAND,
+		B_AT_OP_BOR,
+		B_AT_OP_EQ,
+		B_AT_OP_NE,
+		B_AT_OP_LE,
+		B_AT_OP_GE,
+		B_AT_OP_LAND,
+		B_AT_OP_LOR,
 	}			 ba_type;
 };
 
@@ -170,13 +188,14 @@ struct bt_stmt {
 		B_AC_PRINT,			/* print(@map, 10) */
 		B_AC_PRINTF,			/* printf("hello!\n") */
 		B_AC_STORE,			/* @a = 3 */
+		B_AC_TEST,			/* if (@a) */
 		B_AC_TIME,			/* time("%H:%M:%S  ") */
 		B_AC_ZERO,			/* zero(@map) */
 	}			 bs_act;
 };
 
-struct bt_ruleq		 g_rules;	/* Successfully parsed rules. */
-int			 g_nprobes;	/* # of probes to attach */
+extern struct bt_ruleq	 g_rules;	/* Successfully parsed rules. */
+extern int		 g_nprobes;	/* # of probes to attach */
 
 int			 btparse(const char *, size_t, const char *, int);
 
@@ -184,8 +203,5 @@ int			 btparse(const char *, size_t, const char *, int);
 struct bt_arg		*ba_new0(void *, enum bt_argtype);
 
 const char		*bv_name(struct bt_var *);
-
-void			 bm_insert(struct bt_var *, struct bt_arg *,
-			     struct bt_arg *);
 
 #endif /* BT_PARSER_H */

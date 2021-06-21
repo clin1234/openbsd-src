@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_myx.c,v 1.111 2020/07/17 03:37:36 dlg Exp $	*/
+/*	$OpenBSD: if_myx.c,v 1.115 2021/02/08 08:18:45 mpi Exp $	*/
 
 /*
  * Copyright (c) 2007 Reyk Floeter <reyk@openbsd.org>
@@ -269,6 +269,8 @@ myx_attach(struct device *parent, struct device *self, void *aux)
 	struct pci_attach_args	*pa = aux;
 	char			 part[32];
 	pcireg_t		 memtype;
+
+	rw_init(&sc->sc_sff_lock, "myxsff");
 
 	sc->sc_pc = pa->pa_pc;
 	sc->sc_tag = pa->pa_tag;
@@ -656,7 +658,8 @@ myx_dmamem_alloc(struct myx_softc *sc, struct myx_dmamem *mxm,
 	mxm->mxm_size = size;
 
 	if (bus_dmamap_create(sc->sc_dmat, mxm->mxm_size, 1,
-	    mxm->mxm_size, 0, BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW,
+	    mxm->mxm_size, 0,
+	    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 	    &mxm->mxm_map) != 0)
 		return (1);
 	if (bus_dmamem_alloc(sc->sc_dmat, mxm->mxm_size,
@@ -1394,7 +1397,7 @@ myx_down(struct myx_softc *sc)
 	(void)myx_cmd(sc, MYXCMD_SET_IFDOWN, &mc, NULL);
 
 	while (sc->sc_state != MYX_S_OFF) {
-		sleep_setup(&sls, sts, PWAIT, "myxdown");
+		sleep_setup(&sls, sts, PWAIT, "myxdown", 0);
 		membar_consumer();
 		sleep_finish(&sls, sc->sc_state != MYX_S_OFF);
 	}
@@ -1890,7 +1893,8 @@ myx_rx_init(struct myx_softc *sc, int ring, bus_size_t size)
 	for (i = 0; i < sc->sc_rx_ring_count; i++) {
 		ms = &mrr->mrr_slots[i];
 		rv = bus_dmamap_create(sc->sc_dmat, size, 1, size, 0,
-		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW, &ms->ms_map);
+		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
+		    &ms->ms_map);
 		if (rv != 0)
 			goto destroy;
 
@@ -1967,7 +1971,7 @@ myx_mcl_small(void)
 {
 	struct mbuf *m;
 
-	m = MCLGETI(NULL, M_DONTWAIT, NULL, MYX_RXSMALL_SIZE);
+	m = MCLGETL(NULL, M_DONTWAIT, MYX_RXSMALL_SIZE);
 	if (m == NULL)
 		return (NULL);
 
@@ -2039,7 +2043,8 @@ myx_tx_init(struct myx_softc *sc, bus_size_t size)
 		ms = &sc->sc_tx_slots[i];
 		rv = bus_dmamap_create(sc->sc_dmat, size, sc->sc_tx_nsegs,
 		    sc->sc_tx_boundary, sc->sc_tx_boundary,
-		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW, &ms->ms_map);
+		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
+		    &ms->ms_map);
 		if (rv != 0)
 			goto destroy;
 	}

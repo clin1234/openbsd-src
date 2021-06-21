@@ -1,4 +1,4 @@
-.\"	$OpenBSD: rsync.1,v 1.21 2020/02/11 18:41:39 deraadt Exp $
+.\"	$OpenBSD: rsync.1,v 1.24 2021/03/31 20:36:05 jmc Exp $
 .\"
 .\" Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: February 11 2020 $
+.Dd $Mdocdate: March 31 2021 $
 .Dt OPENRSYNC 1
 .Os
 .Sh NAME
@@ -26,9 +26,11 @@
 .Op Fl e Ar program
 .Op Fl -address Ns = Ns Ar sourceaddr
 .Op Fl -del
+.Op Fl -no-motd
 .Op Fl -numeric-ids
 .Op Fl -port Ns = Ns Ar service
 .Op Fl -rsync-path Ns = Ns Ar program
+.Op Fl -timeout Ns = Ns Ar seconds
 .Op Fl -version
 .Ar source ...
 .Ar directory
@@ -92,6 +94,8 @@ not exist, it will be broken.
 Do not actually modify the destination.
 Mainly useful in combination with
 .Fl v .
+.It Fl -no-motd
+Do not display the Message of the Day.
 .It Fl -numeric-ids
 Ignore user and group names, use numeric user and group IDs only.
 Has no effect unless
@@ -139,6 +143,10 @@ on the remote host instead of the default
 .Pa rsync .
 .It Fl -specials
 Also transfer fifo and unix domain socket files.
+.It Fl -timeout Ns = Ns Ar seconds
+Set the I/O timeout in seconds.
+Exit if no data was transferred for the specified time.
+The default is 0, which means no timeout.
 .It Fl t , -times
 Set destination file and directory modification time to match the source
 when it is updated or created.

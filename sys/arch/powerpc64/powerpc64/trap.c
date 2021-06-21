@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.46 2020/10/27 12:50:49 kettenis Exp $	*/
+/*	$OpenBSD: trap.c,v 1.51 2021/05/11 18:21:12 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
@@ -53,13 +53,14 @@ trap(struct trapframe *frame)
 	int type = frame->exc;
 	union sigval sv;
 	struct vm_map *map;
+	struct vm_map_entry *entry;
 	pmap_t pm;
 	vaddr_t va;
 	int access_type;
 	int error, sig, code;
 
 	/* Disable access to floating-point and vector registers. */
-	mtmsr(mfmsr() & ~(PSL_FP|PSL_VEC|PSL_VSX));
+	mtmsr(mfmsr() & ~(PSL_FPU|PSL_VEC|PSL_VSX));
 
 	switch (type) {
 	case EXC_DECR:
@@ -108,7 +109,7 @@ trap(struct trapframe *frame)
 			db_ktrap(T_BREAKPOINT, frame);
 			return;
 		}
-		break;
+		goto fatal;
 	case EXC_TRC:
 		db_ktrap(T_BREAKPOINT, frame); /* single-stepping */
 		return;
@@ -123,12 +124,10 @@ trap(struct trapframe *frame)
 			va = curpcb->pcb_userva | (va & SEGMENT_MASK);
 		}
 		if (frame->dsisr & DSISR_STORE)
-			access_type = PROT_READ | PROT_WRITE;
+			access_type = PROT_WRITE;
 		else
 			access_type = PROT_READ;
-		KERNEL_LOCK();
 		error = uvm_fault(map, trunc_page(va), 0, access_type);
-		KERNEL_UNLOCK();
 		if (error == 0)
 			return;
 
@@ -222,8 +221,33 @@ trap(struct trapframe *frame)
 		error = pmap_slbd_fault(pm, frame->dar);
 		if (error == 0)
 			break;
-		frame->dsisr = 0;
-		/* FALLTHROUGH */
+
+		if (!uvm_map_inentry(p, &p->p_spinentry, PROC_STACK(p),
+		    "[%s]%d/%d sp=%lx inside %lx-%lx: not MAP_STACK\n",
+		    uvm_map_inentry_sp, p->p_vmspace->vm_map.sserial))
+			goto out;
+
+		/*
+		 * Unfortunately, the hardware doesn't tell us whether
+		 * this was a read or a write fault.  So we check
+		 * whether there is a mapping at the fault address and
+		 * insert a new SLB entry.  Executing the faulting
+		 * instruction again should result in a Data Storage
+		 * Interrupt that does indicate whether we're dealing
+		 * with with a read or a write fault.
+		 */
+		map = &p->p_vmspace->vm_map;
+		vm_map_lock_read(map);
+		if (uvm_map_lookup_entry(map, frame->dar, &entry))
+			error = pmap_slbd_enter(pm, frame->dar);
+		else
+			error = EFAULT;
+		vm_map_unlock_read(map);
+		if (error) {
+			sv.sival_ptr = (void *)frame->dar;
+			trapsignal(p, SIGSEGV, 0, SEGV_MAPERR, sv);
+		}
+		break;
 
 	case EXC_DSI|EXC_USER:
 		if (!uvm_map_inentry(p, &p->p_spinentry, PROC_STACK(p),
@@ -234,12 +258,10 @@ trap(struct trapframe *frame)
 		map = &p->p_vmspace->vm_map;
 		va = frame->dar;
 		if (frame->dsisr & DSISR_STORE)
-			access_type = PROT_READ | PROT_WRITE;
+			access_type = PROT_WRITE;
 		else
 			access_type = PROT_READ;
-		KERNEL_LOCK();
 		error = uvm_fault(map, trunc_page(va), 0, access_type);
-		KERNEL_UNLOCK();
 		if (error == 0)
 			uvm_grow(p, va);
 
@@ -284,9 +306,7 @@ trap(struct trapframe *frame)
 		map = &p->p_vmspace->vm_map;
 		va = frame->srr0;
 		access_type = PROT_READ | PROT_EXEC;
-		KERNEL_LOCK();
 		error = uvm_fault(map, trunc_page(va), 0, access_type);
-		KERNEL_UNLOCK();
 		if (error == 0)
 			uvm_grow(p, va);
 
@@ -332,14 +352,19 @@ trap(struct trapframe *frame)
 
 	case EXC_PGM|EXC_USER:
 		sv.sival_ptr = (void *)frame->srr0;
-		trapsignal(p, SIGTRAP, 0, TRAP_BRKPT, sv);
+		if (frame->srr1 & EXC_PGM_FPENABLED)
+			trapsignal(p, SIGFPE, 0, fpu_sigcode(p), sv);
+		else if (frame->srr1 & EXC_PGM_TRAP)
+			trapsignal(p, SIGTRAP, 0, TRAP_BRKPT, sv);
+		else
+			trapsignal(p, SIGILL, 0, ILL_PRVOPC, sv);
 		break;
 
 	case EXC_FPU|EXC_USER:
 		if ((frame->srr1 & (PSL_FP|PSL_VEC|PSL_VSX)) == 0)
 			restore_vsx(p);
-		curpcb->pcb_flags |= PCB_FP;
-		frame->srr1 |= PSL_FP;
+		curpcb->pcb_flags |= PCB_FPU;
+		frame->srr1 |= PSL_FPU;
 		break;
 
 	case EXC_TRC|EXC_USER:
@@ -347,11 +372,28 @@ trap(struct trapframe *frame)
 		trapsignal(p, SIGTRAP, 0, TRAP_TRACE, sv);
 		break;
 
+	case EXC_HEA|EXC_USER:
+		sv.sival_ptr = (void *)frame->srr0;
+		trapsignal(p, SIGILL, 0, ILL_ILLOPC, sv);
+		break;
+
 	case EXC_VEC|EXC_USER:
 		if ((frame->srr1 & (PSL_FP|PSL_VEC|PSL_VSX)) == 0)
 			restore_vsx(p);
 		curpcb->pcb_flags |= PCB_VEC;
 		frame->srr1 |= PSL_VEC;
+		break;
+
+	case EXC_VSX|EXC_USER:
+		if ((frame->srr1 & (PSL_FP|PSL_VEC|PSL_VSX)) == 0)
+			restore_vsx(p);
+		curpcb->pcb_flags |= PCB_VSX;
+		frame->srr1 |= PSL_VSX;
+		break;
+
+	case EXC_FAC|EXC_USER:
+		sv.sival_ptr = (void *)frame->srr0;
+		trapsignal(p, SIGILL, 0, ILL_PRVOPC, sv);
 		break;
 
 	default:

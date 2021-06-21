@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtp_client.c,v 1.14 2020/04/24 11:34:07 eric Exp $	*/
+/*	$OpenBSD: smtp_client.c,v 1.16 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2018 Eric Faurot <eric@openbsd.org>
@@ -25,7 +25,6 @@
 #include <errno.h>
 #include <limits.h>
 #include <resolv.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -187,7 +186,7 @@ smtp_cert_verified(struct smtp_client *proto, int verified)
 void
 smtp_set_tls(struct smtp_client *proto, void *ctx)
 {
-	io_start_tls(proto->io, ctx);
+	io_connect_tls(proto->io, ctx, proto->params.tls_servname);
 }
 
 void
@@ -624,8 +623,13 @@ smtp_client_io(struct io *io, int evt, void *arg)
 
 	case IO_TLSREADY:
 		proto->flags |= FLAG_TLS;
-		io_pause(proto->io, IO_IN);
-		smtp_verify_server_cert(proto->tag, proto, io_tls(proto->io));
+		if (proto->state == STATE_INIT)
+			smtp_client_state(proto, STATE_BANNER);
+		else {
+			/* Clear extensions before re-issueing an EHLO command. */
+			proto->ext = 0;
+			smtp_client_state(proto, STATE_EHLO);
+		}
 		break;
 
 	case IO_DATAIN:
@@ -646,10 +650,6 @@ smtp_client_io(struct io *io, int evt, void *arg)
 		break;
 
 	case IO_ERROR:
-		smtp_client_abort(proto, FAIL_CONN, io_error(io));
-		break;
-
-	case IO_TLSERROR:
 		smtp_client_abort(proto, FAIL_CONN, io_error(io));
 		break;
 

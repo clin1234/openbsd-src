@@ -1,4 +1,4 @@
-/*	$OpenBSD: def.h,v 1.166 2020/02/09 10:13:13 florian Exp $	*/
+/*	$OpenBSD: def.h,v 1.176 2021/05/06 14:16:12 lum Exp $	*/
 
 /* This file is in the public domain. */
 
@@ -267,6 +267,8 @@ struct buffer {
 	char		 b_flag;	/* Flags			 */
 	char		 b_fname[NFILEN]; /* File name			 */
 	char		 b_cwd[NFILEN]; /* working directory		 */
+	char		*b_nlseq;	/* Newline sequence of chars	 */
+	char		*b_nlchr;	/* 1st newline character	 */
 	struct fileinfo	 b_fi;		/* File attributes		 */
 	struct undoq	 b_undo;	/* Undo actions list		 */
 	struct undo_rec *b_undoptr;
@@ -307,6 +309,18 @@ struct undo_rec {
 	int		 pos;
 	char		*content;
 };
+
+/*
+ * Variable structure.
+ */
+struct varentry {
+	SLIST_ENTRY(varentry) entry;
+	char	 v_buf[BUFSIZE];
+	char	*v_name;
+	char	*v_vals;
+	int	 v_count;
+};
+SLIST_HEAD(vhead, varentry);
 
 /*
  * Previously from ttydef.h
@@ -361,6 +375,7 @@ int		 ask_makedir(void);
 
 /* dired.c */
 struct buffer	*dired_(char *);
+int		 dired_jump(int, int);
 int 		 do_dired(char *);
 
 /* file.c X */
@@ -471,7 +486,7 @@ int		 ffputbuf(FILE *, struct buffer *, int);
 int		 ffgetline(FILE *, char *, int, int *);
 int		 fbackupfile(const char *);
 char		*adjustname(const char *, int);
-char		*startupfile(char *);
+char		*startupfile(char *, char *);
 int		 copy(char *, char *);
 struct list	*make_file_list(char *);
 int		 fisdir(const char *);
@@ -580,7 +595,7 @@ int		 evalexpr(int, int);
 int		 evalbuffer(int, int);
 int		 evalfile(int, int);
 int		 load(const char *);
-int		 excline(char *);
+int		 excline(char *, int, int);
 char		*skipwhite(char *);
 
 /* help.c X */
@@ -670,6 +685,7 @@ int		 re_forwsearch(int, int);
 int		 re_backsearch(int, int);
 int		 re_searchagain(int, int);
 int		 re_queryrepl(int, int);
+int		 re_repl(int, int);
 int		 replstr(int, int);
 int		 setcasefold(int, int);
 int		 delmatchlines(int, int);
@@ -713,13 +729,14 @@ int		 compile(int, int);
 void		 bellinit(void);
 int		 toggleaudiblebell(int, int);
 int		 togglevisiblebell(int, int);
+int		 dobeep_num(const char *, int);
 int		 dobeep_msgs(const char *, const char *);
 int		 dobeep_msg(const char *);
 void		 dobeep(void);
 
 /* interpreter.c */
-int		 foundparen(char *);
-int		 clearvars(void);
+int		 foundparen(char *, int, int);
+void		 cleanup(void);
 
 /*
  * Externals.
@@ -728,6 +745,7 @@ extern struct buffer	*bheadp;
 extern struct buffer	*curbp;
 extern struct mgwin	*curwp;
 extern struct mgwin	*wheadp;
+extern struct vhead	 varhead;
 extern int		 thisflag;
 extern int		 lastflag;
 extern int		 curgoal;
@@ -748,6 +766,7 @@ extern int		 doaudiblebell;
 extern int		 dovisiblebell;
 extern int		 dblspace;
 extern int		 allbro;
+extern int		 batch;
 extern char	 	 cinfo[];
 extern char		*keystrings[];
 extern char		 pat[NPAT];

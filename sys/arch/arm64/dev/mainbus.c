@@ -1,4 +1,4 @@
-/* $OpenBSD: mainbus.c,v 1.19 2020/08/26 03:29:05 visa Exp $ */
+/* $OpenBSD: mainbus.c,v 1.21 2021/05/05 14:13:57 kettenis Exp $ */
 /*
  * Copyright (c) 2016 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2017 Mark Kettenis <kettenis@openbsd.org>
@@ -25,6 +25,7 @@
 #include <machine/fdt.h>
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/fdt.h>
+#include <dev/ofw/ofw_misc.h>
 #include <dev/ofw/ofw_thermal.h>
 
 #include <arm64/arm64/arm64var.h>
@@ -155,7 +156,7 @@ mainbus_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_early = 0;
 	for (node = OF_child(sc->sc_node); node != 0; node = OF_peer(node))
 		mainbus_attach_node(self, node, NULL);
-	
+
 	mainbus_attach_framebuffer(self);
 
 	thermal_init();
@@ -266,6 +267,8 @@ mainbus_attach_node(struct device *self, int node, cfmatch_t submatch)
 		memcpy(fa.fa_dmat, sc->sc_dmat, sizeof(*sc->sc_dmat));
 		fa.fa_dmat->_flags |= BUS_DMA_COHERENT;
 	}
+
+	fa.fa_dmat = iommu_device_map(fa.fa_node, fa.fa_dmat);
 
 	if (submatch == NULL && sc->sc_early == 0)
 		print = mainbus_print;

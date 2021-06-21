@@ -1,4 +1,4 @@
-/*	$OpenBSD: usm.c,v 1.17 2019/10/24 12:39:27 tb Exp $	*/
+/*	$OpenBSD: usm.c,v 1.20 2021/06/20 19:55:48 martijn Exp $	*/
 
 /*
  * Copyright (c) 2012 GeNUA mbH
@@ -177,6 +177,27 @@ usm_newuser(char *name, const char **errp)
 	return up;
 }
 
+const struct usmuser *
+usm_check_mincred(int minlevel, const char **errstr)
+{
+	struct usmuser *up;
+
+	if (minlevel == 0)
+		return NULL;
+
+	SLIST_FOREACH(up, &usmuserlist, uu_next) {
+		if (minlevel & SNMP_MSGFLAG_PRIV && up->uu_privkey == NULL) {
+			*errstr = "missing enckey";
+			return up;
+		}
+		if (minlevel & SNMP_MSGFLAG_AUTH && up->uu_authkey == NULL) {
+			*errstr = "missing authkey";
+			return up;
+		}
+	}
+	return NULL;
+}
+
 struct usmuser *
 usm_finduser(char *name)
 {
@@ -302,7 +323,7 @@ usm_decode(struct snmp_message *msg, struct ber_element *elm, const char **errp)
 	smi_debug_elements(usm);
 #endif
 
-	if (ober_scanf_elements(usm, "{xiixpxx", &engineid, &enginelen,
+	if (ober_scanf_elements(usm, "{xiixpxx$", &engineid, &enginelen,
 	    &engine_boots, &engine_time, &user, &userlen, &offs2,
 	    &digest, &digestlen, &salt, &saltlen) != 0) {
 		*errp = "cannot decode USM params";
@@ -548,7 +569,7 @@ usm_make_report(struct snmp_message *msg)
 {
 	struct ber_oid		 usmstat = OID(MIB_usmStats, 0, 0);
 
-	msg->sm_context = SNMP_C_REPORT;
+	msg->sm_pdutype = SNMP_C_REPORT;
 	usmstat.bo_id[OIDIDX_usmStats] = msg->sm_usmerr;
 	usmstat.bo_n = OIDIDX_usmStats + 2;
 	if (msg->sm_varbindresp != NULL)

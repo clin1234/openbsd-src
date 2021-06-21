@@ -1,4 +1,4 @@
-/*	$OpenBSD: mbr.h,v 1.28 2015/11/18 15:31:15 krw Exp $	*/
+/*	$OpenBSD: mbr.h,v 1.31 2021/06/16 15:40:47 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -24,7 +24,7 @@ struct mbr {
 	off_t offset;
 	unsigned char code[DOSPARTOFF];
 	struct prt part[NDOSPART];
-	u_int16_t signature;
+	uint16_t signature;
 };
 
 extern struct mbr initial_mbr;
@@ -36,8 +36,6 @@ void MBR_init(struct mbr *);
 void MBR_init_GPT(struct mbr *);
 int MBR_read(off_t, struct dos_mbr *);
 int MBR_write(off_t, struct dos_mbr *);
-void MBR_zapgpt(struct dos_mbr *, uint64_t);
-void MBR_init_GPT(struct mbr *);
 int MBR_protective_mbr(struct mbr *);
 
 #endif /* _MBR_H */

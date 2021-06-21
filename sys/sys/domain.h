@@ -1,4 +1,4 @@
-/*	$OpenBSD: domain.h,v 1.20 2019/06/13 08:12:11 claudio Exp $	*/
+/*	$OpenBSD: domain.h,v 1.22 2021/05/25 22:45:10 bluhm Exp $	*/
 /*	$NetBSD: domain.h,v 1.10 1996/02/09 18:25:07 christos Exp $	*/
 
 /*
@@ -47,7 +47,7 @@ typedef	__socklen_t	socklen_t;	/* length type for network syscalls */
 struct	mbuf;
 struct	ifnet;
 
-struct	domain {
+struct domain {
 	int	dom_family;		/* AF_xxx */
 	char	*dom_name;
 	void	(*dom_init)(void);	/* initialize domain data structures */
@@ -59,20 +59,20 @@ struct	domain {
 					/* initialize routing table */
 	unsigned int	dom_sasize;	/* size of sockaddr structure */
 	unsigned int	dom_rtoffset;	/* offset of the key, in bytes */
-	unsigned int	dom_maxplen;	/* maxium prefix length, in bits */
+	unsigned int	dom_maxplen;	/* maximum prefix length, in bits */
 	void	*(*dom_ifattach)(struct ifnet *);
 	void	(*dom_ifdetach)(struct ifnet *, void *);
 					/* af-dependent data on ifnet */
 };
 
 #ifdef _KERNEL
-extern struct domain *domains[];
 void domaininit(void);
 
-extern struct domain inetdomain;
-
-#ifdef INET6
-extern struct domain inet6domain;
-#endif
-
+extern const struct domain *const domains[];
+extern const struct domain inet6domain;
+extern const struct domain inetdomain;
+extern const struct domain mplsdomain;
+extern const struct domain pfkeydomain;
+extern const struct domain routedomain;
+extern const struct domain unixdomain;
 #endif /* _KERNEL */

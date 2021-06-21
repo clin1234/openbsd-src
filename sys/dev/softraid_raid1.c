@@ -1,4 +1,4 @@
-/* $OpenBSD: softraid_raid1.c,v 1.65 2016/04/12 16:26:54 krw Exp $ */
+/* $OpenBSD: softraid_raid1.c,v 1.67 2021/05/16 15:12:37 deraadt Exp $ */
 /*
  * Copyright (c) 2007 Marco Peereboom <marco@peereboom.us>
  *
@@ -107,7 +107,7 @@ sr_raid1_set_chunk_state(struct sr_discipline *sd, int c, int new_state)
 {
 	int			old_state, s;
 
-	DNPRINTF(SR_D_STATE, "%s: %s: %s: sr_raid_set_chunk_state %d -> %d\n",
+	DNPRINTF(SR_D_STATE, "%s: %s: %s: sr_raid1_set_chunk_state %d -> %d\n",
 	    DEVNAME(sd->sd_sc), sd->sd_meta->ssd_devname,
 	    sd->sd_vol.sv_chunks[c]->src_meta.scmi.scm_devname, c, new_state);
 
@@ -173,8 +173,8 @@ sr_raid1_set_chunk_state(struct sr_discipline *sd, int c, int new_state)
 	default:
 die:
 		splx(s); /* XXX */
-		panic("%s: %s: %s: invalid chunk state transition "
-		    "%d -> %d\n", DEVNAME(sd->sd_sc),
+		panic("%s: %s: %s: invalid chunk state transition %d -> %d",
+		    DEVNAME(sd->sd_sc),
 		    sd->sd_meta->ssd_devname,
 		    sd->sd_vol.sv_chunks[c]->src_meta.scmi.scm_devname,
 		    old_state, new_state);
@@ -197,7 +197,7 @@ sr_raid1_set_vol_state(struct sr_discipline *sd)
 	int			new_state, i, s, nd;
 	int			old_state = sd->sd_vol_status;
 
-	DNPRINTF(SR_D_STATE, "%s: %s: sr_raid_set_vol_state\n",
+	DNPRINTF(SR_D_STATE, "%s: %s: sr_raid1_set_vol_state\n",
 	    DEVNAME(sd->sd_sc), sd->sd_meta->ssd_devname);
 
 	nd = sd->sd_meta->ssdi.ssd_chunk_no;
@@ -307,8 +307,8 @@ sr_raid1_set_vol_state(struct sr_discipline *sd)
 
 	default:
 die:
-		panic("%s: %s: invalid volume state transition "
-		    "%d -> %d\n", DEVNAME(sd->sd_sc),
+		panic("%s: %s: invalid volume state transition %d -> %d",
+		    DEVNAME(sd->sd_sc),
 		    sd->sd_meta->ssd_devname,
 		    old_state, new_state);
 		/* NOTREACHED */

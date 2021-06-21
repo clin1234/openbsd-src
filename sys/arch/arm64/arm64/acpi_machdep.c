@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpi_machdep.c,v 1.8 2020/07/17 08:07:33 patrick Exp $	*/
+/*	$OpenBSD: acpi_machdep.c,v 1.15 2021/05/17 17:25:13 kettenis Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis
  *
@@ -29,6 +29,9 @@
 #include <dev/ofw/fdt.h>
 
 #include <dev/acpi/acpivar.h>
+#include <dev/acpi/dsdt.h>
+
+#include <arm64/dev/acpiiort.h>
 
 int	lid_action;
 int	pwr_action = 1;
@@ -73,7 +76,8 @@ acpi_map(paddr_t pa, size_t len, struct acpi_mem_map *handle)
 {
 	paddr_t pgpa = trunc_page(pa);
 	paddr_t endpa = round_page(pa + len);
-	vaddr_t va = uvm_km_valloc(kernel_map, endpa - pgpa);
+	vaddr_t va = (vaddr_t)km_alloc(endpa - pgpa, &kv_any, &kp_none,
+	    &kd_nowait);
 
 	if (va == 0)
 		return (ENOMEM);
@@ -96,7 +100,7 @@ void
 acpi_unmap(struct acpi_mem_map *handle)
 {
 	pmap_kremove(handle->baseva, handle->vsize);
-	uvm_km_free(kernel_map, handle->baseva, handle->vsize);
+	km_free((void *)handle->baseva, handle->vsize, &kv_any, &kp_none);
 }
 
 int
@@ -138,7 +142,7 @@ acpi_intr_establish(int irq, int flags, int level,
     int (*func)(void *), void *arg, const char *name)
 {
 	struct interrupt_controller *ic;
-	struct arm_intr_handle *aih;
+	struct machine_intr_handle *aih;
 	uint32_t interrupt[3];
 	void *cookie;
 
@@ -152,7 +156,17 @@ acpi_intr_establish(int irq, int flags, int level,
 
 	interrupt[0] = 0;
 	interrupt[1] = irq - 32;
-	interrupt[2] = 0x4;
+	if (flags & LR_EXTIRQ_MODE) { /* edge */
+		if (flags & LR_EXTIRQ_POLARITY)
+			interrupt[2] = 0x2; /* falling */
+		else
+			interrupt[2] = 0x1; /* rising */
+	} else { /* level */
+		if (flags & LR_EXTIRQ_POLARITY)
+			interrupt[2] = 0x8; /* low */
+		else
+			interrupt[2] = 0x4; /* high */
+	}
 
 	cookie = ic->ic_establish(ic->ic_cookie, interrupt, level, NULL,
 	    func, arg, (char *)name);
@@ -164,6 +178,16 @@ acpi_intr_establish(int irq, int flags, int level,
 	aih->ih_ih = cookie;
 
 	return aih;
+}
+
+void
+acpi_intr_disestablish(void *cookie)
+{
+	struct machine_intr_handle *aih = cookie;
+	struct interrupt_controller *ic = aih->ih_ic;
+
+	ic->ic_disestablish(aih->ih_ih);
+	free(aih, M_DEVBUF, sizeof(*aih));
 }
 
 void
@@ -195,3 +219,9 @@ acpi_resume_mp(void)
 }
 
 #endif
+
+bus_dma_tag_t
+acpi_iommu_device_map(struct aml_node *node, bus_dma_tag_t dmat)
+{
+	return acpiiort_device_map(node, dmat);
+}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_switch.c,v 1.38 2020/08/28 12:01:48 mvs Exp $	*/
+/*	$OpenBSD: if_switch.c,v 1.43 2021/03/05 06:44:09 dlg Exp $	*/
 
 /*
  * Copyright (c) 2016 Kazuya GODA <goda@openbsd.org>
@@ -69,7 +69,7 @@ void	 switch_port_detach(void *);
 int	 switch_port_del(struct switch_softc *, struct ifbreq *);
 int	 switch_port_list(struct switch_softc *, struct ifbifconf *);
 struct mbuf *
-	 switch_input(struct ifnet *, struct mbuf *, void *);
+	 switch_input(struct ifnet *, struct mbuf *, uint64_t, void *);
 struct mbuf
 	*switch_port_ingress(struct switch_softc *, struct ifnet *,
 	    struct mbuf *);
@@ -196,6 +196,7 @@ switch_clone_destroy(struct ifnet *ifp)
 	struct switch_port	*swpo, *tp;
 	struct ifnet		*ifs;
 
+	NET_LOCK();
 	TAILQ_FOREACH_SAFE(swpo, &sc->sc_swpo_list, swpo_list_next, tp) {
 		if ((ifs = if_get(swpo->swpo_ifindex)) != NULL) {
 			switch_port_detach(ifs);
@@ -204,11 +205,11 @@ switch_clone_destroy(struct ifnet *ifp)
 			log(LOG_ERR, "failed to cleanup on ifindex(%d)\n",
 			    swpo->swpo_ifindex);
 	}
+	NET_UNLOCK();
 	LIST_REMOVE(sc, sc_switch_next);
 	bstp_destroy(sc->sc_stp);
 	swofp_destroy(sc);
 	switch_dev_destroy(sc);
-	if_deactivate(ifp);
 	if_detach(ifp);
 	free(sc, M_DEVBUF, sizeof(*sc));
 
@@ -416,12 +417,13 @@ switch_ioctl(struct ifnet *ifp, unsigned long cmd, caddr_t data)
 		error = switch_port_add(sc, (struct ifbreq *)data);
 		if (error && error != EEXIST)
 			break;
-		ifs = ifunit(breq->ifbr_ifsname);
+		ifs = if_unit(breq->ifbr_ifsname);
 		if (ifs == NULL) {
 			error = ENOENT;
 			break;
 		}
 		swpo = (struct switch_port *)ifs->if_switchport;
+		if_put(ifs);
 		if (swpo == NULL || swpo->swpo_switch != sc) {
 			error = ESRCH;
 			break;
@@ -429,12 +431,13 @@ switch_ioctl(struct ifnet *ifp, unsigned long cmd, caddr_t data)
 		error = switch_port_set_local(sc, swpo);
 		break;
 	case SIOCBRDGGIFFLGS:
-		ifs = ifunit(breq->ifbr_ifsname);
+		ifs = if_unit(breq->ifbr_ifsname);
 		if (ifs == NULL) {
 			error = ENOENT;
 			break;
 		}
 		swpo = (struct switch_port *)ifs->if_switchport;
+		if_put(ifs);
 		if (swpo == NULL || swpo->swpo_switch != sc) {
 			error = ESRCH;
 			break;
@@ -484,12 +487,13 @@ switch_ioctl(struct ifnet *ifp, unsigned long cmd, caddr_t data)
 		brop->ifbop_last_tc_time.tv_usec = bs->bs_last_tc_time.tv_usec;
 		break;
 	case SIOCBRDGSIFPROT:
-		ifs = ifunit(breq->ifbr_ifsname);
+		ifs = if_unit(breq->ifbr_ifsname);
 		if (ifs == NULL) {
 			error = ENOENT;
 			break;
 		}
 		swpo = (struct switch_port *)ifs->if_switchport;
+		if_put(ifs);
 		if (swpo == NULL || swpo->swpo_switch != sc) {
 			error = ESRCH;
 			break;
@@ -518,33 +522,34 @@ switch_port_add(struct switch_softc *sc, struct ifbreq *req)
 	struct switch_port	*swpo;
 	int			 error;
 
-	if ((ifs = ifunit(req->ifbr_ifsname)) == NULL)
+	if ((ifs = if_unit(req->ifbr_ifsname)) == NULL)
 		return (ENOENT);
 
-	if (ifs->if_type != IFT_ETHER)
-		return (EPROTONOSUPPORT);
+	if (ifs->if_type != IFT_ETHER) {
+		error = EPROTONOSUPPORT;
+		goto put;
+	}
 
 	if (ifs->if_switchport != NULL) {
 		swpo = (struct switch_port *)ifs->if_switchport;
 		if (swpo->swpo_switch == sc)
-			return (EEXIST);
+			error = EEXIST;
 		else
-			return (EBUSY);
+			error = EBUSY;
+
+		goto put;
 	}
 
 	if ((error = ifpromisc(ifs, 1)) != 0)
-		return (error);
+		goto put;
 
-	error = ether_brport_isset(ifs);
-	if (error != 0) {
-		ifpromisc(ifs, 0);
-		return (error);
-	}
+	if ((error = ether_brport_isset(ifs)) != 0)
+		goto unset;
 
 	swpo = malloc(sizeof(*swpo), M_DEVBUF, M_NOWAIT|M_ZERO);
 	if (swpo == NULL) {
-		ifpromisc(ifs, 0);
-		return (ENOMEM);
+		error = ENOMEM;
+		goto unset;
 	}
 
 	swpo->swpo_switch = sc;
@@ -554,12 +559,20 @@ switch_port_add(struct switch_softc *sc, struct ifbreq *req)
 	swpo->swpo_port_no = swofp_assign_portno(sc, ifs->if_index);
 	task_set(&swpo->swpo_dtask, switch_port_detach, ifs);
 	if_detachhook_add(ifs, &swpo->swpo_dtask);
+	if_put(ifs);
 
 	nanouptime(&swpo->swpo_appended);
 
 	TAILQ_INSERT_TAIL(&sc->sc_swpo_list, swpo, swpo_list_next);
 
 	return (0);
+
+unset:
+	ifpromisc(ifs, 0);
+put:
+
+	if_put(ifs);
+	return (error);
 }
 
 int
@@ -655,7 +668,7 @@ switch_port_del(struct switch_softc *sc, struct ifbreq *req)
 }
 
 struct mbuf *
-switch_input(struct ifnet *ifp, struct mbuf *m, void *null)
+switch_input(struct ifnet *ifp, struct mbuf *m, uint64_t dst, void *null)
 {
 	KASSERT(m->m_flags & M_PKTHDR);
 
@@ -679,7 +692,7 @@ switch_port_ingress(struct switch_softc *sc, struct ifnet *src_if,
 	sc->sc_if.if_ipackets++;
 	sc->sc_if.if_ibytes += m->m_pkthdr.len;
 
-	m_copydata(m, 0, ETHER_HDR_LEN, (caddr_t)&eh);
+	m_copydata(m, 0, ETHER_HDR_LEN, &eh);
 #if 0
 	/* It's the "#if 0" because it doesn't test switch(4) with pf(4)
 	 * or with ipsec(4).
@@ -709,7 +722,7 @@ switch_port_egress(struct switch_softc *sc, struct switch_fwdp_queue *fwdp_q,
 		bpf_mtap(sc->sc_if.if_bpf, m, BPF_DIRECTION_OUT);
 #endif
 
-	m_copydata(m, 0, ETHER_HDR_LEN, (caddr_t)&eh);
+	m_copydata(m, 0, ETHER_HDR_LEN, &eh);
 	TAILQ_FOREACH(swpo, fwdp_q, swpo_fwdp_next) {
 
 		if ((dst_if = if_get(swpo->swpo_ifindex)) == NULL)
@@ -1536,7 +1549,7 @@ ofp_split_mbuf(struct mbuf *m, struct mbuf **mtail)
 		return (-1);
 
 	m_copydata(m, offsetof(struct ofp_header, oh_length), sizeof(ohlen),
-	    (caddr_t)&ohlen);
+	    &ohlen);
 	ohlen = ntohs(ohlen);
 
 	/* We got an invalid packet header, skip it. */

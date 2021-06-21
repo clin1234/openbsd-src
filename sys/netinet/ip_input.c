@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_input.c,v 1.351 2020/08/22 17:55:30 gnezdo Exp $	*/
+/*	$OpenBSD: ip_input.c,v 1.362 2021/06/03 01:55:52 dlg Exp $	*/
 /*	$NetBSD: ip_input.c,v 1.30 1996/03/16 23:53:58 christos Exp $	*/
 
 /*
@@ -107,8 +107,15 @@ LIST_HEAD(, ipq) ipq;
 int	ip_maxqueue = 300;
 int	ip_frags = 0;
 
+#ifdef MROUTING
+extern int ip_mrtproto;
+#endif
+
 const struct sysctl_bounded_args ipctl_vars[] = {
-	{ IPCTL_FORWARDING, &ipforwarding, 0, 1 },
+#ifdef MROUTING
+	{ IPCTL_MRTPROTO, &ip_mrtproto, SYSCTL_INT_READONLY },
+#endif
+	{ IPCTL_FORWARDING, &ipforwarding, 0, 2 },
 	{ IPCTL_SENDREDIRECTS, &ipsendredirects, 0, 1 },
 	{ IPCTL_DEFTTL, &ip_defttl, 0, 255 },
 	{ IPCTL_DIRECTEDBCAST, &ip_directedbcast, 0, 1 },
@@ -119,7 +126,6 @@ const struct sysctl_bounded_args ipctl_vars[] = {
 	{ IPCTL_IPPORT_MAXQUEUE, &ip_maxqueue, 0, 10000 },
 	{ IPCTL_MFORWARDING, &ipmforwarding, 0, 1 },
 	{ IPCTL_MULTIPATH, &ipmultipath, 0, 1 },
-	{ IPCTL_ARPQUEUED, &la_hold_total, 0, 1000 },
 	{ IPCTL_ARPTIMEOUT, &arpt_keep, 0, INT_MAX },
 	{ IPCTL_ARPDOWN, &arpt_down, 0, INT_MAX },
 };
@@ -132,6 +138,7 @@ struct cpumem *ipcounters;
 int ip_sysctl_ipstat(void *, size_t *, void *);
 
 static struct mbuf_queue	ipsend_mq;
+static struct mbuf_queue	ipsendraw_mq;
 
 extern struct niqueue		arpinq;
 
@@ -140,7 +147,11 @@ int	ip_dooptions(struct mbuf *, struct ifnet *);
 int	in_ouraddr(struct mbuf *, struct ifnet *, struct rtentry **);
 
 static void ip_send_dispatch(void *);
+static void ip_sendraw_dispatch(void *);
 static struct task ipsend_task = TASK_INITIALIZER(ip_send_dispatch, &ipsend_mq);
+static struct task ipsendraw_task =
+	TASK_INITIALIZER(ip_sendraw_dispatch, &ipsendraw_mq);
+
 /*
  * Used to save the IP options in case a protocol wants to respond
  * to an incoming packet over the same route if the packet got here
@@ -210,7 +221,9 @@ ip_init(void)
 		DP_SET(rootonlyports.udp, defrootonlyports_udp[i]);
 
 	mq_init(&ipsend_mq, 64, IPL_SOFTNET);
+	mq_init(&ipsendraw_mq, 64, IPL_SOFTNET);
 
+	arpinit();
 #ifdef IPSEC
 	ipsec_init();
 #endif
@@ -231,37 +244,36 @@ ipv4_input(struct ifnet *ifp, struct mbuf *m)
 	KASSERT(nxt == IPPROTO_DONE);
 }
 
-int
-ip_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
+struct mbuf *
+ipv4_check(struct ifnet *ifp, struct mbuf *m)
 {
-	struct mbuf	*m = *mp;
-	struct rtentry	*rt = NULL;
-	struct ip	*ip;
+	struct ip *ip;
 	int hlen, len;
-	in_addr_t pfrdr = 0;
 
-	KASSERT(*offp == 0);
-
-	ipstat_inc(ips_total);
-	if (m->m_len < sizeof (struct ip) &&
-	    (m = *mp = m_pullup(m, sizeof (struct ip))) == NULL) {
-		ipstat_inc(ips_toosmall);
-		goto bad;
+	if (m->m_len < sizeof(*ip)) {
+		m = m_pullup(m, sizeof(*ip));
+		if (m == NULL) {
+			ipstat_inc(ips_toosmall);
+			return (NULL);
+		}
 	}
+
 	ip = mtod(m, struct ip *);
 	if (ip->ip_v != IPVERSION) {
 		ipstat_inc(ips_badvers);
 		goto bad;
 	}
+
 	hlen = ip->ip_hl << 2;
-	if (hlen < sizeof(struct ip)) {	/* minimum header length */
+	if (hlen < sizeof(*ip)) {	/* minimum header length */
 		ipstat_inc(ips_badhlen);
 		goto bad;
 	}
 	if (hlen > m->m_len) {
-		if ((m = *mp = m_pullup(m, hlen)) == NULL) {
+		m = m_pullup(m, hlen);
+		if (m == NULL) {
 			ipstat_inc(ips_badhlen);
-			goto bad;
+			return (NULL);
 		}
 		ip = mtod(m, struct ip *);
 	}
@@ -275,8 +287,8 @@ ip_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 		}
 	}
 
-	if ((m->m_pkthdr.csum_flags & M_IPV4_CSUM_IN_OK) == 0) {
-		if (m->m_pkthdr.csum_flags & M_IPV4_CSUM_IN_BAD) {
+	if (!ISSET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_IN_OK)) {
+		if (ISSET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_IN_BAD)) {
 			ipstat_inc(ips_badsum);
 			goto bad;
 		}
@@ -286,6 +298,8 @@ ip_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 			ipstat_inc(ips_badsum);
 			goto bad;
 		}
+
+		SET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_IN_OK);
 	}
 
 	/* Retrieve the packet length. */
@@ -316,6 +330,28 @@ ip_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 		} else
 			m_adj(m, len - m->m_pkthdr.len);
 	}
+
+	return (m);
+bad:
+	m_freem(m);
+	return (NULL);
+}
+
+int
+ip_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
+{
+	struct mbuf	*m;
+	struct rtentry	*rt = NULL;
+	struct ip	*ip;
+	int hlen;
+	in_addr_t pfrdr = 0;
+
+	KASSERT(*offp == 0);
+
+	ipstat_inc(ips_total);
+	m = *mp = ipv4_check(ifp, *mp);
+	if (m == NULL)
+		goto bad;
 
 #if NCARP > 0
 	if (carp_lsdrop(ifp, m, AF_INET, &ip->ip_src.s_addr,
@@ -573,7 +609,7 @@ ip_ours(struct mbuf **mp, int *offp, int nxt, int af)
 
 	*offp = hlen;
 	nxt = ip->ip_p;
-	/* Check wheter we are already in a IPv4/IPv6 local deliver loop. */
+	/* Check whether we are already in a IPv4/IPv6 local deliver loop. */
 	if (af == AF_UNSPEC)
 		nxt = ip_deliver(mp, offp, nxt, AF_INET);
 	return nxt;
@@ -1244,7 +1280,7 @@ ip_dooptions(struct mbuf *m, struct ifnet *ifp)
 		}
 	}
 	KERNEL_UNLOCK();
-	if (forward && ipforwarding) {
+	if (forward && ipforwarding > 0) {
 		ip_forward(m, ifp, NULL, 1);
 		return (1);
 	}
@@ -1411,8 +1447,8 @@ ip_forward(struct mbuf *m, struct ifnet *ifp, struct rtentry *rt, int srcrt)
 		goto freecopy;
 	}
 
+	memset(&ro, 0, sizeof(ro));
 	sin = satosin(&ro.ro_dst);
-	memset(sin, 0, sizeof(*sin));
 	sin->sin_family = AF_INET;
 	sin->sin_len = sizeof(*sin);
 	sin->sin_addr = ip->ip_dst;
@@ -1422,6 +1458,7 @@ ip_forward(struct mbuf *m, struct ifnet *ifp, struct rtentry *rt, int srcrt)
 		rt = rtalloc_mpath(sintosa(sin), &ip->ip_src.s_addr,
 		    m->m_pkthdr.ph_rtableid);
 		if (rt == NULL) {
+			ipstat_inc(ips_noroute);
 			icmp_error(m, ICMP_UNREACH, ICMP_UNREACH_HOST, dest, 0);
 			return;
 		}
@@ -1562,7 +1599,6 @@ ip_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 {
 	int error;
 #ifdef MROUTING
-	extern int ip_mrtproto;
 	extern struct mrtstat mrtstat;
 #endif
 
@@ -1630,14 +1666,14 @@ ip_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	case IPCTL_ARPQUEUE:
 		return (sysctl_niq(name + 1, namelen - 1,
 		    oldp, oldlenp, newp, newlen, &arpinq));
+	case IPCTL_ARPQUEUED:
+		return (sysctl_rdint(oldp, oldlenp, newp, la_hold_total));
 	case IPCTL_STATS:
 		return (ip_sysctl_ipstat(oldp, oldlenp, newp));
 #ifdef MROUTING
 	case IPCTL_MRTSTATS:
 		return (sysctl_rdstruct(oldp, oldlenp, newp,
 		    &mrtstat, sizeof(mrtstat)));
-	case IPCTL_MRTPROTO:
-		return (sysctl_rdint(oldp, oldlenp, newp, ip_mrtproto));
 	case IPCTL_MRTMFC:
 		if (newp)
 			return (EPERM);
@@ -1772,11 +1808,13 @@ ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
 }
 
 void
-ip_send_dispatch(void *xmq)
+ip_send_do_dispatch(void *xmq, int flags)
 {
 	struct mbuf_queue *mq = xmq;
 	struct mbuf *m;
 	struct mbuf_list ml;
+	struct m_tag *mtag;
+	u_int32_t ipsecflowinfo = 0;
 
 	mq_delist(mq, &ml);
 	if (ml_empty(&ml))
@@ -1784,9 +1822,26 @@ ip_send_dispatch(void *xmq)
 
 	NET_LOCK();
 	while ((m = ml_dequeue(&ml)) != NULL) {
-		ip_output(m, NULL, NULL, 0, NULL, NULL, 0);
+		if ((mtag = m_tag_find(m, PACKET_TAG_IPSEC_FLOWINFO, NULL))
+		    != NULL) {
+			ipsecflowinfo = *(u_int32_t *)(mtag + 1);
+			m_tag_delete(m, mtag);
+		}
+		ip_output(m, NULL, NULL, flags, NULL, NULL, ipsecflowinfo);
 	}
 	NET_UNLOCK();
+}
+
+void
+ip_sendraw_dispatch(void *xmq)
+{
+	ip_send_do_dispatch(xmq, IP_RAWOUTPUT);
+}
+
+void
+ip_send_dispatch(void *xmq)
+{
+	ip_send_do_dispatch(xmq, 0);
 }
 
 void
@@ -1794,4 +1849,11 @@ ip_send(struct mbuf *m)
 {
 	mq_enqueue(&ipsend_mq, m);
 	task_add(net_tq(0), &ipsend_task);
+}
+
+void
+ip_send_raw(struct mbuf *m)
+{
+	mq_enqueue(&ipsendraw_mq, m);
+	task_add(net_tq(0), &ipsendraw_task);
 }

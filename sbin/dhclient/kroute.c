@@ -1,4 +1,4 @@
-/*	$OpenBSD: kroute.c,v 1.189 2020/11/06 21:15:41 krw Exp $	*/
+/*	$OpenBSD: kroute.c,v 1.197 2021/03/28 17:25:21 krw Exp $	*/
 
 /*
  * Copyright 2012 Kenneth R Westerback <krw@openbsd.org>
@@ -17,6 +17,7 @@
  */
 
 #include <sys/ioctl.h>
+#include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -51,6 +52,8 @@
 #define ROUNDUP(a) \
 	((a) > 0 ? (1 + (((a) - 1) | (sizeof(long) - 1))) : sizeof(long))
 
+#define	CIDR_MAX_BITS	32
+
 int		 delete_addresses(char *, int, struct in_addr, struct in_addr);
 void		 set_address(char *, int, struct in_addr, struct in_addr);
 void		 delete_address(char *, int, struct in_addr);
@@ -61,6 +64,7 @@ unsigned int	 route_pos(struct rt_msghdr *, uint8_t *, unsigned int,
     struct in_addr);
 void		 flush_routes(int, int, int, uint8_t *, unsigned int,
     struct in_addr);
+void		 discard_route(uint8_t *, unsigned int);
 void		 add_route(char *, int, int, struct in_addr, struct in_addr,
 		    struct in_addr, struct in_addr, int);
 void		 set_routes(char *, int, int, int, struct in_addr,
@@ -324,12 +328,6 @@ route_pos(struct rt_msghdr *rtm, uint8_t *routes, unsigned int routes_len,
 	return routes_len;
 }
 
-/*
- * flush_routes() does the equivalent of
- *
- *	route -q -T $rdomain -n flush -inet -iface $interface
- *	arp -dan
- */
 void
 flush_routes(int index, int routefd, int rdomain, uint8_t *routes,
     unsigned int routes_len, struct in_addr address)
@@ -359,10 +357,11 @@ flush_routes(int index, int routefd, int rdomain, uint8_t *routes,
 		if ((rtm->rtm_flags & (RTF_LOCAL|RTF_BROADCAST)) != 0)
 			continue;
 
-		/* Don't bother deleting a route we're going to add. */
 		pos = route_pos(rtm, routes, routes_len, address);
-		if (pos < routes_len)
+		if (pos < routes_len) {
+			discard_route(routes + pos, routes_len - pos);
 			continue;
+		}
 
 		rtm->rtm_type = RTM_DELETE;
 		rtm->rtm_seq = seqno++;
@@ -377,6 +376,16 @@ flush_routes(int index, int routefd, int rdomain, uint8_t *routes,
 	}
 
 	free(buf);
+}
+
+void
+discard_route(uint8_t *routes, unsigned int routes_len)
+{
+	unsigned int		len;
+
+	len = 1 + sizeof(struct in_addr) + (routes[0] + 7) / 8;
+	memmove(routes, routes + len, routes_len - len);
+	routes[routes_len - len] = CIDR_MAX_BITS + 1;
 }
 
 /*
@@ -543,7 +552,7 @@ int
 default_route_index(int rdomain, int routefd)
 {
 	struct pollfd		 fds[1];
-	time_t			 start_time, cur_time;
+	struct timespec		 now, stop, timeout;
 	int			 nfds;
 	struct iovec		 iov[3];
 	struct sockaddr_in	 sin;
@@ -576,8 +585,10 @@ default_route_index(int rdomain, int routefd)
 	iov[2].iov_len = sizeof(sin);
 
 	pid = getpid();
-	if (time(&start_time) == -1)
-		fatal("start time");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	timespecclear(&timeout);
+	timeout.tv_sec = 3;
+	timespecadd(&now, &timeout, &stop);
 
 	if (writev(routefd, iov, 3) == -1) {
 		if (errno == ESRCH)
@@ -588,16 +599,19 @@ default_route_index(int rdomain, int routefd)
 		return 0;
 	}
 
-	do {
-		if (time(&cur_time) == -1)
-			fatal("current time");
+	for (;;) {
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (timespeccmp(&stop, &now, <=))
+			break;
+		timespecsub(&stop, &now, &timeout);
+
 		fds[0].fd = routefd;
 		fds[0].events = POLLIN;
-		nfds = poll(fds, 1, 3);
+		nfds = ppoll(fds, 1, &timeout, NULL);
 		if (nfds == -1) {
 			if (errno == EINTR)
 				continue;
-			log_warn("%s: poll(routefd)", log_procname);
+			log_warn("%s: ppoll(routefd)", log_procname);
 			break;
 		}
 		if ((fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
@@ -619,7 +633,8 @@ default_route_index(int rdomain, int routefd)
 		if (m_rtmsg.m_rtm.rtm_version == RTM_VERSION &&
 		    m_rtmsg.m_rtm.rtm_type == RTM_GET &&
 		    m_rtmsg.m_rtm.rtm_pid == pid &&
-		    m_rtmsg.m_rtm.rtm_seq == seq) {
+		    m_rtmsg.m_rtm.rtm_seq == seq &&
+		    (m_rtmsg.m_rtm.rtm_flags & RTF_UP) == RTF_UP) {
 			if (m_rtmsg.m_rtm.rtm_errno != 0) {
 				log_warnx("%s: read(RTM_GET): %s", log_procname,
 				    strerror(m_rtmsg.m_rtm.rtm_errno));
@@ -627,7 +642,7 @@ default_route_index(int rdomain, int routefd)
 			}
 			return m_rtmsg.m_rtm.rtm_index;
 		}
-	} while ((cur_time - start_time) <= 3);
+	}
 
 	return 0;
 }
@@ -755,7 +770,7 @@ extract_route(uint8_t *routes, unsigned int routes_len, in_addr_t *dest,
 {
 	unsigned int	 bits, bytes, len;
 
-	if (routes[0] > 32)
+	if (routes[0] > CIDR_MAX_BITS)
 		return 0;
 
 	bits = routes[0];
@@ -771,7 +786,7 @@ extract_route(uint8_t *routes, unsigned int routes_len, in_addr_t *dest,
 		if (bits == 0)
 			*netmask = INADDR_ANY;
 		else
-			*netmask = htonl(0xffffffff << (32 - bits));
+			*netmask = htonl(0xffffffff << (CIDR_MAX_BITS - bits));
 		if (dest != NULL)
 			*dest &= *netmask;
 	}
@@ -801,6 +816,7 @@ void
 priv_write_resolv_conf(int index, int routefd, int rdomain, char *contents,
     int *lastidx)
 {
+	char		 ifname[IF_NAMESIZE];
 	const char	*path = "/etc/resolv.conf";
 	ssize_t		 n;
 	size_t		 sz;
@@ -815,19 +831,27 @@ priv_write_resolv_conf(int index, int routefd, int rdomain, char *contents,
 		retries++;
 	} while (newidx == 0 && retries < 3);
 
-	if (newidx != index) {
+	if (newidx == 0) {
+		log_debug("%s: %s not updated, no default route is UP",
+		    log_procname, path);
+		return;
+	} else if (newidx != index) {
 		*lastidx = newidx;
-		log_debug("%s priv_write_resolv_conf: not my problem "
-		    "(%d != %d)", log_procname, newidx, index);
+		if (if_indextoname(newidx, ifname) == NULL) {
+			memset(ifname, 0, sizeof(ifname));
+			strlcat(ifname, "<unknown>", sizeof(ifname));
+		}
+		log_debug("%s: %s not updated, default route on %s",
+		    log_procname, path, ifname);
 		return;
 	} else if (newidx == *lastidx) {
-		log_debug("%s priv_write_resolv_conf: already written",
-		    log_procname);
+		log_debug("%s: %s not updated, same as last write",
+		    log_procname, path);
 		return;
-	} else {
-		*lastidx = newidx;
-		log_debug("%s priv_write_resolv_conf: writing", log_procname);
 	}
+
+	*lastidx = newidx;
+	log_debug("%s: %s updated", log_procname, path);
 
 	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC,
 	    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -890,10 +914,10 @@ propose(struct proposal *proposal)
 
 void
 priv_propose(char *name, int ioctlfd, struct proposal *proposal,
-    size_t sz, char **resolv_conf, int routefd, int rdomain, int index)
+    size_t sz, char **resolv_conf, int routefd, int rdomain, int index,
+    int *lastidx)
 {
 	struct unwind_info	 unwind_info;
-	struct ifreq		 ifr;
 	uint8_t			*dns, *domains, *routes;
 	char			*search = NULL;
 	int			 rslt;
@@ -907,13 +931,6 @@ priv_propose(char *name, int ioctlfd, struct proposal *proposal,
 	routes = (uint8_t *)proposal + sizeof(struct proposal);
 	domains = routes + proposal->routes_len;
 	dns = domains + proposal->domains_len;
-
-	memset(&ifr, 0, sizeof(ifr));
-	strlcpy(ifr.ifr_name, name, sizeof(ifr.ifr_name));
-	if (ioctl(ioctlfd, SIOCGIFXFLAGS, (caddr_t)&ifr) < 0)
-		fatal("SIOGIFXFLAGS");
-	if ((ifr.ifr_flags & IFXF_AUTOCONF4) == 0)
-		return;
 
 	memset(&unwind_info, 0, sizeof(unwind_info));
 	if (proposal->ns_len >= sizeof(in_addr_t)) {
@@ -951,6 +968,9 @@ priv_propose(char *name, int ioctlfd, struct proposal *proposal,
 
 	set_routes(name, index, rdomain, routefd, proposal->address,
 	    proposal->netmask, routes, proposal->routes_len);
+
+	*lastidx = 0;
+	priv_write_resolv_conf(index, routefd, rdomain, *resolv_conf, lastidx);
 }
 
 /*
@@ -989,8 +1009,7 @@ tell_unwind(struct unwind_info *unwind_info, int ifi_flags)
 	struct	unwind_info	 	 noinfo;
 	int				 rslt;
 
-	if ((ifi_flags & IFI_AUTOCONF) == 0 ||
-	    (ifi_flags & IFI_IN_CHARGE) == 0)
+	if ((ifi_flags & IFI_IN_CHARGE) == 0)
 		return;
 
 	if (unwind_info != NULL)

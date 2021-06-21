@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.62 2020/01/03 05:32:00 pd Exp $	*/
+/*	$OpenBSD: main.c,v 1.65 2021/05/12 20:13:00 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Reyk Floeter <reyk@openbsd.org>
@@ -303,7 +303,6 @@ vmmaction(struct parse_result *res)
 				else
 					ret = 0;
 				if (ret != 0) {
-					memcpy(&ret, imsg.data, sizeof(ret));
 					errno = ret;
 					err(1, "command failed");
 				} else
@@ -570,13 +569,9 @@ ctl_create(struct parse_result *res, int argc, char *argv[])
 		switch (ch) {
 		case 'b':
 			base = optarg;
-			if (unveil(base, "r") == -1)
-				err(1, "unveil");
 			break;
 		case 'i':
 			input = optarg;
-			if (unveil(input, "r") == -1)
-				err(1, "unveil");
 			break;
 		case 's':
 			if (parse_size(res, optarg) != 0)
@@ -595,19 +590,14 @@ ctl_create(struct parse_result *res, int argc, char *argv[])
 
 	type = parse_disktype(argv[0], &disk);
 
-	if (pledge("stdio rpath wpath cpath unveil", NULL) == -1)
+	if (pledge("stdio rpath wpath cpath", NULL) == -1)
 		err(1, "pledge");
-	if (unveil(disk, "rwc") == -1)
-		err(1, "unveil");
 
 	if (input) {
 		if (base && input)
 			errx(1, "conflicting -b and -i arguments");
 		return ctl_convert(input, disk, type, res->size);
 	}
-
-	if (unveil(NULL, NULL))
-		err(1, "unveil");
 
 	if (base && type != VMDF_QCOW2)
 		errx(1, "base images require qcow2 disk format");
@@ -655,10 +645,6 @@ ctl_convert(const char *srcfile, const char *dstfile, int dsttype, size_t dstsiz
 		errstr = "failed to open source image file";
 		goto done;
 	}
-
-	/* We can only lock unveil after opening the disk and all base images */
-	if (unveil(NULL, NULL))
-		err(1, "unveil");
 
 	if (dstsize == 0)
 		dstsize = src.size;
@@ -927,7 +913,7 @@ ctl_start(struct parse_result *res, int argc, char *argv[])
 int
 ctl_stop(struct parse_result *res, int argc, char *argv[])
 {
-	int		 ch, ret;
+	int		 ch;
 
 	while ((ch = getopt(argc, argv, "afw")) != -1) {
 		switch (ch) {
@@ -948,20 +934,15 @@ ctl_stop(struct parse_result *res, int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (argc == 0) {
-		if (res->action != CMD_STOPALL)
+	if (res->action == CMD_STOPALL) {
+		if (argc != 0)
 			ctl_usage(res->ctl);
-	} else if (argc > 1)
-		ctl_usage(res->ctl);
-	else if (argc == 1)
-		ret = parse_vmid(res, argv[0], 0);
-	else
-		ret = -1;
-
-	/* VM id is only expected without the -a flag */
-	if ((res->action != CMD_STOPALL && ret == -1) ||
-	    (res->action == CMD_STOPALL && ret != -1))
-		errx(1, "invalid id: %s", argv[1]);
+	} else {
+		if (argc != 1)
+			ctl_usage(res->ctl);
+		if (parse_vmid(res, argv[0], 0) == -1)
+			errx(1, "invalid id: %s", argv[0]);
+	}
 
 	return (vmmaction(res));
 }

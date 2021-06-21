@@ -1,4 +1,4 @@
-/*	$OpenBSD: slaacd.c,v 1.52 2020/09/14 09:40:28 florian Exp $	*/
+/*	$OpenBSD: slaacd.c,v 1.60 2021/05/01 11:53:24 florian Exp $	*/
 
 /*
  * Copyright (c) 2017 Florian Obser <florian@openbsd.org>
@@ -54,12 +54,18 @@
 #include "engine.h"
 #include "control.h"
 
+enum slaacd_process {
+	PROC_MAIN,
+	PROC_ENGINE,
+	PROC_FRONTEND
+};
+
 __dead void	usage(void);
 __dead void	main_shutdown(void);
 
 void	main_sig_handler(int, short, void *);
 
-static pid_t	start_child(int, char *, int, int, int);
+static pid_t	start_child(enum slaacd_process, char *, int, int, int);
 
 void	main_dispatch_frontend(int, short, void *);
 void	main_dispatch_engine(int, short, void *);
@@ -78,13 +84,13 @@ static int	main_imsg_send_ipc_sockets(struct imsgbuf *, struct imsgbuf *);
 int		main_imsg_compose_frontend(int, int, void *, uint16_t);
 int		main_imsg_compose_engine(int, pid_t, void *, uint16_t);
 
-struct imsgev		*iev_frontend;
-struct imsgev		*iev_engine;
+static struct imsgev	*iev_frontend;
+static struct imsgev	*iev_engine;
 
-pid_t	 frontend_pid;
-pid_t	 engine_pid;
+pid_t			 frontend_pid;
+pid_t			 engine_pid;
 
-int	 routesock, ioctl_sock, rtm_seq = 0;
+int			 routesock, ioctl_sock, rtm_seq = 0;
 
 void
 main_sig_handler(int sig, short event, void *arg)
@@ -125,7 +131,7 @@ main(int argc, char *argv[])
 	int			 pipe_main2engine[2];
 	int			 frontend_routesock, rtfilter;
 	int			 rtable_any = RTABLE_ANY;
-	char			*csock = SLAACD_SOCKET;
+	char			*csock = _PATH_SLAACD_SOCKET;
 #ifndef SMALL
 	struct imsg_propose_rdns rdns;
 	int			 control_fd;
@@ -197,9 +203,7 @@ main(int argc, char *argv[])
 	frontend_pid = start_child(PROC_FRONTEND, saved_argv0,
 	    pipe_main2frontend[1], debug, verbose);
 
-	slaacd_process = PROC_MAIN;
-
-	log_procinit(log_procnames[slaacd_process]);
+	log_procinit("main");
 
 	if ((routesock = socket(AF_ROUTE, SOCK_RAW | SOCK_CLOEXEC |
 	    SOCK_NONBLOCK, AF_INET6)) == -1)
@@ -259,7 +263,7 @@ main(int argc, char *argv[])
 
 #ifndef SMALL
 	if ((control_fd = control_init(csock)) == -1)
-		fatalx("control socket setup failed");
+		warnx("control socket setup failed");
 #endif /* SMALL */
 
 	if (pledge("stdio inet sendfd wroute", NULL) == -1)
@@ -268,7 +272,8 @@ main(int argc, char *argv[])
 	main_imsg_compose_frontend(IMSG_ROUTESOCK, frontend_routesock, NULL, 0);
 
 #ifndef SMALL
-	main_imsg_compose_frontend(IMSG_CONTROLFD, control_fd, NULL, 0);
+	if (control_fd != -1)
+		main_imsg_compose_frontend(IMSG_CONTROLFD, control_fd, NULL, 0);
 #endif /* SMALL */
 
 	main_imsg_compose_frontend(IMSG_STARTUP, -1, NULL, 0);
@@ -319,7 +324,7 @@ main_shutdown(void)
 }
 
 static pid_t
-start_child(int p, char *argv0, int fd, int debug, int verbose)
+start_child(enum slaacd_process p, char *argv0, int fd, int debug, int verbose)
 {
 	char	*argv[7];
 	int	 argc = 0;
@@ -376,7 +381,6 @@ main_dispatch_frontend(int fd, short event, void *bula)
 	int			 rdomain;
 #ifndef	SMALL
 	struct imsg_addrinfo	 imsg_addrinfo;
-	struct imsg_link_state	 imsg_link_state;
 	int			 verbose;
 #endif	/* SMALL */
 
@@ -426,16 +430,6 @@ main_dispatch_frontend(int fd, short event, void *bula)
 			    sizeof(imsg_addrinfo));
 			main_imsg_compose_engine(IMSG_UPDATE_ADDRESS, 0,
 			    &imsg_addrinfo, sizeof(imsg_addrinfo));
-			break;
-		case IMSG_UPDATE_LINK_STATE:
-			if (IMSG_DATA_SIZE(imsg) != sizeof(imsg_link_state))
-				fatalx("%s: IMSG_UPDATE_LINK_STATE wrong "
-				    "length: %lu", __func__,
-				    IMSG_DATA_SIZE(imsg));
-			memcpy(&imsg_link_state, imsg.data,
-			    sizeof(imsg_link_state));
-			main_imsg_compose_engine(IMSG_UPDATE_LINK_STATE, 0,
-			    &imsg_link_state, sizeof(imsg_link_state));
 			break;
 #endif	/* SMALL */
 		case IMSG_UPDATE_IF:
@@ -664,7 +658,7 @@ configure_interface(struct imsg_configure_address *address)
 
 	in6_addreq.ifra_flags |= IN6_IFF_AUTOCONF;
 
-	if (address->privacy)
+	if (address->temporary)
 		in6_addreq.ifra_flags |= IN6_IFF_TEMPORARY;
 
 	log_debug("%s: %s", __func__, if_name);
@@ -675,7 +669,7 @@ configure_interface(struct imsg_configure_address *address)
 	if (address->mtu) {
 		struct ifreq	 ifr;
 
-		(void)strlcpy(ifr.ifr_name, in6_addreq.ifra_name,
+		strlcpy(ifr.ifr_name, in6_addreq.ifra_name,
 		    sizeof(ifr.ifr_name));
 		ifr.ifr_mtu = address->mtu;
 		log_debug("Setting MTU to %d", ifr.ifr_mtu);
@@ -754,9 +748,11 @@ configure_gateway(struct imsg_configure_dfr *dfr, uint8_t rtm_type)
 	}
 
 	memcpy(&gw, &dfr->addr, sizeof(gw));
+#ifdef __KAME__
 	/* from route(8) getaddr()*/
 	*(u_int16_t *)& gw.sin6_addr.s6_addr[2] = htons(gw.sin6_scope_id);
 	gw.sin6_scope_id = 0;
+#endif
 	iov[iovcnt].iov_base = &gw;
 	iov[iovcnt++].iov_len = sizeof(gw);
 	rtm.rtm_msglen += sizeof(gw);

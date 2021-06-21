@@ -141,7 +141,14 @@ struct {
 };
 
 struct timecounter hv_timecounter = {
-	hv_gettime, 0, 0xffffffff, 10000000, "hyperv", 9001, NULL, 0
+	.tc_get_timecount = hv_gettime,
+	.tc_poll_pps = 0,
+	.tc_counter_mask = 0xffffffff,
+	.tc_frequency = 10000000,
+	.tc_name = "hyperv",
+	.tc_quality = 9001,
+	.tc_priv = NULL,
+	.tc_user = 0,
 };
 
 struct cfdriver hyperv_cd = {
@@ -558,8 +565,10 @@ hv_start(struct hv_softc *sc, struct hv_msg *msg)
 			s = splnet();
 			hv_intr();
 			splx(s);
-		} else
-			tsleep(wchan, PRIBIO, wchan, 1);
+		} else {
+			tsleep_nsec(wchan, PRIBIO, wchan,
+			    USEC_TO_NSEC(delays[i]));
+		}
 	}
 	if (status != 0) {
 		printf("%s: posting vmbus message failed with %d\n",
@@ -620,8 +629,10 @@ hv_wait(struct hv_softc *sc, int (*cond)(struct hv_softc *, struct hv_msg *),
 			s = splnet();
 			hv_intr();
 			splx(s);
-		} else
-			tsleep(wchan, PRIBIO, wmsg ? wmsg : "hvwait", 1);
+		} else {
+			tsleep_nsec(wchan, PRIBIO, wmsg ? wmsg : "hvwait",
+			    USEC_TO_NSEC(1000));
+		}
 	}
 }
 

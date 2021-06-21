@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_socket2.c,v 1.104 2020/04/11 14:07:06 claudio Exp $	*/
+/*	$OpenBSD: uipc_socket2.c,v 1.111 2021/06/07 09:10:32 mpi Exp $	*/
 /*	$NetBSD: uipc_socket2.c,v 1.11 1996/02/04 02:17:55 christos Exp $	*/
 
 /*
@@ -52,6 +52,8 @@ u_long	sb_max = SB_MAX;		/* patchable */
 
 extern struct pool mclpools[];
 extern struct pool mbpool;
+
+extern struct rwlock unp_lock;
 
 /*
  * Procedures to manipulate state flags of socket
@@ -160,6 +162,7 @@ sonewconn(struct socket *head, int connstatus)
 	so = pool_get(&socket_pool, PR_NOWAIT|PR_ZERO);
 	if (so == NULL)
 		return (NULL);
+	rw_init(&so->so_lock, "solock");
 	so->so_type = head->so_type;
 	so->so_options = head->so_options &~ SO_ACCEPTCONN;
 	so->so_linger = head->so_linger;
@@ -282,10 +285,10 @@ solock(struct socket *so)
 		NET_LOCK();
 		break;
 	case PF_UNIX:
-	case PF_ROUTE:
-	case PF_KEY:
+		rw_enter_write(&unp_lock);
+		break;
 	default:
-		KERNEL_LOCK();
+		rw_enter_write(&so->so_lock);
 		break;
 	}
 
@@ -306,10 +309,10 @@ sounlock(struct socket *so, int s)
 		NET_UNLOCK();
 		break;
 	case PF_UNIX:
-	case PF_ROUTE:
-	case PF_KEY:
+		rw_exit_write(&unp_lock);
+		break;
 	default:
-		KERNEL_UNLOCK();
+		rw_exit_write(&so->so_lock);
 		break;
 	}
 }
@@ -323,10 +326,10 @@ soassertlocked(struct socket *so)
 		NET_ASSERT_LOCKED();
 		break;
 	case PF_UNIX:
-	case PF_ROUTE:
-	case PF_KEY:
+		rw_assert_wrlock(&unp_lock);
+		break;
 	default:
-		KERNEL_ASSERT_LOCKED();
+		rw_assert_wrlock(&so->so_lock);
 		break;
 	}
 }
@@ -335,12 +338,22 @@ int
 sosleep_nsec(struct socket *so, void *ident, int prio, const char *wmesg,
     uint64_t nsecs)
 {
-	if ((so->so_proto->pr_domain->dom_family != PF_UNIX) &&
-	    (so->so_proto->pr_domain->dom_family != PF_ROUTE) &&
-	    (so->so_proto->pr_domain->dom_family != PF_KEY)) {
-		return rwsleep_nsec(ident, &netlock, prio, wmesg, nsecs);
-	} else
-		return tsleep_nsec(ident, prio, wmesg, nsecs);
+	int ret;
+
+	switch (so->so_proto->pr_domain->dom_family) {
+	case PF_INET:
+	case PF_INET6:
+		ret = rwsleep_nsec(ident, &netlock, prio, wmesg, nsecs);
+		break;
+	case PF_UNIX:
+		ret = rwsleep_nsec(ident, &unp_lock, prio, wmesg, nsecs);
+		break;
+	default:
+		ret = rwsleep_nsec(ident, &so->so_lock, prio, wmesg, nsecs);
+		break;
+	}
+
+	return ret;
 }
 
 /*
@@ -396,7 +409,7 @@ sbunlock(struct socket *so, struct sockbuf *sb)
 /*
  * Wakeup processes waiting on a socket buffer.
  * Do asynchronous notification via SIGIO
- * if the socket has the SS_ASYNC flag set.
+ * if the socket buffer has the SB_ASYNC flag set.
  */
 void
 sowakeup(struct socket *so, struct sockbuf *sb)
@@ -408,7 +421,7 @@ sowakeup(struct socket *so, struct sockbuf *sb)
 		sb->sb_flags &= ~SB_WAIT;
 		wakeup(&sb->sb_cc);
 	}
-	if (so->so_state & SS_ASYNC)
+	if (sb->sb_flags & SB_ASYNC)
 		pgsigio(&so->so_sigio, SIGIO, 0);
 	selwakeup(&sb->sb_sel);
 }
@@ -953,7 +966,7 @@ sbdrop(struct socket *so, struct sockbuf *sb, int len)
 	KASSERT(sb == &so->so_rcv || sb == &so->so_snd);
 	soassertlocked(so);
 
-	next = (m = sb->sb_mb) ? m->m_nextpkt : 0;
+	next = (m = sb->sb_mb) ? m->m_nextpkt : NULL;
 	while (len > 0) {
 		if (m == NULL) {
 			if (next == NULL)

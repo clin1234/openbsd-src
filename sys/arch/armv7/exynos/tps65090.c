@@ -1,4 +1,4 @@
-/* $OpenBSD: tps65090.c,v 1.3 2017/03/06 06:50:47 kettenis Exp $ */
+/* $OpenBSD: tps65090.c,v 1.5 2021/05/16 03:39:28 jsg Exp $ */
 /*
  * Copyright (c) 2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -18,8 +18,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/device.h>
-#include <sys/sensors.h>
-#include <sys/malloc.h>
 
 #include <dev/i2c/i2cvar.h>
 
@@ -183,7 +181,7 @@ tps65090_fet_get(int fet)
 }
 
 int
-tps65090_get_charging()
+tps65090_get_charging(void)
 {
 	struct tps65090_softc *sc = tps65090_sc;
 	uint8_t val = tps65090_read_reg(sc, REG_CG_CTRL0);

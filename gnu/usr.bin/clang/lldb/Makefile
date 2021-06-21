@@ -1,8 +1,13 @@
-# $OpenBSD: Makefile,v 1.7 2020/08/03 14:45:31 patrick Exp $
+# $OpenBSD: Makefile,v 1.10 2021/04/28 12:55:42 patrick Exp $
 
 .include <bsd.own.mk>
 
+.if (${MACHINE} == "arm64") || (${MACHINE} == "amd64")
+PROG=	lldb
+.else
 NOPROG=	lldb
+.endif
+
 BINDIR=	/usr/bin
 LIBEXECDIR=/usr/libexec
 
@@ -22,10 +27,8 @@ CPPFLAGS+=	${CLANG_INCLUDES}
 LLVM_LIBDEPS=	clangAST \
 		clangAnalysis \
 		clangBasic \
-		clangBasicTargets \
 		clangCodeGen \
 		clangDriver \
-		clangDriverArch \
 		clangEdit \
 		clangFrontend \
 		clangLex \
@@ -58,7 +61,6 @@ LLVM_LIBDEPS=	clangAST \
 		lldbPluginMemoryHistory \
 		lldbPluginObjectContainer \
 		lldbPluginObjectFile \
-		lldbPluginOperatingSystem \
 		lldbPluginPlatform \
 		lldbPluginProcess \
 		lldbPluginScriptInterpreter \
@@ -66,6 +68,7 @@ LLVM_LIBDEPS=	clangAST \
 		lldbPluginSymbolFile \
 		lldbPluginSymbolVendor \
 		lldbPluginSystemRuntime \
+		lldbPluginTypeSystem \
 		lldbPluginUnwindAssembly \
 		lldbSymbol \
 		lldbTarget \

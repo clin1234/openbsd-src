@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_carp.c,v 1.349 2020/07/28 16:44:34 yasuoka Exp $	*/
+/*	$OpenBSD: ip_carp.c,v 1.354 2021/03/10 10:21:48 jsg Exp $	*/
 
 /*
  * Copyright (c) 2002 Michael Shalayeff. All rights reserved.
@@ -260,7 +260,7 @@ void	carp_update_lsmask(struct carp_softc *);
 int	carp_new_vhost(struct carp_softc *, int, int);
 void	carp_destroy_vhosts(struct carp_softc *);
 void	carp_del_all_timeouts(struct carp_softc *);
-int	carp_vhe_match(struct carp_softc *, uint8_t *);
+int	carp_vhe_match(struct carp_softc *, uint64_t);
 
 struct if_clone carp_cloner =
     IF_CLONE_INITIALIZER("carp", carp_clone_create, carp_clone_destroy);
@@ -786,10 +786,7 @@ carp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 void
 carpattach(int n)
 {
-	struct ifg_group	*ifg;
-
-	if ((ifg = if_creategroup("carp")) != NULL)
-		ifg->ifg_refcnt++;	/* keep around even if empty */
+	if_creategroup("carp");  /* keep around even if empty */
 	if_clone_attach(&carp_cloner);
 	carpcounters = counters_alloc(carps_ncounters);
 }
@@ -1348,6 +1345,7 @@ carp_ourether(struct ifnet *ifp, uint8_t *ena)
 	struct carp_softc *sc;
 	struct srp_ref sr;
 	int match = 0;
+	uint64_t dst = ether_addr_to_e64((struct ether_addr *)ena);
 
 	KASSERT(ifp->if_type == IFT_ETHER);
 
@@ -1355,7 +1353,7 @@ carp_ourether(struct ifnet *ifp, uint8_t *ena)
 		if ((sc->sc_if.if_flags & (IFF_UP|IFF_RUNNING)) !=
 		    (IFF_UP|IFF_RUNNING))
 			continue;
-		if (carp_vhe_match(sc, ena)) {
+		if (carp_vhe_match(sc, dst)) {
 			match = 1;
 			break;
 		}
@@ -1366,29 +1364,27 @@ carp_ourether(struct ifnet *ifp, uint8_t *ena)
 }
 
 int
-carp_vhe_match(struct carp_softc *sc, uint8_t *ena)
+carp_vhe_match(struct carp_softc *sc, uint64_t dst)
 {
 	struct carp_vhost_entry *vhe;
 	struct srp_ref sr;
-	int match = 0;
+	int active = 0;
 
 	vhe = SRPL_FIRST(&sr, &sc->carp_vhosts);
-	match = (vhe->state == MASTER || sc->sc_balancing >= CARP_BAL_IP) &&
-	    !memcmp(ena, sc->sc_ac.ac_enaddr, ETHER_ADDR_LEN);
+	active = (vhe->state == MASTER || sc->sc_balancing >= CARP_BAL_IP);
 	SRPL_LEAVE(&sr);
 
-	return (match);
+	return (active && (dst ==
+	    ether_addr_to_e64((struct ether_addr *)sc->sc_ac.ac_enaddr)));
 }
 
 struct mbuf *
-carp_input(struct ifnet *ifp0, struct mbuf *m)
+carp_input(struct ifnet *ifp0, struct mbuf *m, uint64_t dst)
 {
-	struct ether_header *eh;
 	struct srpl *cif;
 	struct carp_softc *sc;
 	struct srp_ref sr;
 
-	eh = mtod(m, struct ether_header *);
 	cif = &ifp0->if_carp;
 
 	SRPL_FOREACH(sc, &sr, cif, sc_list) {
@@ -1396,7 +1392,7 @@ carp_input(struct ifnet *ifp0, struct mbuf *m)
 		    (IFF_UP|IFF_RUNNING))
 			continue;
 
-		if (carp_vhe_match(sc, eh->ether_dhost)) {
+		if (carp_vhe_match(sc, dst)) {
 			/*
 			 * These packets look like layer 2 multicast but they
 			 * are unicast at layer 3. With help of the tag the
@@ -1420,7 +1416,7 @@ carp_input(struct ifnet *ifp0, struct mbuf *m)
 	if (sc == NULL) {
 		SRPL_LEAVE(&sr);
 
-		if (!ETHER_IS_MULTICAST(eh->ether_dhost))
+		if (!ETH64_IS_MULTICAST(dst))
 			return (m);
 
 		/*
@@ -2021,16 +2017,19 @@ carp_ioctl(struct ifnet *ifp, u_long cmd, caddr_t addr)
 			break;
 		error = 1;
 		if (carpr.carpr_carpdev[0] != '\0' &&
-		    (ifp0 = ifunit(carpr.carpr_carpdev)) == NULL)
+		    (ifp0 = if_unit(carpr.carpr_carpdev)) == NULL)
 			return (EINVAL);
 		if (carpr.carpr_peer.s_addr == 0)
 			sc->sc_peer.s_addr = INADDR_CARP_GROUP;
 		else
 			sc->sc_peer.s_addr = carpr.carpr_peer.s_addr;
 		if (ifp0 != NULL && ifp0->if_index != sc->sc_carpdevidx) {
-			if ((error = carp_set_ifp(sc, ifp0)))
+			if ((error = carp_set_ifp(sc, ifp0))) {
+				if_put(ifp0);
 				return (error);
+			}
 		}
+		if_put(ifp0);
 		if (vhe->state != INIT && carpr.carpr_state != vhe->state) {
 			switch (carpr.carpr_state) {
 			case BACKUP:
@@ -2282,10 +2281,8 @@ carp_transmit(struct carp_softc *sc, struct ifnet *ifp0, struct mbuf *m)
 #if NBPFILTER > 0
 	{
 		caddr_t if_bpf = ifp->if_bpf;
-		if (if_bpf) {
-			if (bpf_mtap_ether(if_bpf, m, BPF_DIRECTION_OUT))
-				m_freem(m);
-		}
+		if (if_bpf)
+			bpf_mtap_ether(if_bpf, m, BPF_DIRECTION_OUT);
 	}
 #endif /* NBPFILTER > 0 */
 
@@ -2297,7 +2294,7 @@ carp_transmit(struct carp_softc *sc, struct ifnet *ifp0, struct mbuf *m)
 
 	/*
 	 * Do not leak the multicast address when sending
-	 * advertisements in 'ip' and 'ip-stealth' balacing
+	 * advertisements in 'ip' and 'ip-stealth' balancing
 	 * modes.
 	 */
 	if (sc->sc_balancing == CARP_BAL_IP ||

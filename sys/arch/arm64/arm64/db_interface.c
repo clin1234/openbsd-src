@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_interface.c,v 1.8 2019/11/07 14:44:52 mpi Exp $	*/
+/*	$OpenBSD: db_interface.c,v 1.10 2021/05/30 15:05:32 visa Exp $	*/
 /*	$NetBSD: db_interface.c,v 1.34 2003/10/26 23:11:15 chris Exp $	*/
 
 /*
@@ -39,6 +39,7 @@
 #include <sys/reboot.h>
 #include <sys/systm.h>	/* just for boothowto */
 #include <sys/exec.h>
+#include <sys/mutex.h>
 
 #include <uvm/uvm_extern.h>
 
@@ -512,6 +513,6 @@ db_machine_init(void)
 vaddr_t
 db_branch_taken(u_int insn, vaddr_t pc, db_regs_t *db_regs)
 {
-	// implment
+	/* implement */
 	return pc + 4;
 }

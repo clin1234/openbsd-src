@@ -1,4 +1,4 @@
-/*	$OpenBSD: vm_machdep.c,v 1.6 2020/03/19 16:35:39 visa Exp $	*/
+/*	$OpenBSD: vm_machdep.c,v 1.8 2021/05/16 06:20:29 jsg Exp $	*/
 /*	$NetBSD: vm_machdep.c,v 1.1 2003/04/26 18:39:33 fvdl Exp $	*/
 
 /*-
@@ -78,8 +78,6 @@ cpu_fork(struct proc *p1, struct proc *p2, void *stack, void *tcb,
 	/* Copy the pcb. */
 	*pcb = p1->p_addr->u_pcb;
 	pcb->pcb_fpcpu = NULL;
-
-	pmap_activate(p2);
 
 	tf = (struct trapframe *)((u_long)p2->p_addr
 	    + USPACE
@@ -182,5 +180,5 @@ vunmapbuf(struct buf *bp, vsize_t len)
 	pmap_update(pmap_kernel());
 	km_free((void *)addr, len, &kv_physwait, &kp_none);
 	bp->b_data = bp->b_saveaddr;
-	bp->b_saveaddr = 0;
+	bp->b_saveaddr = NULL;
 }

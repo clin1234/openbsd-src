@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_pipe.c,v 1.123 2020/06/29 18:23:18 anton Exp $	*/
+/*	$OpenBSD: sys_pipe.c,v 1.126 2020/12/30 17:02:32 visa Exp $	*/
 
 /*
  * Copyright (c) 1996 John S. Dyson
@@ -126,6 +126,7 @@ void	pipe_iounlock(struct pipe *);
 int	pipe_iosleep(struct pipe *, const char *);
 
 struct pipe_pair *pipe_pair_create(void);
+void	pipe_pair_destroy(struct pipe_pair *);
 
 /*
  * The pipe system call for the DTYPE_PIPE type of pipes
@@ -853,7 +854,7 @@ pipe_destroy(struct pipe *cpipe)
 	rw_exit_write(cpipe->pipe_lock);
 
 	if (ppipe == NULL)
-		pool_put(&pipe_pair_pool, cpipe->pipe_pair);
+		pipe_pair_destroy(cpipe->pipe_pair);
 }
 
 /*
@@ -886,7 +887,8 @@ pipe_kqfilter(struct file *fp, struct knote *kn)
 	switch (kn->kn_filter) {
 	case EVFILT_READ:
 		kn->kn_fop = &pipe_rfiltops;
-		klist_insert(&rpipe->pipe_sel.si_note, kn);
+		kn->kn_hook = rpipe;
+		klist_insert_locked(&rpipe->pipe_sel.si_note, kn);
 		break;
 	case EVFILT_WRITE:
 		if (wpipe == NULL) {
@@ -895,7 +897,8 @@ pipe_kqfilter(struct file *fp, struct knote *kn)
 			break;
 		}
 		kn->kn_fop = &pipe_wfiltops;
-		klist_insert(&wpipe->pipe_sel.si_note, kn);
+		kn->kn_hook = wpipe;
+		klist_insert_locked(&wpipe->pipe_sel.si_note, kn);
 		break;
 	default:
 		error = EINVAL;
@@ -909,24 +912,9 @@ pipe_kqfilter(struct file *fp, struct knote *kn)
 void
 filt_pipedetach(struct knote *kn)
 {
-	struct pipe *rpipe = kn->kn_fp->f_data, *wpipe;
-	struct rwlock *lock = rpipe->pipe_lock;
+	struct pipe *cpipe = kn->kn_hook;
 
-	rw_enter_write(lock);
-	wpipe = pipe_peer(rpipe);
-
-	switch (kn->kn_filter) {
-	case EVFILT_READ:
-		klist_remove(&rpipe->pipe_sel.si_note, kn);
-		break;
-	case EVFILT_WRITE:
-		if (wpipe == NULL)
-			break;
-		klist_remove(&wpipe->pipe_sel.si_note, kn);
-		break;
-	}
-
-	rw_exit_write(lock);
+	klist_remove(&cpipe->pipe_sel.si_note, kn);
 }
 
 int
@@ -1008,6 +996,9 @@ pipe_pair_create(void)
 	pp->pp_wpipe.pipe_lock = &pp->pp_lock;
 	pp->pp_rpipe.pipe_lock = &pp->pp_lock;
 
+	klist_init_rwlock(&pp->pp_wpipe.pipe_sel.si_note, &pp->pp_lock);
+	klist_init_rwlock(&pp->pp_rpipe.pipe_sel.si_note, &pp->pp_lock);
+
 	if (pipe_create(&pp->pp_wpipe) || pipe_create(&pp->pp_rpipe))
 		goto err;
 	return (pp);
@@ -1015,4 +1006,12 @@ err:
 	pipe_destroy(&pp->pp_wpipe);
 	pipe_destroy(&pp->pp_rpipe);
 	return (NULL);
+}
+
+void
+pipe_pair_destroy(struct pipe_pair *pp)
+{
+	klist_free(&pp->pp_wpipe.pipe_sel.si_note);
+	klist_free(&pp->pp_rpipe.pipe_sel.si_note);
+	pool_put(&pipe_pair_pool, pp);
 }

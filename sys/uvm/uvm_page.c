@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_page.c,v 1.150 2020/09/22 14:31:08 mpi Exp $	*/
+/*	$OpenBSD: uvm_page.c,v 1.157 2021/04/21 10:02:05 mpi Exp $	*/
 /*	$NetBSD: uvm_page.c,v 1.44 2000/11/27 08:40:04 chs Exp $	*/
 
 /*
@@ -84,7 +84,7 @@ RBT_GENERATE(uvm_objtree, vm_page, objt, uvm_pagecmp);
 int
 uvm_pagecmp(const struct vm_page *a, const struct vm_page *b)
 {
-	return (a->offset < b->offset ? -1 : a->offset > b->offset);
+	return a->offset < b->offset ? -1 : a->offset > b->offset;
 }
 
 /*
@@ -180,7 +180,7 @@ uvm_page_init(vaddr_t *kvm_startp, vaddr_t *kvm_endp)
 	TAILQ_INIT(&uvm.page_active);
 	TAILQ_INIT(&uvm.page_inactive_swp);
 	TAILQ_INIT(&uvm.page_inactive_obj);
-	mtx_init(&uvm.pageqlock, IPL_NONE);
+	mtx_init(&uvm.pageqlock, IPL_VM);
 	mtx_init(&uvm.fpageqlock, IPL_VM);
 	uvm_pmr_init();
 
@@ -277,7 +277,7 @@ uvm_page_init(vaddr_t *kvm_startp, vaddr_t *kvm_endp)
 	 * XXXCDC - values may need adjusting
 	 */
 	uvmexp.reserve_pagedaemon = 4;
-	uvmexp.reserve_kernel = 6;
+	uvmexp.reserve_kernel = 8;
 	uvmexp.anonminpct = 10;
 	uvmexp.vnodeminpct = 10;
 	uvmexp.vtextminpct = 5;
@@ -324,7 +324,7 @@ uvm_pageboot_alloc(vsize_t size)
 	addr = pmap_steal_memory(size, &virtual_space_start,
 	    &virtual_space_end);
 
-	return(addr);
+	return addr;
 
 #else /* !PMAP_STEAL_MEMORY */
 
@@ -380,7 +380,7 @@ uvm_pageboot_alloc(vsize_t size)
 		pmap_kenter_pa(vaddr, paddr, PROT_READ | PROT_WRITE);
 	}
 	pmap_update(pmap_kernel());
-	return(addr);
+	return addr;
 #endif	/* PMAP_STEAL_MEMORY */
 }
 
@@ -428,7 +428,7 @@ uvm_page_physget(paddr_t *paddrp)
 					/* structure copy */
 					seg[0] = seg[1];
 			}
-			return (TRUE);
+			return TRUE;
 		}
 
 		/* try from rear */
@@ -446,7 +446,7 @@ uvm_page_physget(paddr_t *paddrp)
 					/* structure copy */
 					seg[0] = seg[1];
 			}
-			return (TRUE);
+			return TRUE;
 		}
 	}
 
@@ -478,10 +478,10 @@ uvm_page_physget(paddr_t *paddrp)
 				/* structure copy */
 				seg[0] = seg[1];
 		}
-		return (TRUE);
+		return TRUE;
 	}
 
-	return (FALSE);        /* whoops! */
+	return FALSE;        /* whoops! */
 }
 
 #endif /* PMAP_STEAL_MEMORY */
@@ -542,8 +542,8 @@ uvm_page_physload(paddr_t start, paddr_t end, paddr_t avail_start,
 
  		npages = end - start;  /* # of pages */
 
-		pgs = (struct vm_page *)uvm_km_zalloc(kernel_map,
-		    npages * sizeof(*pgs));
+		pgs = km_alloc(npages * sizeof(*pgs), &kv_any, &kp_zero,
+		    &kd_waitok);
 		if (pgs == NULL) {
 			printf("uvm_page_physload: can not malloc vm_page "
 			    "structs for segment\n");
@@ -729,36 +729,15 @@ uvm_pglistalloc(psize_t size, paddr_t low, paddr_t high, paddr_t alignment,
 	KASSERT(!(flags & UVM_PLA_WAITOK) ^ !(flags & UVM_PLA_NOWAIT));
 
 	if (size == 0)
-		return (EINVAL);
+		return EINVAL;
 	size = atop(round_page(size));
-
-	/*
-	 * check to see if we need to generate some free pages waking
-	 * the pagedaemon.
-	 */
-	if ((uvmexp.free - BUFPAGES_DEFICIT) < uvmexp.freemin ||
-	    ((uvmexp.free - BUFPAGES_DEFICIT) < uvmexp.freetarg &&
-	    (uvmexp.inactive + BUFPAGES_INACT) < uvmexp.inactarg))
-		wakeup(&uvm.pagedaemon);
 
 	/*
 	 * XXX uvm_pglistalloc is currently only used for kernel
 	 * objects. Unlike the checks in uvm_pagealloc, below, here
-	 * we are always allowed to use the kernel reserve. However, we
-	 * have to enforce the pagedaemon reserve here or allocations
-	 * via this path could consume everything and we can't
-	 * recover in the page daemon.
+	 * we are always allowed to use the kernel reserve.
 	 */
- again:
-	if ((uvmexp.free <= uvmexp.reserve_pagedaemon + size &&
-	    !((curproc == uvm.pagedaemon_proc) ||
-		(curproc == syncerproc)))) {
-		if (flags & UVM_PLA_WAITOK) {
-			uvm_wait("uvm_pglistalloc");
-			goto again;
-		}
-		return (ENOMEM);
-	}
+	flags |= UVM_PLA_USERESERVE;
 
 	if ((high & PAGE_MASK) != PAGE_MASK) {
 		printf("uvm_pglistalloc: Upper boundary 0x%lx "
@@ -871,7 +850,7 @@ uvm_pagerealloc_multi(struct uvm_object *obj, voff_t off, vsize_t size,
 }
 
 /*
- * uvm_pagealloc_strat: allocate vm_page from a particular free list.
+ * uvm_pagealloc: allocate vm_page from a particular free list.
  *
  * => return null if no pages free
  * => wake up pagedaemon if number of free pages drops below low water mark
@@ -886,37 +865,21 @@ uvm_pagealloc(struct uvm_object *obj, voff_t off, struct vm_anon *anon,
 	struct vm_page *pg;
 	struct pglist pgl;
 	int pmr_flags;
-	boolean_t use_reserve;
 
 	KASSERT(obj == NULL || anon == NULL);
+	KASSERT(anon == NULL || off == 0);
 	KASSERT(off == trunc_page(off));
 
-	/*
-	 * check to see if we need to generate some free pages waking
-	 * the pagedaemon.
-	 */
-	if ((uvmexp.free - BUFPAGES_DEFICIT) < uvmexp.freemin ||
-	    ((uvmexp.free - BUFPAGES_DEFICIT) < uvmexp.freetarg &&
-	    (uvmexp.inactive + BUFPAGES_INACT) < uvmexp.inactarg))
-		wakeup(&uvm.pagedaemon);
-
-	/*
-	 * fail if any of these conditions is true:
-	 * [1]  there really are no free pages, or
-	 * [2]  only kernel "reserved" pages remain and
-	 *        the page isn't being allocated to a kernel object.
-	 * [3]  only pagedaemon "reserved" pages remain and
-	 *        the requestor isn't the pagedaemon.
-	 */
-	use_reserve = (flags & UVM_PGA_USERESERVE) ||
-		(obj && UVM_OBJ_IS_KERN_OBJECT(obj));
-	if ((uvmexp.free <= uvmexp.reserve_kernel && !use_reserve) ||
-	    (uvmexp.free <= uvmexp.reserve_pagedaemon &&
-	     !((curproc == uvm.pagedaemon_proc) ||
-	      (curproc == syncerproc))))
-		goto fail;
-
 	pmr_flags = UVM_PLA_NOWAIT;
+
+	/*
+	 * We're allowed to use the kernel reserve if the page is
+	 * being allocated to a kernel object.
+	 */
+	if ((flags & UVM_PGA_USERESERVE) ||
+	    (obj != NULL && UVM_OBJ_IS_KERN_OBJECT(obj)))
+	    	pmr_flags |= UVM_PLA_USERESERVE;
+
 	if (flags & UVM_PGA_ZERO)
 		pmr_flags |= UVM_PLA_ZERO;
 	TAILQ_INIT(&pgl);
@@ -933,10 +896,10 @@ uvm_pagealloc(struct uvm_object *obj, voff_t off, struct vm_anon *anon,
 	else
 		atomic_setbits_int(&pg->pg_flags, PG_CLEAN);
 
-	return(pg);
+	return pg;
 
 fail:
-	return (NULL);
+	return NULL;
 }
 
 /*
@@ -965,13 +928,18 @@ uvm_pagerealloc(struct vm_page *pg, struct uvm_object *newobj, voff_t newoff)
  * uvm_pageclean: clean page
  *
  * => erase page's identity (i.e. remove from object)
- * => caller must lock page queues
+ * => caller must lock page queues if `pg' is managed
  * => assumes all valid mappings of pg are gone
  */
 void
 uvm_pageclean(struct vm_page *pg)
 {
 	u_int flags_to_clear = 0;
+
+#if all_pmap_are_fixed
+	if (pg->pg_flags & (PG_TABLED|PQ_ACTIVE|PQ_INACTIVE))
+		MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+#endif
 
 #ifdef DEBUG
 	if (pg->uobject == (void *)0xdeadbeef &&
@@ -1031,12 +999,17 @@ uvm_pageclean(struct vm_page *pg)
  *
  * => erase page's identity (i.e. remove from object)
  * => put page on free list
- * => caller must lock page queues
+ * => caller must lock page queues if `pg' is managed
  * => assumes all valid mappings of pg are gone
  */
 void
 uvm_pagefree(struct vm_page *pg)
 {
+#if all_pmap_are_fixed
+	if (pg->pg_flags & (PG_TABLED|PQ_ACTIVE|PQ_INACTIVE))
+		MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+#endif
+
 	uvm_pageclean(pg);
 	uvm_pmr_freepages(pg, 1);
 }
@@ -1077,7 +1050,8 @@ uvm_page_unbusy(struct vm_page **pgs, int npgs)
 			} else {
 				atomic_clearbits_int(&pg->pg_flags, PG_BUSY);
 				UVM_PAGE_OWN(pg, NULL);
-				uvm_anfree(pg->uanon);
+				rw_enter(pg->uanon->an_lock, RW_WRITE);
+				uvm_anon_release(pg->uanon);
 			}
 		} else {
 			atomic_clearbits_int(&pg->pg_flags, PG_WANTED|PG_BUSY);
@@ -1162,7 +1136,7 @@ vm_physseg_find(paddr_t pframe, int *offp)
 			if (pframe < seg->end) {
 				if (offp)
 					*offp = pframe - seg->start;
-				return(try);            /* got it */
+				return try;            /* got it */
 			}
 			start = try + 1;	/* next time, start here */
 			len--;			/* "adjust" */
@@ -1173,7 +1147,7 @@ vm_physseg_find(paddr_t pframe, int *offp)
 			 */
 		}
 	}
-	return(-1);
+	return -1;
 
 #else
 	/* linear search for it */
@@ -1183,10 +1157,10 @@ vm_physseg_find(paddr_t pframe, int *offp)
 		if (pframe >= seg->start && pframe < seg->end) {
 			if (offp)
 				*offp = pframe - seg->start;
-			return(lcv);		   /* got it */
+			return lcv;		   /* got it */
 		}
 	}
-	return(-1);
+	return -1;
 
 #endif
 }
@@ -1204,7 +1178,7 @@ PHYS_TO_VM_PAGE(paddr_t pa)
 
 	psi = vm_physseg_find(pf, &off);
 
-	return ((psi == -1) ? NULL : &vm_physmem[psi].pgs[off]);
+	return (psi == -1) ? NULL : &vm_physmem[psi].pgs[off];
 }
 #endif /* VM_PHYSSEG_MAX > 1 */
 
@@ -1218,7 +1192,7 @@ uvm_pagelookup(struct uvm_object *obj, voff_t off)
 	struct vm_page pg;
 
 	pg.offset = off;
-	return (RBT_FIND(uvm_objtree, &obj->memt, &pg));
+	return RBT_FIND(uvm_objtree, &obj->memt, &pg);
 }
 
 /*
@@ -1229,6 +1203,8 @@ uvm_pagelookup(struct uvm_object *obj, voff_t off)
 void
 uvm_pagewire(struct vm_page *pg)
 {
+	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+
 	if (pg->wire_count == 0) {
 		if (pg->pg_flags & PQ_ACTIVE) {
 			TAILQ_REMOVE(&uvm.page_active, pg, pageq);
@@ -1257,6 +1233,8 @@ uvm_pagewire(struct vm_page *pg)
 void
 uvm_pageunwire(struct vm_page *pg)
 {
+	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+
 	pg->wire_count--;
 	if (pg->wire_count == 0) {
 		TAILQ_INSERT_TAIL(&uvm.page_active, pg, pageq);
@@ -1276,6 +1254,8 @@ uvm_pageunwire(struct vm_page *pg)
 void
 uvm_pagedeactivate(struct vm_page *pg)
 {
+	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+
 	if (pg->pg_flags & PQ_ACTIVE) {
 		TAILQ_REMOVE(&uvm.page_active, pg, pageq);
 		atomic_clearbits_int(&pg->pg_flags, PQ_ACTIVE);
@@ -1310,6 +1290,8 @@ uvm_pagedeactivate(struct vm_page *pg)
 void
 uvm_pageactivate(struct vm_page *pg)
 {
+	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+
 	if (pg->pg_flags & PQ_INACTIVE) {
 		if (pg->pg_flags & PQ_SWAPBACKED)
 			TAILQ_REMOVE(&uvm.page_inactive_swp, pg, pageq);

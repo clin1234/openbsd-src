@@ -1,4 +1,4 @@
-/*	$OpenBSD: scheduler_null.c,v 1.9 2015/01/20 17:37:54 deraadt Exp $	*/
+/*	$OpenBSD: scheduler_null.c,v 1.11 2021/06/14 17:58:16 eric Exp $	*/
 
 /*
  * Copyright (c) 2012 Eric Faurot <eric@openbsd.org>
@@ -15,19 +15,6 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-
-#include <ctype.h>
-#include <err.h>
-#include <event.h>
-#include <fcntl.h>
-#include <imsg.h>
-#include <stdio.h>
-#include <limits.h>
 
 #include "smtpd.h"
 

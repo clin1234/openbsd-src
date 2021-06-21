@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_output.c,v 1.131 2020/05/19 18:57:57 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_output.c,v 1.134 2021/05/11 08:39:32 stsp Exp $	*/
 /*	$NetBSD: ieee80211_output.c,v 1.13 2004/05/31 11:02:55 dyoung Exp $	*/
 
 /*-
@@ -450,7 +450,7 @@ ieee80211_can_use_ampdu(struct ieee80211com *ic, struct ieee80211_node *ni)
 	    /*
 	     * Don't use A-MPDU on non-encrypted networks. There are devices
 	     * with buggy firmware which allow an attacker to inject 802.11
-	     * frames into a wifi network by embedding rouge A-MPDU subframes
+	     * frames into a wifi network by embedding rogue A-MPDU subframes
 	     * in an arbitrary data payload (e.g. PNG images) which may end
 	     * up appearing as actual frames after de-aggregation by a buggy
 	     * device; see https://github.com/rpp0/aggr-inject for details.
@@ -555,6 +555,14 @@ ieee80211_encap(struct ifnet *ifp, struct mbuf *m, struct ieee80211_node **pni)
 		ic->ic_stats.is_tx_nonode++;
 		goto bad;
 	}
+
+#ifndef IEEE80211_STA_ONLY
+	if (ic->ic_opmode == IEEE80211_M_HOSTAP && ni != ic->ic_bss &&
+	    ni->ni_state != IEEE80211_STA_ASSOC) {
+		ic->ic_stats.is_tx_nonode++;
+		goto bad;
+	}
+#endif
 
 	if ((ic->ic_flags & IEEE80211_F_RSNON) &&
 	    !ni->ni_port_valid &&
@@ -941,7 +949,7 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
 {
 	const u_int8_t *oui = wpa ? MICROSOFT_OUI : IEEE80211_OUI;
 	u_int8_t *pcount;
-	u_int16_t count;
+	u_int16_t count, rsncaps;
 
 	/* write Version field */
 	LE_WRITE_2(frm, 1); frm += 2;
@@ -1017,7 +1025,16 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
 		return frm;
 
 	/* write RSN Capabilities field */
-	LE_WRITE_2(frm, ni->ni_rsncaps); frm += 2;
+	rsncaps = (ni->ni_rsncaps & (IEEE80211_RSNCAP_PTKSA_RCNT_MASK |
+	    IEEE80211_RSNCAP_GTKSA_RCNT_MASK));
+	if (ic->ic_caps & IEEE80211_C_MFP) {
+		rsncaps |= IEEE80211_RSNCAP_MFPC;
+		if (ic->ic_flags & IEEE80211_F_MFPR)
+			rsncaps |= IEEE80211_RSNCAP_MFPR;
+	}
+	if (ic->ic_flags & IEEE80211_F_PBAR)
+		rsncaps |= IEEE80211_RSNCAP_PBAC;
+	LE_WRITE_2(frm, rsncaps); frm += 2;
 
 	if (ni->ni_flags & IEEE80211_NODE_PMKID) {
 		/* write PMKID Count field */
@@ -1678,7 +1695,7 @@ ieee80211_get_delba(struct ieee80211com *ic, struct ieee80211_node *ni,
 }
 
 /*-
- * SA Query Request/Reponse frame format:
+ * SA Query Request/Response frame format:
  * [1]  Category
  * [1]  Action
  * [16] Transaction Identifier

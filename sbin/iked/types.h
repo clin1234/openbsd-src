@@ -1,4 +1,4 @@
-/*	$OpenBSD: types.h,v 1.40 2020/09/23 14:25:55 tobhe Exp $	*/
+/*	$OpenBSD: types.h,v 1.43 2021/05/13 15:20:48 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -114,6 +114,11 @@ enum imsg_type {
 	IMSG_CERTVALID,
 	IMSG_CERTINVALID,
 	IMSG_CERT_PARTIAL_CHAIN,
+	IMSG_IF_ADDADDR,
+	IMSG_IF_DELADDR,
+	IMSG_VROUTE_ADD,
+	IMSG_VROUTE_DEL,
+	IMSG_VROUTE_CLONE,
 	IMSG_OCSP_FD,
 	IMSG_OCSP_CFG,
 	IMSG_AUTH,
@@ -135,7 +140,7 @@ enum flushmode {
 	RESET_CA,
 	RESET_POLICY,
 	RESET_SA,
-	RESET_USER
+	RESET_USER,
 };
 
 #ifndef nitems

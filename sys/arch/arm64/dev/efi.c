@@ -1,4 +1,4 @@
-/*	$OpenBSD: efi.c,v 1.8 2020/07/04 13:01:16 kettenis Exp $	*/
+/*	$OpenBSD: efi.c,v 1.10 2021/05/15 11:30:27 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2017 Mark Kettenis <kettenis@openbsd.org>
@@ -49,7 +49,7 @@ struct efi_softc {
 	struct device	sc_dev;
 	struct pmap	*sc_pm;
 	EFI_RUNTIME_SERVICES *sc_rs;
-	int		sc_psw;
+	u_long		sc_psw;
 
 	struct todr_chip_handle sc_todr;
 };
@@ -140,7 +140,7 @@ efi_attach(struct device *parent, struct device *self, void *aux)
 
 			/*
 			 * Normal memory is expected to be "write
-			 * back" cachable.  Everything else is mapped
+			 * back" cacheable.  Everything else is mapped
 			 * as device memory.
 			 */
 			if ((desc->Attribute & EFI_MEMORY_WB) == 0)
@@ -227,7 +227,7 @@ efi_enter(struct efi_softc *sc)
 {
 	struct pmap *pm = sc->sc_pm;
 
-	sc->sc_psw = disable_interrupts();
+	sc->sc_psw = intr_disable();
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");
 	cpu_setttb(pm->pm_asid, pm->pm_pt0pa);
@@ -245,7 +245,7 @@ efi_leave(struct efi_softc *sc)
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");
 	cpu_setttb(pm->pm_asid, pm->pm_pt0pa);
-	restore_interrupts(sc->sc_psw);
+	intr_restore(sc->sc_psw);
 }
 
 int

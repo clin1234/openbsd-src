@@ -1,4 +1,4 @@
-/*	$OpenBSD: lka.c,v 1.243 2019/12/21 10:23:37 gilles Exp $	*/
+/*	$OpenBSD: lka.c,v 1.247 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2008 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -18,34 +18,16 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
-#include <sys/uio.h>
 
-#include <netinet/in.h>
-
-#include <ctype.h>
-#include <err.h>
 #include <errno.h>
-#include <event.h>
-#include <imsg.h>
-#include <openssl/err.h>
-#include <openssl/ssl.h>
 #include <pwd.h>
-#include <resolv.h>
-#include <limits.h>
 #include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
 #include "smtpd.h"
 #include "log.h"
-#include "ssl.h"
 
 static void lka_imsg(struct mproc *, struct imsg *);
 static void lka_shutdown(void);
@@ -109,12 +91,6 @@ lka_imsg(struct mproc *p, struct imsg *imsg)
 	case IMSG_GETNAMEINFO:
 	case IMSG_RES_QUERY:
 		resolver_dispatch_request(p, imsg);
-		return;
-
-	case IMSG_CERT_INIT:
-	case IMSG_CERT_CERTIFICATE:
-	case IMSG_CERT_VERIFY:
-		cert_dispatch_request(p, imsg);
 		return;
 
 	case IMSG_MTA_DNS_HOST:
@@ -319,7 +295,7 @@ lka_imsg(struct mproc *p, struct imsg *imsg)
 		/* revoke proc & exec */
 		if (pledge("stdio rpath inet dns getpw recvfd sendfd",
 			NULL) == -1)
-			err(1, "pledge");
+			fatal("pledge");
 
 		/* setup proc registering task */
 		evtimer_set(&ev_proc_ready, proc_timeout, &ev_proc_ready);
@@ -334,7 +310,7 @@ lka_imsg(struct mproc *p, struct imsg *imsg)
 
 	case IMSG_LKA_AUTHENTICATE:
 		imsg->hdr.type = IMSG_SMTP_AUTHENTICATE;
-		m_forward(p_pony, imsg);
+		m_forward(p_dispatcher, imsg);
 		return;
 
 	case IMSG_CTL_VERBOSE:
@@ -643,7 +619,7 @@ lka_imsg(struct mproc *p, struct imsg *imsg)
 
 	}
 
-	errx(1, "lka_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
+	fatalx("lka_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
 }
 
 static void
@@ -701,17 +677,17 @@ lka(void)
 	config_peer(PROC_PARENT);
 	config_peer(PROC_QUEUE);
 	config_peer(PROC_CONTROL);
-	config_peer(PROC_PONY);
+	config_peer(PROC_DISPATCHER);
 
 	/* Ignore them until we get our config */
-	mproc_disable(p_pony);
+	mproc_disable(p_dispatcher);
 
 	lka_report_init();
 	lka_filter_init();
 
 	/* proc & exec will be revoked before serving requests */
 	if (pledge("stdio rpath inet dns getpw recvfd sendfd proc exec", NULL) == -1)
-		err(1, "pledge");
+		fatal("pledge");
 
 	event_dispatch();
 	fatalx("exited event loop");
@@ -729,7 +705,7 @@ proc_timeout(int fd, short event, void *p)
 		goto reset;
 
 	lka_filter_ready();
-	mproc_enable(p_pony);
+	mproc_enable(p_dispatcher);
 	return;
 
 reset:

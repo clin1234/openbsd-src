@@ -1,4 +1,4 @@
-/*	$OpenBSD: mda.c,v 1.141 2019/10/03 08:50:08 gilles Exp $	*/
+/*	$OpenBSD: mda.c,v 1.143 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -19,26 +19,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-
 #include <ctype.h>
-#include <err.h>
-#include <errno.h>
-#include <event.h>
-#include <imsg.h>
 #include <inttypes.h>
-#include <pwd.h>
-#include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sysexits.h>
-#include <time.h>
 #include <unistd.h>
-#include <limits.h>
 #include <vis.h>
 
 #include "smtpd.h"
@@ -380,7 +366,7 @@ mda_imsg(struct mproc *p, struct imsg *imsg)
 		return;
 	}
 
-	errx(1, "mda_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
+	fatalx("mda_imsg: unexpected %s imsg", imsg_to_str(imsg->hdr.type));
 }
 
 void

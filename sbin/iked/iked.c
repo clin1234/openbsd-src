@@ -1,4 +1,4 @@
-/*	$OpenBSD: iked.c,v 1.48 2020/09/23 14:25:55 tobhe Exp $	*/
+/*	$OpenBSD: iked.c,v 1.57 2021/05/13 15:20:48 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -43,12 +43,13 @@ void	 parent_shutdown(struct iked *);
 void	 parent_sig_handler(int, short, void *);
 int	 parent_dispatch_ca(int, struct privsep_proc *, struct imsg *);
 int	 parent_dispatch_control(int, struct privsep_proc *, struct imsg *);
+int	 parent_dispatch_ikev2(int, struct privsep_proc *, struct imsg *);
 int	 parent_configure(struct iked *);
 
 static struct privsep_proc procs[] = {
 	{ "ca",		PROC_CERT,	parent_dispatch_ca, caproc, IKED_CA },
 	{ "control",	PROC_CONTROL,	parent_dispatch_control, control },
-	{ "ikev2",	PROC_IKEV2,	NULL, ikev2 }
+	{ "ikev2",	PROC_IKEV2,	parent_dispatch_ikev2, ikev2 }
 };
 
 __dead void
@@ -57,7 +58,7 @@ usage(void)
 	extern char	*__progname;
 
 	fprintf(stderr, "usage: %s [-dnSTtv] [-D macro=value] "
-	    "[-f file] [-p udpencap_port]\n", __progname);
+	    "[-f file] [-p udpencap_port] [-s socket]\n", __progname);
 	exit(1);
 }
 
@@ -70,38 +71,47 @@ main(int argc, char *argv[])
 	enum natt_mode	 natt_mode = NATT_DEFAULT;
 	in_port_t	 port = IKED_NATT_PORT;
 	const char	*conffile = IKED_CONFIG;
+	const char	*sock = IKED_SOCKET;
+	const char	*errstr;
 	struct iked	*env = NULL;
 	struct privsep	*ps;
 
 	log_init(1, LOG_DAEMON);
 
-	while ((c = getopt(argc, argv, "6dD:nf:p:vSTt")) != -1) {
+	while ((c = getopt(argc, argv, "6D:df:np:Ss:Ttv")) != -1) {
 		switch (c) {
 		case '6':
 			log_warnx("the -6 option is ignored and will be "
 			    "removed in the future.");
-			break;
-		case 'd':
-			debug++;
 			break;
 		case 'D':
 			if (cmdline_symset(optarg) < 0)
 				log_warnx("could not parse macro definition %s",
 				    optarg);
 			break;
-		case 'n':
-			debug = 1;
-			opts |= IKED_OPT_NOACTION;
+		case 'd':
+			debug++;
 			break;
 		case 'f':
 			conffile = optarg;
 			break;
-		case 'v':
-			verbose++;
-			opts |= IKED_OPT_VERBOSE;
+		case 'n':
+			debug = 1;
+			opts |= IKED_OPT_NOACTION;
+			break;
+		case 'p':
+			if (natt_mode == NATT_DISABLE)
+				errx(1, "-T and -p are mutually exclusive");
+			port = strtonum(optarg, 1, UINT16_MAX, &errstr);
+			if (errstr != NULL)
+				errx(1, "port is %s: %s", errstr, optarg);
+			natt_mode = NATT_FORCE;
 			break;
 		case 'S':
 			opts |= IKED_OPT_PASSIVE;
+			break;
+		case 's':
+			sock = optarg;
 			break;
 		case 'T':
 			if (natt_mode == NATT_FORCE)
@@ -113,11 +123,9 @@ main(int argc, char *argv[])
 				errx(1, "-T and -t are mutually exclusive");
 			natt_mode = NATT_FORCE;
 			break;
-		case 'p':
-			if (natt_mode == NATT_DISABLE)
-				errx(1, "-T and -p are mutually exclusive");
-			port = atoi(optarg);
-			natt_mode = NATT_FORCE;
+		case 'v':
+			verbose++;
+			opts |= IKED_OPT_VERBOSE;
 			break;
 		default:
 			usage();
@@ -154,7 +162,7 @@ main(int argc, char *argv[])
 		errx(1, "unknown user %s", IKED_USER);
 
 	/* Configure the control socket */
-	ps->ps_csock.cs_name = IKED_SOCKET;
+	ps->ps_csock.cs_name = sock;
 
 	log_init(debug, LOG_DAEMON);
 	log_setverbose(verbose);
@@ -191,12 +199,15 @@ main(int argc, char *argv[])
 
 	proc_listen(ps, procs, nitems(procs));
 
+	vroute_init(env);
+
 	if (parent_configure(env) == -1)
 		fatalx("configuration failed");
 
 	event_dispatch();
 
 	log_debug("%d parent exiting", getpid());
+	parent_shutdown(env);
 
 	return (0);
 }
@@ -218,7 +229,7 @@ parent_configure(struct iked *env)
 	}
 
 	env->sc_pfkey = -1;
-	config_setpfkey(env, PROC_IKEV2);
+	config_setpfkey(env);
 
 	/* Send private and public keys to cert after forking the children */
 	if (config_setkeys(env) == -1)
@@ -258,9 +269,10 @@ parent_configure(struct iked *env)
 	 * dns - for reload and ocsp connect.
 	 * inet - for ocsp connect.
 	 * route - for using interfaces in iked.conf (SIOCGIFGMEMB)
+	 * wroute - for adding and removing addresses (SIOCAIFGMEMB)
 	 * sendfd - for ocsp sockets.
 	 */
-	if (pledge("stdio rpath proc dns inet route sendfd", NULL) == -1)
+	if (pledge("stdio rpath proc dns inet route wroute sendfd", NULL) == -1)
 		fatal("pledge");
 
 	config_setstatic(env);
@@ -438,11 +450,34 @@ parent_dispatch_control(int fd, struct privsep_proc *p, struct imsg *imsg)
 	return (0);
 }
 
+int
+parent_dispatch_ikev2(int fd, struct privsep_proc *p, struct imsg *imsg)
+{
+	struct iked	*env = p->p_ps->ps_env;
+
+	switch (imsg->hdr.type) {
+	case IMSG_IF_ADDADDR:
+	case IMSG_IF_DELADDR:
+		return (vroute_getaddr(env, imsg));
+	case IMSG_VROUTE_ADD:
+	case IMSG_VROUTE_DEL:
+		return (vroute_getroute(env, imsg));
+	case IMSG_VROUTE_CLONE:
+		return (vroute_getcloneroute(env, imsg));
+	default:
+		return (-1);
+	}
+
+	return (0);
+}
+
 void
 parent_shutdown(struct iked *env)
 {
 	proc_kill(&env->sc_ps);
 
+	vroute_cleanup(env);
+	free(env->sc_vroute);
 	free(env);
 
 	log_warnx("parent terminating");

@@ -1,4 +1,4 @@
-/* $OpenBSD: mux.c,v 1.86 2020/10/29 02:52:43 djm Exp $ */
+/* $OpenBSD: mux.c,v 1.89 2021/06/04 05:02:40 djm Exp $ */
 /*
  * Copyright (c) 2002-2008 Damien Miller <djm@openbsd.org>
  *
@@ -439,14 +439,6 @@ mux_master_process_new_session(struct ssh *ssh, u_int rid,
 	if (cctx->want_tty && tcgetattr(new_fd[0], &cctx->tio) == -1)
 		error_f("tcgetattr: %s", strerror(errno));
 
-	/* enable nonblocking unless tty */
-	if (!isatty(new_fd[0]))
-		set_nonblock(new_fd[0]);
-	if (!isatty(new_fd[1]))
-		set_nonblock(new_fd[1]);
-	if (!isatty(new_fd[2]))
-		set_nonblock(new_fd[2]);
-
 	window = CHAN_SES_WINDOW_DEFAULT;
 	packetmax = CHAN_SES_PACKET_DEFAULT;
 	if (cctx->want_tty) {
@@ -456,7 +448,7 @@ mux_master_process_new_session(struct ssh *ssh, u_int rid,
 
 	nc = channel_new(ssh, "session", SSH_CHANNEL_OPENING,
 	    new_fd[0], new_fd[1], new_fd[2], window, packetmax,
-	    CHAN_EXTENDED_WRITE, "client-session", /*nonblock*/0);
+	    CHAN_EXTENDED_WRITE, "client-session", CHANNEL_NONBLOCK_STDIO);
 
 	nc->ctl_chan = c->self;		/* link session -> control channel */
 	c->remote_id = nc->self;	/* link control -> session channel */
@@ -541,7 +533,7 @@ format_forward(u_int ftype, struct Forward *fwd)
 		xasprintf(&ret, "dynamic forward %.200s:%d -> *",
 		    (fwd->listen_host == NULL) ?
 		    (options.fwd_opts.gateway_ports ? "*" : "LOCALHOST") :
-		     fwd->listen_host, fwd->listen_port);
+		    fwd->listen_host, fwd->listen_port);
 		break;
 	case MUX_FWD_REMOTE:
 		xasprintf(&ret, "remote forward %.200s:%d -> %.200s:%d",
@@ -636,7 +628,7 @@ mux_confirm_remote_forward(struct ssh *ssh, int type, u_int32_t seq, void *ctxt)
 			    rfwd->allocated_port)) != 0)
 				fatal_fr(r, "reply");
 			channel_update_permission(ssh, rfwd->handle,
-			   rfwd->allocated_port);
+			    rfwd->allocated_port);
 		} else {
 			reply_ok(out, fctx->rid);
 		}
@@ -651,7 +643,7 @@ mux_confirm_remote_forward(struct ssh *ssh, int type, u_int32_t seq, void *ctxt)
 			xasprintf(&failmsg, "remote port forwarding failed for "
 			    "listen port %d", rfwd->listen_port);
 
-                debug2_f("clearing registered forwarding for listen %d, "
+		debug2_f("clearing registered forwarding for listen %d, "
 		    "connect %s:%d", rfwd->listen_port,
 		    rfwd->connect_path ? rfwd->connect_path :
 		    rfwd->connect_host, rfwd->connect_port);
@@ -1012,13 +1004,8 @@ mux_master_process_stdio_fwd(struct ssh *ssh, u_int rid,
 		}
 	}
 
-	/* enable nonblocking unless tty */
-	if (!isatty(new_fd[0]))
-		set_nonblock(new_fd[0]);
-	if (!isatty(new_fd[1]))
-		set_nonblock(new_fd[1]);
-
-	nc = channel_connect_stdio_fwd(ssh, chost, cport, new_fd[0], new_fd[1]);
+	nc = channel_connect_stdio_fwd(ssh, chost, cport, new_fd[0], new_fd[1],
+	    CHANNEL_NONBLOCK_STDIO);
 	free(chost);
 
 	nc->ctl_chan = c->self;		/* link session -> control channel */
@@ -1860,7 +1847,7 @@ mux_client_request_session(int fd)
 {
 	struct sshbuf *m;
 	char *e;
-	const char *term;
+	const char *term = NULL;
 	u_int echar, rid, sid, esid, exitval, type, exitval_seen;
 	extern char **environ;
 	int r, i, rawmode;
@@ -1877,8 +1864,10 @@ mux_client_request_session(int fd)
 	if (stdin_null_flag && stdfd_devnull(1, 0, 0) == -1)
 		fatal_f("stdfd_devnull failed");
 
-	if ((term = getenv("TERM")) == NULL)
-		term = "";
+	if ((term = lookup_env_in_list("TERM", options.setenv,
+	    options.num_setenv)) == NULL || *term == '\0')
+		term = getenv("TERM");
+
 	echar = 0xffffffff;
 	if (options.escape_char != SSH_ESCAPECHAR_NONE)
 	    echar = (u_int)options.escape_char;
@@ -1893,7 +1882,7 @@ mux_client_request_session(int fd)
 	    (r = sshbuf_put_u32(m, options.forward_agent)) != 0 ||
 	    (r = sshbuf_put_u32(m, subsystem_flag)) != 0 ||
 	    (r = sshbuf_put_u32(m, echar)) != 0 ||
-	    (r = sshbuf_put_cstring(m, term)) != 0 ||
+	    (r = sshbuf_put_cstring(m, term == NULL ? "" : term)) != 0 ||
 	    (r = sshbuf_put_stringb(m, command)) != 0)
 		fatal_fr(r, "request");
 
@@ -2257,7 +2246,7 @@ muxclient(const char *path)
 	if (strlcpy(addr.sun_path, path,
 	    sizeof(addr.sun_path)) >= sizeof(addr.sun_path))
 		fatal("ControlPath too long ('%s' >= %u bytes)", path,
-		     (unsigned int)sizeof(addr.sun_path));
+		    (unsigned int)sizeof(addr.sun_path));
 
 	if ((sock = socket(PF_UNIX, SOCK_STREAM, 0)) == -1)
 		fatal_f("socket(): %s", strerror(errno));

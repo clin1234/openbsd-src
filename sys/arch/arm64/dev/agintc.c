@@ -1,4 +1,4 @@
-/* $OpenBSD: agintc.c,v 1.27 2020/09/05 14:47:21 deraadt Exp $ */
+/* $OpenBSD: agintc.c,v 1.33 2021/05/21 18:53:12 kettenis Exp $ */
 /*
  * Copyright (c) 2007, 2009, 2011, 2017 Dale Rahn <drahn@dalerahn.com>
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
@@ -70,7 +70,7 @@
 #define  GICD_CTLR_ARE_NS		(1 << 4)
 #define  GICD_CTLR_DS			(1 << 6)
 #define GICD_TYPER		0x0004
-#define  GICD_TYPER_LPIS		(1 << 16)
+#define  GICD_TYPER_LPIS		(1 << 17)
 #define  GICD_TYPER_ITLINE_M		0x1f
 #define GICD_IIDR		0x0008
 #define GICD_ISENABLER(i)	(0x0100 + (IRQ_TO_REG32(i) * 4))
@@ -81,6 +81,9 @@
 #define GICD_ICACTIVER(i)	(0x0380 + (IRQ_TO_REG32(i) * 4))
 #define GICD_IPRIORITYR(i)	(0x0400 + (i))
 #define GICD_ICFGR(i)		(0x0c00 + (IRQ_TO_REG16(i) * 4))
+#define  GICD_ICFGR_TRIG_LEVEL(i)	(0x0 << (IRQ_TO_REG16BIT(i) * 2))
+#define  GICD_ICFGR_TRIG_EDGE(i)	(0x2 << (IRQ_TO_REG16BIT(i) * 2))
+#define  GICD_ICFGR_TRIG_MASK(i)	(0x2 << (IRQ_TO_REG16BIT(i) * 2))
 #define GICD_NSACR(i)		(0x0e00 + (IRQ_TO_REG16(i) * 4))
 #define GICD_IROUTER(i)		(0x6000 + ((i) * 8))
 
@@ -207,7 +210,7 @@ int		agintc_splraise(int);
 void		agintc_setipl(int);
 void		agintc_calc_mask(void);
 void		agintc_calc_irq(struct agintc_softc *sc, int irq);
-void		*agintc_intr_establish(int, int, struct cpu_info *ci,
+void		*agintc_intr_establish(int, int, int, struct cpu_info *,
 		    int (*)(void *), void *, char *);
 void		*agintc_intr_establish_fdt(void *cookie, int *cell, int level,
 		    struct cpu_info *, int (*func)(void *), void *arg, char *name);
@@ -218,6 +221,7 @@ void		agintc_eoi(uint32_t);
 void		agintc_set_priority(struct agintc_softc *sc, int, int);
 void		agintc_intr_enable(struct agintc_softc *, int);
 void		agintc_intr_disable(struct agintc_softc *, int);
+void		agintc_intr_config(struct agintc_softc *, int, int);
 void		agintc_route(struct agintc_softc *, int, int,
 		    struct cpu_info *);
 void		agintc_route_irq(void *, int, struct cpu_info *);
@@ -271,19 +275,19 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 	struct fdt_attach_args	*faa = aux;
 	struct cpu_info		*ci;
 	CPU_INFO_ITERATOR	 cii;
+	u_long			 psw;
 	uint32_t		 typer;
 	uint32_t		 nsacr, oldnsacr;
 	uint32_t		 pmr, oldpmr;
 	uint32_t		 ctrl, bits;
 	uint32_t		 affinity;
-	int			 i, j, nbits, nintr;
-	int			 psw;
+	int			 i, nbits, nintr;
 	int			 offset, nredist;
 #ifdef MULTIPROCESSOR
 	int			 nipi, ipiirq[2];
 #endif
 
-	psw = disable_interrupts();
+	psw = intr_disable();
 	arm_init_smask();
 
 	sc->sc_iot = faa->fa_iot;
@@ -480,11 +484,6 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 	for (i = 1; i < nintr / 32; i++) {
 		bus_space_write_4(sc->sc_iot, sc->sc_d_ioh,
 		    GICD_ICENABLER(i * 32), ~0);
-		for (j = 0; j < 32; j++) {
-			__asm volatile("msr "STR(ICC_DIR)", %x0" : :
-			    "r" ((i * 32) + j));
-			__isb();
-		}
 	}
 
 	for (i = 4; i < nintr; i += 4) {
@@ -516,7 +515,7 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 
 	/* insert self as interrupt handler */
 	arm_set_intr_handler(agintc_splraise, agintc_spllower, agintc_splx,
-	    agintc_setipl, agintc_irq_handler);
+	    agintc_setipl, agintc_irq_handler, NULL);
 
 	/* enable interrupts */
 	ctrl = bus_space_read_4(sc->sc_iot, sc->sc_d_ioh, GICD_CTLR);
@@ -574,16 +573,19 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 	switch (nipi) {
 	case 1:
 		sc->sc_ipi_irq[0] = agintc_intr_establish(ipiirq[0],
-		    IPL_IPI|IPL_MPSAFE, NULL, agintc_ipi_combined, sc, "ipi");
+		    IST_EDGE_RISING, IPL_IPI|IPL_MPSAFE, NULL,
+		    agintc_ipi_combined, sc, "ipi");
 		sc->sc_ipi_num[ARM_IPI_NOP] = ipiirq[0];
 		sc->sc_ipi_num[ARM_IPI_DDB] = ipiirq[0];
 		break;
 	case 2:
 		sc->sc_ipi_irq[0] = agintc_intr_establish(ipiirq[0],
-		    IPL_IPI|IPL_MPSAFE, NULL, agintc_ipi_nop, sc, "ipinop");
+		    IST_EDGE_RISING, IPL_IPI|IPL_MPSAFE, NULL,
+		    agintc_ipi_nop, sc, "ipinop");
 		sc->sc_ipi_num[ARM_IPI_NOP] = ipiirq[0];
 		sc->sc_ipi_irq[1] = agintc_intr_establish(ipiirq[1],
-		    IPL_IPI|IPL_MPSAFE, NULL, agintc_ipi_ddb, sc, "ipiddb");
+		    IST_EDGE_RISING, IPL_IPI|IPL_MPSAFE, NULL,
+		    agintc_ipi_ddb, sc, "ipiddb");
 		sc->sc_ipi_num[ARM_IPI_DDB] = ipiirq[1];
 		break;
 	default:
@@ -602,7 +604,7 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_ic.ic_barrier = agintc_intr_barrier;
 	arm_intr_register_fdt(&sc->sc_ic);
 
-	restore_interrupts(psw);
+	intr_restore(psw);
 
 	/* Attach ITS. */
 	simplebus_attach(parent, &sc->sc_sbus.sc_dev, faa);
@@ -671,7 +673,7 @@ agintc_cpuinit(void)
 	__asm volatile("msr "STR(ICC_PMR)", %x0" :: "r"(0xff));
 	__asm volatile("msr "STR(ICC_BPR1)", %x0" :: "r"(0));
 	__asm volatile("msr "STR(ICC_IGRPEN1)", %x0" :: "r"(1));
-	enable_interrupts();
+	intr_enable();
 }
 
 void
@@ -698,18 +700,18 @@ agintc_setipl(int ipl)
 {
 	struct agintc_softc	*sc = agintc_sc;
 	struct cpu_info		*ci = curcpu();
-	int			 psw;
+	u_long			 psw;
 	uint32_t		 prival;
 
 	/* disable here is only to keep hardware in sync with ci->ci_cpl */
-	psw = disable_interrupts();
+	psw = intr_disable();
 	ci->ci_cpl = ipl;
 
 	prival = ((0xff - ipl) << sc->sc_pmr_shift) & 0xff;
 	__asm volatile("msr "STR(ICC_PMR)", %x0" : : "r" (prival));
 	__isb();
 
-	restore_interrupts(psw);
+	intr_restore(psw);
 }
 
 void
@@ -741,6 +743,24 @@ agintc_intr_disable(struct agintc_softc *sc, int irq)
 		bus_space_write_4(sc->sc_iot, sc->sc_r_ioh[hwcpu],
 		    GICR_ICENABLE0, 1 << IRQ_TO_REG32BIT(irq));
 	}
+}
+
+void
+agintc_intr_config(struct agintc_softc *sc, int irq, int type)
+{
+	uint32_t reg;
+
+	/* Don't dare to change SGIs or PPIs (yet) */
+	if (irq < 32)
+		return;
+
+	reg = bus_space_read_4(sc->sc_iot, sc->sc_d_ioh, GICD_ICFGR(irq));
+	reg &= ~GICD_ICFGR_TRIG_MASK(irq);
+	if (type == IST_EDGE_RISING)
+		reg |= GICD_ICFGR_TRIG_EDGE(irq);
+	else
+		reg |= GICD_ICFGR_TRIG_LEVEL(irq);
+	bus_space_write_4(sc->sc_iot, sc->sc_d_ioh, GICD_ICFGR(irq), reg);
 }
 
 void
@@ -905,9 +925,7 @@ agintc_run_handler(struct intrhand *ih, void *frame, int s)
 	else
 		arg = frame;
 
-	enable_interrupts();
 	handled = ih->ih_func(arg);
-	disable_interrupts();
 	if (handled)
 		ih->ih_count.ec_count++;
 
@@ -956,7 +974,9 @@ agintc_irq_handler(void *frame)
 			return;
 		
 		s = agintc_splraise(ih->ih_ipl);
+		intr_enable();
 		agintc_run_handler(ih, frame, s);
+		intr_disable();
 		agintc_eoi(irq);
 
 		agintc_splx(s);
@@ -965,9 +985,11 @@ agintc_irq_handler(void *frame)
 
 	pri = sc->sc_handler[irq].iq_irq_max;
 	s = agintc_splraise(pri);
+	intr_enable();
 	TAILQ_FOREACH(ih, &sc->sc_handler[irq].iq_list, ih_list) {
 		agintc_run_handler(ih, frame, s);
 	}
+	intr_disable();
 	agintc_eoi(irq);
 
 	agintc_splx(s);
@@ -979,6 +1001,7 @@ agintc_intr_establish_fdt(void *cookie, int *cell, int level,
 {
 	struct agintc_softc	*sc = agintc_sc;
 	int			 irq;
+	int			 type;
 
 	/* 2nd cell contains the interrupt number */
 	irq = cell[1];
@@ -991,16 +1014,22 @@ agintc_intr_establish_fdt(void *cookie, int *cell, int level,
 	else
 		panic("%s: bogus interrupt type", sc->sc_sbus.sc_dev.dv_xname);
 
-	return agintc_intr_establish(irq, level, ci, func, arg, name);
+	/* SPIs are only active-high level or low-to-high edge */
+	if (cell[2] & 0x3)
+		type = IST_EDGE_RISING;
+	else
+		type = IST_LEVEL_HIGH;
+
+	return agintc_intr_establish(irq, type, level, ci, func, arg, name);
 }
 
 void *
-agintc_intr_establish(int irqno, int level, struct cpu_info *ci,
+agintc_intr_establish(int irqno, int type, int level, struct cpu_info *ci,
     int (*func)(void *), void *arg, char *name)
 {
 	struct agintc_softc	*sc = agintc_sc;
 	struct intrhand		*ih;
-	int			 psw;
+	u_long			 psw;
 
 	if (irqno < 0 || (irqno >= sc->sc_nintr && irqno < LPI_BASE) ||
 	    irqno >= LPI_BASE + sc->sc_nlpi)
@@ -1019,13 +1048,13 @@ agintc_intr_establish(int irqno, int level, struct cpu_info *ci,
 	ih->ih_name = name;
 	ih->ih_ci = ci;
 
-	psw = disable_interrupts();
+	psw = intr_disable();
 
 	if (irqno < LPI_BASE) {
 		if (!TAILQ_EMPTY(&sc->sc_handler[irqno].iq_list) &&
 		    sc->sc_handler[irqno].iq_ci != ci) {
+			intr_restore(psw);
 			free(ih, M_DEVBUF, sizeof *ih);
-			restore_interrupts(psw);
 			return NULL;
 		}
 		TAILQ_INSERT_TAIL(&sc->sc_handler[irqno].iq_list, ih, ih_list);
@@ -1041,6 +1070,7 @@ agintc_intr_establish(int irqno, int level, struct cpu_info *ci,
 #endif
 
 	if (irqno < LPI_BASE) {
+		agintc_intr_config(sc, irqno, type);
 		agintc_calc_irq(sc, irqno);
 	} else {
 		uint8_t *prop = AGINTC_DMA_KVA(sc->sc_prop);
@@ -1053,7 +1083,7 @@ agintc_intr_establish(int irqno, int level, struct cpu_info *ci,
 		__asm volatile("dsb sy");
 	}
 
-	restore_interrupts(psw);
+	intr_restore(psw);
 	return (ih);
 }
 
@@ -1063,9 +1093,9 @@ agintc_intr_disestablish(void *cookie)
 	struct agintc_softc	*sc = agintc_sc;
 	struct intrhand		*ih = cookie;
 	int			 irqno = ih->ih_irq;
-	int			 psw;
+	u_long			 psw;
 
-	psw = disable_interrupts();
+	psw = intr_disable();
 
 	TAILQ_REMOVE(&sc->sc_handler[irqno].iq_list, ih, ih_list);
 	if (ih->ih_name != NULL)
@@ -1073,7 +1103,7 @@ agintc_intr_disestablish(void *cookie)
 
 	agintc_calc_irq(sc, irqno);
 
-	restore_interrupts(psw);
+	intr_restore(psw);
 
 	free(ih, M_DEVBUF, 0);
 }
@@ -1538,7 +1568,7 @@ agintc_intr_establish_msi(void *self, uint64_t *addr, uint64_t *data,
 			continue;
 
 		cookie = agintc_intr_establish(LPI_BASE + i,
-		    level, ci, func, arg, name);
+		    IST_EDGE_RISING, level, ci, func, arg, name);
 		if (cookie == NULL)
 			return NULL;
 

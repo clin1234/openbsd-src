@@ -1,4 +1,4 @@
-/*	$OpenBSD: fdt.c,v 1.25 2020/07/18 09:44:59 kettenis Exp $	*/
+/*	$OpenBSD: fdt.c,v 1.27 2021/05/06 19:45:16 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2009 Dariusz Swiderski <sfires@sfires.net>
@@ -962,6 +962,15 @@ OF_getprop(int handle, char *prop, void *buf, int buflen)
 	return len;
 }
 
+int
+OF_getpropbool(int handle, char *prop)
+{
+	void *node = (char *)tree.header + handle;
+	char *data;
+	
+	return (fdt_node_property(node, prop, &data) >= 0);
+}
+
 uint32_t
 OF_getpropint(int handle, char *prop, uint32_t defval)
 {
@@ -1002,6 +1011,22 @@ OF_getpropint64(int handle, char *prop, uint64_t defval)
 		return defval;
 
 	return betoh64(val);
+}
+
+int
+OF_getpropint64array(int handle, char *prop, uint64_t *buf, int buflen)
+{
+	int len;
+	int i;
+
+	len = OF_getprop(handle, prop, buf, buflen);
+	if (len < 0 || (len % sizeof(uint64_t)))
+		return -1;
+
+	for (i = 0; i < len / sizeof(uint64_t); i++)
+		buf[i] = betoh64(buf[i]);
+
+	return len;
 }
 
 int

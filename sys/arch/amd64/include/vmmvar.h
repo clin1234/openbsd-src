@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmmvar.h,v 1.70 2020/04/08 07:39:48 pd Exp $	*/
+/*	$OpenBSD: vmmvar.h,v 1.72 2021/05/20 17:33:44 dv Exp $	*/
 /*
  * Copyright (c) 2014 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -637,6 +637,7 @@ struct vm_mprotect_ept_params {
 
 /*
  * SEFF flags - copy from host minus:
+ *  TSC_ADJUST (SEFF0EBX_TSC_ADJUST)
  *  SGX (SEFF0EBX_SGX)
  *  HLE (SEFF0EBX_HLE)
  *  INVPCID (SEFF0EBX_INVPCID)
@@ -655,7 +656,8 @@ struct vm_mprotect_ept_params {
  *  PT (SEFF0EBX_PT)
  *  AVX512VBMI (SEFF0ECX_AVX512VBMI)
  */
-#define VMM_SEFF0EBX_MASK ~(SEFF0EBX_SGX | SEFF0EBX_HLE | SEFF0EBX_INVPCID | \
+#define VMM_SEFF0EBX_MASK ~(SEFF0EBX_TSC_ADJUST | SEFF0EBX_SGX | \
+    SEFF0EBX_HLE | SEFF0EBX_INVPCID | \
     SEFF0EBX_RTM | SEFF0EBX_PQM | SEFF0EBX_MPX | \
     SEFF0EBX_PCOMMIT | SEFF0EBX_PT | \
     SEFF0EBX_AVX512F | SEFF0EBX_AVX512DQ | \
@@ -935,6 +937,9 @@ struct vcpu {
 	uint32_t vc_pvclock_version;
 	paddr_t vc_pvclock_system_gpa;
 	uint32_t vc_pvclock_system_tsc_mul;
+
+	/* Shadowed MSRs */
+	uint64_t vc_shadow_pat;
 
 	/* VMX only */
 	uint64_t vc_vmx_basic;

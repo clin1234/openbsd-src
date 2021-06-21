@@ -1,4 +1,4 @@
-/* $OpenBSD: intr.c,v 1.19 2020/07/17 08:07:33 patrick Exp $ */
+/* $OpenBSD: intr.c,v 1.23 2021/05/17 17:25:13 kettenis Exp $ */
 /*
  * Copyright (c) 2011 Dale Rahn <drahn@openbsd.org>
  *
@@ -39,8 +39,11 @@ int arm_dflt_spllower(int);
 void arm_dflt_splx(int);
 void arm_dflt_setipl(int);
 
-void arm_dflt_intr(void *);
-void arm_cpu_intr(void *);
+void arm_dflt_irq(void *);
+void arm_dflt_fiq(void *);
+
+void arm_cpu_irq(void *);
+void arm_cpu_fiq(void *);
 
 #define SI_TO_IRQBIT(x) (1 << (x))
 uint32_t arm_smask[NIPL];
@@ -52,21 +55,40 @@ struct arm_intr_func arm_intr_func = {
 	arm_dflt_setipl
 };
 
-void (*arm_intr_dispatch)(void *) = arm_dflt_intr;
+void
+arm_dflt_irq(void *frame)
+{
+	panic("%s", __func__);
+}
 
 void
-arm_cpu_intr(void *frame)
+arm_dflt_fiq(void *frame)
+{
+	panic("%s", __func__);
+}
+
+void (*arm_irq_dispatch)(void *) = arm_dflt_irq;
+
+void
+arm_cpu_irq(void *frame)
 {
 	struct cpu_info	*ci = curcpu();
 
 	ci->ci_idepth++;
-	(*arm_intr_dispatch)(frame);
+	(*arm_irq_dispatch)(frame);
 	ci->ci_idepth--;
 }
+
+void (*arm_fiq_dispatch)(void *) = arm_dflt_fiq;
+
 void
-arm_dflt_intr(void *frame)
+arm_cpu_fiq(void *frame)
 {
-	panic("arm_dflt_intr() called");
+	struct cpu_info	*ci = curcpu();
+
+	ci->ci_idepth++;
+	(*arm_fiq_dispatch)(frame);
+	ci->ci_idepth--;
 }
 
 /*
@@ -321,7 +343,7 @@ arm_intr_establish_fdt_idx_cpu(int node, int idx, int level, struct cpu_info *ci
 	struct interrupt_controller *ic;
 	int i, len, ncells, extended = 1;
 	uint32_t *cell, *cells, phandle;
-	struct arm_intr_handle *ih;
+	struct machine_intr_handle *ih;
 	void *val = NULL;
 
 	len = OF_getproplen(node, "interrupts-extended");
@@ -402,7 +424,7 @@ arm_intr_establish_fdt_imap_cpu(int node, int *reg, int nreg, int level,
     struct cpu_info *ci, int (*func)(void *), void *cookie, char *name)
 {
 	struct interrupt_controller *ic;
-	struct arm_intr_handle *ih;
+	struct machine_intr_handle *ih;
 	uint32_t *cell;
 	uint32_t map_mask[4], *map;
 	int len, acells, ncells;
@@ -476,7 +498,7 @@ arm_intr_establish_fdt_msi_cpu(int node, uint64_t *addr, uint64_t *data,
     char *name)
 {
 	struct interrupt_controller *ic;
-	struct arm_intr_handle *ih;
+	struct machine_intr_handle *ih;
 	uint32_t phandle;
 	void *val = NULL;
 
@@ -502,7 +524,7 @@ arm_intr_establish_fdt_msi_cpu(int node, uint64_t *addr, uint64_t *data,
 void
 arm_intr_disestablish_fdt(void *cookie)
 {
-	struct arm_intr_handle *ih = cookie;
+	struct machine_intr_handle *ih = cookie;
 	struct interrupt_controller *ic = ih->ih_ic;
 
 	ic->ic_disestablish(ih->ih_ih);
@@ -512,7 +534,7 @@ arm_intr_disestablish_fdt(void *cookie)
 void
 arm_intr_enable(void *cookie)
 {
-	struct arm_intr_handle *ih = cookie;
+	struct machine_intr_handle *ih = cookie;
 	struct interrupt_controller *ic = ih->ih_ic;
 
 	KASSERT(ic->ic_enable != NULL);
@@ -522,7 +544,7 @@ arm_intr_enable(void *cookie)
 void
 arm_intr_disable(void *cookie)
 {
-	struct arm_intr_handle *ih = cookie;
+	struct machine_intr_handle *ih = cookie;
 	struct interrupt_controller *ic = ih->ih_ic;
 
 	KASSERT(ic->ic_disable != NULL);
@@ -539,7 +561,7 @@ arm_intr_parent_establish_fdt(void *cookie, int *cell, int level,
     struct cpu_info *ci, int (*func)(void *), void *arg, char *name)
 {
 	struct interrupt_controller *ic = cookie;
-	struct arm_intr_handle *ih;
+	struct machine_intr_handle *ih;
 	uint32_t phandle;
 	void *val;
 
@@ -565,7 +587,7 @@ arm_intr_parent_establish_fdt(void *cookie, int *cell, int level,
 void
 arm_intr_parent_disestablish_fdt(void *cookie)
 {
-	struct arm_intr_handle *ih = cookie;
+	struct machine_intr_handle *ih = cookie;
 	struct interrupt_controller *ic = ih->ih_ic;
 
 	ic->ic_disestablish(ih->ih_ih);
@@ -575,7 +597,7 @@ arm_intr_parent_disestablish_fdt(void *cookie)
 void
 arm_intr_route(void *cookie, int enable, struct cpu_info *ci)
 {
-	struct arm_intr_handle *ih = cookie;
+	struct machine_intr_handle *ih = cookie;
 	struct interrupt_controller *ic = ih->ih_ic;
 
 	if (ic->ic_route)
@@ -643,18 +665,18 @@ void
 arm_do_pending_intr(int pcpl)
 {
 	struct cpu_info *ci = curcpu();
-	int oldirqstate;
+	u_long oldirqstate;
 
-	oldirqstate = disable_interrupts();
+	oldirqstate = intr_disable();
 
 #define DO_SOFTINT(si, ipl) \
 	if ((ci->ci_ipending & arm_smask[pcpl]) &	\
-	    SI_TO_IRQBIT(si)) {						\
-		ci->ci_ipending &= ~SI_TO_IRQBIT(si);			\
-		arm_intr_func.setipl(ipl);				\
-		restore_interrupts(oldirqstate);			\
-		softintr_dispatch(si);					\
-		oldirqstate = disable_interrupts();			\
+	    SI_TO_IRQBIT(si)) {				\
+		ci->ci_ipending &= ~SI_TO_IRQBIT(si);	\
+		arm_intr_func.setipl(ipl);		\
+		intr_restore(oldirqstate);		\
+		softintr_dispatch(si);			\
+		oldirqstate = intr_disable();		\
 	}
 
 	do {
@@ -666,18 +688,23 @@ arm_do_pending_intr(int pcpl)
 
 	/* Don't use splx... we are here already! */
 	arm_intr_func.setipl(pcpl);
-	restore_interrupts(oldirqstate);
+	intr_restore(oldirqstate);
 }
 
-void arm_set_intr_handler(int (*raise)(int), int (*lower)(int),
-    void (*x)(int), void (*setipl)(int),
-	void (*intr_handle)(void *))
+void
+arm_set_intr_handler(int (*raise)(int), int (*lower)(int),
+    void (*x)(int), void (*setipl)(int), void (*irq_dispatch)(void *),
+    void (*fiq_dispatch)(void *))
 {
-	arm_intr_func.raise		= raise;
-	arm_intr_func.lower		= lower;
-	arm_intr_func.x			= x;
-	arm_intr_func.setipl		= setipl;
-	arm_intr_dispatch		= intr_handle;
+	arm_intr_func.raise = raise;
+	arm_intr_func.lower = lower;
+	arm_intr_func.x	= x;
+	arm_intr_func.setipl = setipl;
+
+	if (irq_dispatch)
+		arm_irq_dispatch = irq_dispatch;
+	if (fiq_dispatch)
+		arm_fiq_dispatch = fiq_dispatch;
 }
 
 void
@@ -822,7 +849,7 @@ void
 setstatclockrate(int new)
 {
 	if (arm_clock_func.setstatclockrate == NULL) {
-		panic("arm_clock_func.setstatclockrate not intialized");
+		panic("arm_clock_func.setstatclockrate not initialized");
 	}
 	arm_clock_func.setstatclockrate(new);
 }
@@ -830,7 +857,7 @@ setstatclockrate(int new)
 void
 intr_barrier(void *cookie)
 {
-	struct arm_intr_handle *ih = cookie;
+	struct machine_intr_handle *ih = cookie;
 	struct interrupt_controller *ic = ih->ih_ic;
 
 	ic->ic_barrier(ih->ih_ih);

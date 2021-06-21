@@ -1,4 +1,4 @@
-/*	$OpenBSD: bounce.c,v 1.82 2020/04/24 11:34:07 eric Exp $	*/
+/*	$OpenBSD: bounce.c,v 1.85 2021/06/14 17:58:15 eric Exp $	*/
 
 /*
  * Copyright (c) 2009 Gilles Chehade <gilles@poolp.org>
@@ -18,24 +18,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/socket.h>
-
-#include <err.h>
 #include <errno.h>
-#include <event.h>
-#include <imsg.h>
 #include <inttypes.h>
-#include <pwd.h>
-#include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
-#include <limits.h>
 
 #include "smtpd.h"
 #include "log.h"
@@ -141,7 +128,7 @@ bounce_add(uint64_t evpid)
 	}
 
 	if (evp.type != D_BOUNCE)
-		errx(1, "bounce: evp:%016" PRIx64 " is not of type D_BOUNCE!",
+		fatalx("bounce: evp:%016" PRIx64 " is not of type D_BOUNCE!",
 		    evp.id);
 
 	key.msgid = evpid_to_msgid(evpid);
@@ -290,7 +277,7 @@ bounce_drain()
 		}
 
 		log_debug("debug: bounce: requesting new enqueue socket...");
-		m_compose(p_pony, IMSG_QUEUE_SMTP_SESSION, 0, 0, -1, NULL, 0);
+		m_compose(p_dispatcher, IMSG_QUEUE_SMTP_SESSION, 0, 0, -1, NULL, 0);
 
 		running += 1;
 	}

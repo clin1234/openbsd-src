@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.h,v 1.15 2020/08/25 17:49:58 kettenis Exp $	*/
+/*	$OpenBSD: pmap.h,v 1.17 2021/05/30 15:08:08 visa Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
@@ -18,6 +18,9 @@
 
 #ifndef _MACHINE_PMAP_H_
 #define _MACHINE_PMAP_H_
+
+#include <sys/mutex.h>
+#include <sys/queue.h>
 
 #ifdef _KERNEL
 
@@ -68,6 +71,7 @@ void	pmap_bootstrap(void);
 void	pmap_bootstrap_cpu(void);
 
 int	pmap_slbd_fault(pmap_t, vaddr_t);
+int	pmap_slbd_enter(pmap_t, vaddr_t);
 int	pmap_set_user_slb(pmap_t, vaddr_t, vaddr_t *, vsize_t *);
 void	pmap_clear_user_slb(void);
 void	pmap_unset_user_slb(void);
@@ -78,9 +82,6 @@ struct pte *pmap_get_kernel_pte(vaddr_t);
 #endif
 
 #endif	/* _KERNEL */
-
-#include <sys/mutex.h>
-#include <sys/queue.h>
 
 struct vm_page_md {
 	struct mutex pv_mtx;

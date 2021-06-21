@@ -1,4 +1,4 @@
-/*	$OpenBSD: efipxe.c,v 1.4 2019/11/26 19:08:01 bluhm Exp $	*/
+/*	$OpenBSD: efipxe.c,v 1.6 2021/03/11 11:16:55 jsg Exp $	*/
 /*
  * Copyright (c) 2017 Patrick Wildt <patrick@blueri.se>
  *
@@ -44,7 +44,7 @@ extern int	 efi_device_path_ncmp(EFI_DEVICE_PATH *, EFI_DEVICE_PATH *, int);
 
 /*
  * TFTP initial probe.  This function discovers PXE handles and tries
- * to figure out if there has already been a successfull PXE handshake.
+ * to figure out if there has already been a successful PXE handshake.
  * If so, set the PXE variable.
  */
 void
@@ -299,7 +299,7 @@ tftpioctl(struct open_file *f, u_long cmd, void *data)
 }
 
 int
-tftpstrategy(void *devdata, int rw, daddr32_t blk, size_t size, void *buf,
+tftpstrategy(void *devdata, int rw, daddr_t blk, size_t size, void *buf,
 	size_t *rsize)
 {
 	return EOPNOTSUPP;

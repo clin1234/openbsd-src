@@ -1,4 +1,4 @@
-/*	$OpenBSD: sxitimer.c,v 1.14 2020/07/06 13:33:07 pirofti Exp $	*/
+/*	$OpenBSD: sxitimer.c,v 1.17 2021/03/25 04:12:01 jsg Exp $	*/
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2013 Raphael Graf <r@undefined.ch>
@@ -20,13 +20,8 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/time.h>
-#include <sys/evcount.h>
 #include <sys/device.h>
 #include <sys/timetc.h>
-#include <dev/clock_subr.h>
-
-#include <arm/cpufunc.h>
 
 #include <machine/bus.h>
 #include <machine/fdt.h>
@@ -89,7 +84,14 @@ void	sxitimer_delay(u_int);
 u_int sxitimer_get_timecount(struct timecounter *);
 
 static struct timecounter sxitimer_timecounter = {
-	sxitimer_get_timecount, NULL, 0xffffffff, 0, "sxitimer", 0, NULL, 0
+	.tc_get_timecount = sxitimer_get_timecount,
+	.tc_poll_pps = NULL,
+	.tc_counter_mask = 0xffffffff,
+	.tc_frequency = 0,
+	.tc_name = "sxitimer",
+	.tc_quality = 0,
+	.tc_priv = NULL,
+	.tc_user = 0,
 };
 
 bus_space_tag_t		sxitimer_iot;
@@ -212,7 +214,7 @@ sxitimer_attach(struct device *parent, struct device *self, void *aux)
 	arm_clock_register(sxitimer_cpu_initclocks, sxitimer_delay,
 	    sxitimer_setstatclockrate, NULL);
 
-	printf(": cntrtimer @ %dKHz", freq / 1000);
+	printf(": %d kHz", freq / 1000);
 
 	bus_space_write_4(sxitimer_iot, sxitimer_ioh,
 	    TIMER_INTV(CNTRTIMER), ival);
@@ -222,7 +224,7 @@ sxitimer_attach(struct device *parent, struct device *self, void *aux)
 
 /*
  * would be interesting to play with trigger mode while having one timer
- * in 32KHz mode, and the other timer running in sysclk mode and use
+ * in 32kHz mode, and the other timer running in sysclk mode and use
  * the high resolution speeds (matters more for delay than tick timer)
  */
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: fetch.c,v 1.198 2020/10/18 20:35:18 naddy Exp $	*/
+/*	$OpenBSD: fetch.c,v 1.204 2021/03/29 03:34:52 deraadt Exp $	*/
 /*	$NetBSD: fetch.c,v 1.14 1997/08/18 10:20:20 lukem Exp $	*/
 
 /*-
@@ -56,8 +56,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <util.h>
 #include <resolv.h>
+#include <utime.h>
 
 #ifndef NOSSL
 #include <tls.h>
@@ -75,7 +75,6 @@ static void	aborthttp(int);
 static char	hextochar(const char *);
 static char	*urldecode(const char *);
 static char	*recode_credentials(const char *_userinfo);
-static char	*ftp_readline(FILE *, size_t *);
 static void	ftp_close(FILE **, struct tls **, int *);
 static const char *sockerror(struct tls *);
 #ifdef SMALL
@@ -129,7 +128,7 @@ unsafe_char(const char *c0)
 	     * hexadecimal digits.
 	     */
 	    strchr(unsafe_chars, *c) != NULL ||
-	    (*c == '%' && (!isxdigit(*++c) || !isxdigit(*++c))));
+	    (*c == '%' && (!isxdigit(c[1]) || !isxdigit(c[2]))));
 }
 
 /*
@@ -329,6 +328,7 @@ url_get(const char *origline, const char *proxyenv, const char *outfile, int las
 	off_t hashbytes;
 	const char *errstr;
 	ssize_t len, wlen;
+	size_t bufsize;
 	char *proxyhost = NULL;
 #ifndef NOSSL
 	char *sslpath = NULL, *sslhost = NULL;
@@ -339,6 +339,11 @@ url_get(const char *origline, const char *proxyenv, const char *outfile, int las
 	const char *scheme;
 	char *locbase;
 	struct addrinfo *ares = NULL;
+	char tmbuf[32];
+	time_t mtime = 0;
+	struct stat stbuf;
+	struct tm lmt = { 0 };
+	struct timespec ts[2];
 #endif /* !SMALL */
 	struct tls *tls = NULL;
 	int status;
@@ -731,13 +736,16 @@ noslash:
 		if (verbose)
 			fprintf(ttyout, "Requesting %s\n", origline);
 #ifndef SMALL
-		if (resume) {
-			struct stat stbuf;
-
-			if (stat(savefile, &stbuf) == 0)
-				restart_point = stbuf.st_size;
-			else
+		if (resume || timestamp) {
+			if (stat(savefile, &stbuf) == 0) {
+				if (resume)
+					restart_point = stbuf.st_size;
+				if (timestamp)
+					mtime = stbuf.st_mtime;
+			} else {
 				restart_point = 0;
+				mtime = 0;
+			}
 		}
 #endif	/* SMALL */
 		ftp_printf(fin,
@@ -777,6 +785,12 @@ noslash:
 		if (port && strcmp(port, "80") != 0)
 			ftp_printf(fin, ":%s", port);
 #endif /* !NOSSL */
+
+#ifndef SMALL
+		if (mtime && (http_time(mtime, tmbuf, sizeof(tmbuf)) != 0))
+			ftp_printf(fin, "\r\nIf-Modified-Since: %s", tmbuf);
+#endif /* SMALL */
+
 		ftp_printf(fin, "\r\n%s%s\r\n",
 		    buf ? buf : "", httpuseragent);
 		if (credentials)
@@ -790,12 +804,13 @@ noslash:
 	free(buf);
 #endif /* !NOSSL */
 	buf = NULL;
+	bufsize = 0;
 
 	if (fflush(fin) == EOF) {
 		warnx("Writing HTTP request: %s", sockerror(tls));
 		goto cleanup_url_get;
 	}
-	if ((buf = ftp_readline(fin, &len)) == NULL) {
+	if ((len = getline(&buf, &bufsize, fin)) == -1) {
 		warnx("Receiving HTTP reply: %s", sockerror(tls));
 		goto cleanup_url_get;
 	}
@@ -843,6 +858,7 @@ noslash:
 	case 302:	/* Found */
 	case 303:	/* See Other */
 	case 307:	/* Temporary Redirect */
+	case 308:	/* Permanent Redirect (RFC 7538) */
 		isredirect++;
 		if (redirect_loop++ > 10) {
 			warnx("Too many redirections requested");
@@ -850,6 +866,9 @@ noslash:
 		}
 		break;
 #ifndef SMALL
+	case 304:	/* Not Modified */
+		warnx("File is not modified on the server");
+		goto cleanup_url_get;
 	case 416:	/* Requested Range Not Satisfiable */
 		warnx("File is already fully retrieved.");
 		goto cleanup_url_get;
@@ -866,11 +885,10 @@ noslash:
 	/*
 	 * Read the rest of the header.
 	 */
-	free(buf);
 	filesize = -1;
 
 	for (;;) {
-		if ((buf = ftp_readline(fin, &len)) == NULL) {
+		if ((len = getline(&buf, &bufsize, fin)) == -1) {
 			warnx("Receiving HTTP reply: %s", sockerror(tls));
 			goto cleanup_url_get;
 		}
@@ -972,9 +990,19 @@ noslash:
 			cp[strcspn(cp, " \t")] = '\0';
 			if (strcasecmp(cp, "chunked") == 0)
 				chunked = 1;
+#ifndef SMALL
+#define LAST_MODIFIED "Last-Modified: "
+		} else if (strncasecmp(cp, LAST_MODIFIED,
+			    sizeof(LAST_MODIFIED) - 1) == 0) {
+			cp += sizeof(LAST_MODIFIED) - 1;
+			cp[strcspn(cp, "\t")] = '\0';
+			if (strptime(cp, "%a, %d %h %Y %T %Z", &lmt) == NULL)
+				server_timestamps = 0;
+#endif /* !SMALL */
 		}
-		free(buf);
 	}
+	free(buf);
+	buf = NULL;
 
 	/* Content-Length should be ignored for Transfer-Encoding: chunked */
 	if (chunked)
@@ -1018,7 +1046,6 @@ noslash:
 #endif
 	}
 
-	free(buf);
 	if ((buf = malloc(buflen)) == NULL)
 		errx(1, "Can't allocate memory for transfer buffer");
 
@@ -1113,8 +1140,20 @@ cleanup_url_get:
 	free(sslhost);
 #endif /* !NOSSL */
 	ftp_close(&fin, &tls, &fd);
-	if (out >= 0 && out != fileno(stdout))
+	if (out >= 0 && out != fileno(stdout)) {
+#ifndef SMALL
+		if (server_timestamps && lmt.tm_zone != 0 &&
+		    fstat(out, &stbuf) == 0 && S_ISREG(stbuf.st_mode) != 0) {
+			ts[0].tv_nsec = UTIME_NOW;
+			ts[1].tv_nsec = 0;
+			setenv("TZ", lmt.tm_zone, 1);
+			if (((ts[1].tv_sec = mktime(&lmt)) != -1) &&
+			    (futimens(out, ts) == -1))
+				warnx("Unable to set file modification time");
+		}
+#endif /* !SMALL */
 		close(out);
+	}
 	free(buf);
 	free(pathbuf);
 	free(proxyhost);
@@ -1129,15 +1168,14 @@ static int
 save_chunked(FILE *fin, struct tls *tls, int out, char *buf, size_t buflen)
 {
 
-	char			*header, *end, *cp;
+	char			*header = NULL, *end, *cp;
 	unsigned long		chunksize;
-	size_t			hlen, rlen, wlen;
+	size_t			hsize = 0, rlen, wlen;
 	ssize_t			written;
 	char			cr, lf;
 
 	for (;;) {
-		header = ftp_readline(fin, &hlen);
-		if (header == NULL)
+		if (getline(&header, &hsize, fin) == -1)
 			break;
 		/* strip CRLF and any optional chunk extension */
 		header[strcspn(header, ";\r\n")] = '\0';
@@ -1149,10 +1187,10 @@ save_chunked(FILE *fin, struct tls *tls, int out, char *buf, size_t buflen)
 			free(header);
 			return -1;
 		}
-		free(header);
 
 		if (chunksize == 0) {
 			/* We're done.  Ignore optional trailer. */
+			free(header);
 			return 0;
 		}
 
@@ -1166,6 +1204,7 @@ save_chunked(FILE *fin, struct tls *tls, int out, char *buf, size_t buflen)
 			    wlen -= written, cp += written) {
 				if ((written = write(out, cp, wlen)) == -1) {
 					warn("Writing output file");
+					free(header);
 					return -1;
 				}
 			}
@@ -1178,9 +1217,11 @@ save_chunked(FILE *fin, struct tls *tls, int out, char *buf, size_t buflen)
 
 		if (cr != '\r' || lf != '\n') {
 			warnx("Invalid chunked encoding");
+			free(header);
 			return -1;
 		}
 	}
+	free(header);
 
 	if (ferror(fin))
 		warnx("Error while reading from socket: %s", sockerror(tls));
@@ -1613,12 +1654,6 @@ isurl(const char *p)
 	    strstr(p, ":/"))
 		return (1);
 	return (0);
-}
-
-static char *
-ftp_readline(FILE *fp, size_t *lenp)
-{
-	return fparseln(fp, lenp, NULL, "\0\0\0", 0);
 }
 
 #ifndef SMALL

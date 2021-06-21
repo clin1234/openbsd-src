@@ -1,4 +1,4 @@
-/* $OpenBSD: softraid.c,v 1.416 2020/10/15 00:13:47 krw Exp $ */
+/* $OpenBSD: softraid.c,v 1.419 2021/05/16 15:10:19 deraadt Exp $ */
 /*
  * Copyright (c) 2007, 2008, 2009 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2008 Chris Kuethe <ckuethe@openbsd.org>
@@ -837,8 +837,8 @@ sr_meta_opt_load(struct sr_softc *sc, struct sr_metadata *sm,
 			    SR_OLD_META_OPT_SIZE - MD5_DIGEST_LENGTH);
 			if (bcmp(&checksum, (void *)omh + SR_OLD_META_OPT_MD5,
 			    sizeof(checksum)))
-				panic("%s: invalid optional metadata "
-				    "checksum", DEVNAME(sc));
+				panic("%s: invalid optional metadata checksum",
+				    DEVNAME(sc));
 
 			/* Determine correct length. */
 			switch (omh->som_type) {
@@ -853,8 +853,8 @@ sr_meta_opt_load(struct sr_softc *sc, struct sr_metadata *sm,
 				    sizeof(struct sr_meta_keydisk);
 				break;
 			default:
-				panic("unknown old optional metadata "
-				    "type %u\n", omh->som_type);
+				panic("unknown old optional metadata type %u",
+				    omh->som_type);
 			}
 
 			omi->omi_som = malloc(omh->som_length, M_DEVBUF,
@@ -1397,7 +1397,7 @@ sr_boot_assembly(struct sr_softc *sc)
 		 * key disk...
 		 */
 		bcr.bc_key_disk = NODEV;
-		if (bv->sbv_level == 'C') {
+		if (bv->sbv_level == 'C' || bv->sbv_level == 0x1C) {
 			SLIST_FOREACH(bc, &kdh, sbc_link) {
 				if (bcmp(&bc->sbc_metadata->ssdi.ssd_uuid,
 				    &bv->sbv_uuid,
@@ -1447,7 +1447,7 @@ sr_boot_assembly(struct sr_softc *sc)
 		bcr.bc_flags = BIOC_SCDEVT |
 		    (bv->sbv_flags & BIOC_SCNOAUTOASSEMBLE);
 
-		if (bv->sbv_level == 'C' &&
+		if ((bv->sbv_level == 'C' || bv->sbv_level == 0x1C) &&
 		    bcmp(&sr_bootuuid, &bv->sbv_uuid, sizeof(sr_bootuuid)) == 0)
 			data = sr_bootkey;
 
@@ -2585,7 +2585,8 @@ sr_ioctl_vol(struct sr_softc *sc, struct bioc_vol *bv)
 		bv->bv_nodisk = sd->sd_meta->ssdi.ssd_chunk_no;
 
 #ifdef CRYPTO
-		if (sd->sd_meta->ssdi.ssd_level == 'C' &&
+		if ((sd->sd_meta->ssdi.ssd_level == 'C' ||
+		    sd->sd_meta->ssdi.ssd_level == 0x1C) &&
 		    sd->mds.mdd_crypto.key_disk != NULL)
 			bv->bv_nodisk++;
 #endif
@@ -2641,7 +2642,8 @@ sr_ioctl_disk(struct sr_softc *sc, struct bioc_disk *bd)
 			src = sd->sd_vol.sv_chunks[bd->bd_diskid];
 #ifdef CRYPTO
 		else if (bd->bd_diskid == sd->sd_meta->ssdi.ssd_chunk_no &&
-		    sd->sd_meta->ssdi.ssd_level == 'C' &&
+		    (sd->sd_meta->ssdi.ssd_level == 'C' ||
+		    sd->sd_meta->ssdi.ssd_level == 0x1C) &&
 		    sd->mds.mdd_crypto.key_disk != NULL)
 			src = sd->mds.mdd_crypto.key_disk;
 #endif
@@ -3398,7 +3400,11 @@ sr_ioctl_createraid(struct sr_softc *sc, struct bioc_createraid *bc,
 	} else {
 
 		/* Ensure we are assembling the correct # of chunks. */
-		if (sd->sd_meta->ssdi.ssd_chunk_no != no_chunk) {
+		if (bc->bc_level == 0x1C &&
+		    sd->sd_meta->ssdi.ssd_chunk_no > no_chunk) {
+			sr_warn(sc, "trying to bring up %s degraded",
+			    sd->sd_meta->ssd_devname);
+		} else if (sd->sd_meta->ssdi.ssd_chunk_no != no_chunk) {
 			sr_error(sc, "volume chunk count does not match metadata "
 			    "chunk count");
 			goto unwind;
@@ -3885,7 +3891,7 @@ sr_discipline_shutdown(struct sr_discipline *sd, int meta_save, int dying)
 	if (sd->sd_reb_active) {
 		sd->sd_reb_abort = 1;
 		while (sd->sd_reb_active)
-			tsleep(sd, PWAIT, "sr_shutdown", 1);
+			tsleep_nsec(sd, PWAIT, "sr_shutdown", MSEC_TO_NSEC(1));
 	}
 
 	if (meta_save)
@@ -3976,6 +3982,9 @@ sr_discipline_init(struct sr_discipline *sd, int level)
 #ifdef CRYPTO
 	case 'C':
 		sr_crypto_discipline_init(sd);
+		break;
+	case 0x1C:
+		sr_raid1c_discipline_init(sd);
 		break;
 #endif
 	case 'c':
@@ -4200,7 +4209,7 @@ sr_schedule_wu(struct sr_workunit *wu)
 		goto start;
 
 	if (wu->swu_state != SR_WU_INPROGRESS)
-		panic("sr_schedule_wu: work unit not in progress (state %i)\n",
+		panic("sr_schedule_wu: work unit not in progress (state %i)",
 		    wu->swu_state);
 
 	/* Walk queue backwards and fill in collider if we have one. */
@@ -4332,8 +4341,8 @@ sr_set_chunk_state(struct sr_discipline *sd, int c, int new_state)
 	default:
 die:
 		splx(s); /* XXX */
-		panic("%s: %s: %s: invalid chunk state transition "
-		    "%d -> %d", DEVNAME(sd->sd_sc),
+		panic("%s: %s: %s: invalid chunk state transition %d -> %d",
+		    DEVNAME(sd->sd_sc),
 		    sd->sd_meta->ssd_devname,
 		    sd->sd_vol.sv_chunks[c]->src_meta.scmi.scm_devname,
 		    old_state, new_state);
@@ -4398,8 +4407,8 @@ sr_set_vol_state(struct sr_discipline *sd)
 
 	default:
 die:
-		panic("%s: %s: invalid volume state transition "
-		    "%d -> %d", DEVNAME(sd->sd_sc),
+		panic("%s: %s: invalid volume state transition %d -> %d",
+		    DEVNAME(sd->sd_sc),
 		    sd->sd_meta->ssd_devname,
 		    old_state, new_state);
 		/* NOTREACHED */
@@ -4765,7 +4774,7 @@ sr_rebuild(struct sr_discipline *sd)
 		}
 		/* yield if we didn't sleep */
 		if (slept == 0)
-			tsleep(sc, PWAIT, "sr_yield", 1);
+			tsleep_nsec(sc, PWAIT, "sr_yield", MSEC_TO_NSEC(1));
 
 		sr_scsi_wu_put(sd, wu_r);
 		sr_scsi_wu_put(sd, wu_w);

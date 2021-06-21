@@ -1,4 +1,4 @@
-/* $OpenBSD: acpi.c,v 1.391 2020/08/27 01:08:55 jmatthew Exp $ */
+/* $OpenBSD: acpi.c,v 1.398 2021/05/09 15:51:35 kettenis Exp $ */
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  * Copyright (c) 2005 Jordan Hargrave <jordan@openbsd.org>
@@ -879,11 +879,20 @@ void
 acpi_gpio_event_task(void *arg0, int arg1)
 {
 	struct aml_node *node = arg0;
+	struct aml_value evt;
 	uint16_t pin = arg1;
 	char name[5];
 
-	snprintf(name, sizeof(name), "_E%.2X", pin);
-	aml_evalname(acpi_softc, node, name, 0, NULL, NULL);
+	if (pin < 256) {
+		snprintf(name, sizeof(name), "_E%.2X", pin);
+		if (aml_evalname(acpi_softc, node, name, 0, NULL, NULL) == 0)
+			return;
+	}
+
+	memset(&evt, 0, sizeof(evt));
+	evt.v_integer = pin;
+	evt.type = AML_OBJTYPE_INTEGER;
+	aml_evalname(acpi_softc, node, "_EVT", 1, &evt, NULL);
 }
 
 int
@@ -1193,6 +1202,7 @@ acpi_attach_common(struct acpi_softc *sc, paddr_t base)
 		memset(&aaa, 0, sizeof(aaa));
 		aaa.aaa_iot = sc->sc_iot;
 		aaa.aaa_memt = sc->sc_memt;
+		aaa.aaa_dmat = sc->sc_ci_dmat;
 		aaa.aaa_table = entry->q_table;
 		config_found_sm(&sc->sc_dev, &aaa, acpi_print, acpi_submatch);
 	}
@@ -1426,7 +1436,8 @@ acpi_read_pmreg(struct acpi_softc *sc, int reg, int offset)
 	 * For Hardware-reduced ACPI we also emulate PM1A_STS using
 	 * SLEEP_STATUS_REG.
 	 */
-	if (sc->sc_hw_reduced && reg == ACPIREG_PM1A_STS) {
+	if (sc->sc_hw_reduced && reg == ACPIREG_PM1A_STS &&
+	    sc->sc_fadt->sleep_status_reg.register_bit_width > 0) {
 		uint8_t value;
 
 		KASSERT(offset == 0);
@@ -1504,7 +1515,8 @@ acpi_write_pmreg(struct acpi_softc *sc, int reg, int offset, int regval)
 	 * For Hardware-reduced ACPI we also emulate PM1A_STS using
 	 * SLEEP_STATUS_REG.
 	 */
-	if (sc->sc_hw_reduced && reg == ACPIREG_PM1A_STS) {
+	if (sc->sc_hw_reduced && reg == ACPIREG_PM1A_STS &&
+	    sc->sc_fadt->sleep_status_reg.register_bit_width > 0) {
 		uint8_t value = (regval >> 8);
 
 		KASSERT(offset == 0);
@@ -1520,7 +1532,8 @@ acpi_write_pmreg(struct acpi_softc *sc, int reg, int offset, int regval)
 	 * For Hardware-reduced ACPI we also emulate PM1A_CNT using
 	 * SLEEP_CONTROL_REG.
 	 */
-	if (sc->sc_hw_reduced && reg == ACPIREG_PM1A_CNT) {
+	if (sc->sc_hw_reduced && reg == ACPIREG_PM1A_CNT &&
+	    sc->sc_fadt->sleep_control_reg.register_bit_width > 0) {
 		uint8_t value = (regval >> 8);
 
 		KASSERT(offset == 0);
@@ -1598,10 +1611,6 @@ acpi_map_pmregs(struct acpi_softc *sc)
 	bus_size_t size, access;
 	const char *name;
 	int reg;
-
-	/* Registers don't exist on Hardware-reduced ACPI. */
-	if (sc->sc_hw_reduced)
-		return;
 
 	for (reg = 0; reg < ACPIREG_MAXREG; reg++) {
 		size = 0;
@@ -2773,6 +2782,8 @@ acpi_powerdown(void)
 		;
 }
 
+#endif /* SMALL_KERNEL */
+
 int
 acpi_map_address(struct acpi_softc *sc, struct acpi_gas *gas, bus_addr_t base,
     bus_size_t size, bus_space_handle_t *pioh, bus_space_tag_t *piot)
@@ -2799,8 +2810,6 @@ acpi_map_address(struct acpi_softc *sc, struct acpi_gas *gas, bus_addr_t base,
 
 	return 0;
 }
-
-#endif /* SMALL_KERNEL */
 
 void
 acpi_wakeup(void *arg)
@@ -2980,21 +2989,24 @@ acpi_getprop(struct aml_node *node, const char *prop, void *buf, int buflen)
 	/* Check properties. */
 	for (i = 0; i < dsd.v_package[1]->length; i++) {
 		struct aml_value *res = dsd.v_package[1]->v_package[i];
+		struct aml_value *val;
 		int len;
 
 		if (res->type != AML_OBJTYPE_PACKAGE || res->length != 2 ||
 		    res->v_package[0]->type != AML_OBJTYPE_STRING)
 			continue;
 
-		len = res->v_package[1]->length;
-		switch (res->v_package[1]->type) {
+		val = res->v_package[1];
+		if (val->type == AML_OBJTYPE_OBJREF)
+			val = val->v_objref.ref;
+
+		len = val->length;
+		switch (val->type) {
 		case AML_OBJTYPE_BUFFER:
-			memcpy(buf, res->v_package[1]->v_buffer,
-			    min(len, buflen));
+			memcpy(buf, val->v_buffer, min(len, buflen));
 			return len;
 		case AML_OBJTYPE_STRING:
-			memcpy(buf, res->v_package[1]->v_string,
-			    min(len, buflen));
+			memcpy(buf, val->v_string, min(len, buflen));
 			return len;
 		}
 	}
@@ -3031,14 +3043,22 @@ acpi_getpropint(struct aml_node *node, const char *prop, uint32_t defval)
 	/* Check properties. */
 	for (i = 0; i < dsd.v_package[1]->length; i++) {
 		struct aml_value *res = dsd.v_package[1]->v_package[i];
+		struct aml_value *val;
 
 		if (res->type != AML_OBJTYPE_PACKAGE || res->length != 2 ||
-		    res->v_package[0]->type != AML_OBJTYPE_STRING ||
-		    res->v_package[1]->type != AML_OBJTYPE_INTEGER)
+		    res->v_package[0]->type != AML_OBJTYPE_STRING)
 			continue;
 
-		if (strcmp(res->v_package[0]->v_string, prop) == 0)
-			return res->v_package[1]->v_integer;
+		val = res->v_package[1];
+		if (val->type == AML_OBJTYPE_OBJREF)
+			val = val->v_objref.ref;
+
+		if (val->type != AML_OBJTYPE_INTEGER)
+			continue;
+
+		if (strcmp(res->v_package[0]->v_string, prop) == 0 &&
+		    val->type == AML_OBJTYPE_INTEGER)
+			return val->v_integer;
 	}
 
 	return defval;
@@ -3130,7 +3150,7 @@ const char *acpi_isa_hids[] = {
 void
 acpi_attach_deps(struct acpi_softc *sc, struct aml_node *node)
 {
-	struct aml_value res;
+	struct aml_value res, *val;
 	struct aml_node *dep;
 	int i;
 
@@ -3141,9 +3161,12 @@ acpi_attach_deps(struct acpi_softc *sc, struct aml_node *node)
 		return;
 
 	for (i = 0; i < res.length; i++) {
-		if (res.v_package[i]->type != AML_OBJTYPE_STRING)
+		val = res.v_package[i];
+		if (val->type == AML_OBJTYPE_OBJREF)
+			val = val->v_objref.ref;
+		if (val->type != AML_OBJTYPE_DEVICE)
 			continue;
-		dep = aml_searchrel(node, res.v_package[i]->v_string);
+		dep = val->node;
 		if (dep == NULL || dep->attached)
 			continue;
 		dep = aml_searchname(dep, "_HID");
@@ -3332,6 +3355,8 @@ acpi_foundhid(struct aml_node *node, void *arg)
 	if (acpi_matchhids(&aaa, acpi_skip_hids, "none") ||
 	    acpi_matchhids(&aaa, acpi_isa_hids, "none"))
 		return (0);
+
+	aaa.aaa_dmat = acpi_iommu_device_map(node->parent, aaa.aaa_dmat);
 
 	if (!node->parent->attached) {
 		node->parent->attached = 1;
@@ -3649,7 +3674,7 @@ acpi_filtdetach(struct knote *kn)
 	int s;
 
 	s = splbio();
-	klist_remove(sc->sc_note, kn);
+	klist_remove_locked(sc->sc_note, kn);
 	splx(s);
 }
 
@@ -3683,7 +3708,7 @@ acpikqfilter(dev_t dev, struct knote *kn)
 	kn->kn_hook = sc;
 
 	s = splbio();
-	klist_insert(sc->sc_note, kn);
+	klist_insert_locked(sc->sc_note, kn);
 	splx(s);
 
 	return (0);

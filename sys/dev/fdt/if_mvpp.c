@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mvpp.c,v 1.41 2020/11/14 14:11:08 kettenis Exp $	*/
+/*	$OpenBSD: if_mvpp.c,v 1.46 2021/06/03 21:42:23 patrick Exp $	*/
 /*
  * Copyright (c) 2008, 2019 Mark Kettenis <kettenis@openbsd.org>
  * Copyright (c) 2017, 2020 Patrick Wildt <patrick@blueri.se>
@@ -194,7 +194,6 @@ struct mvpp2_port {
 	struct mii_data		sc_mii;
 #define sc_media	sc_mii.mii_media
 	struct mii_bus		*sc_mdio;
-	char			sc_cur_lladdr[ETHER_ADDR_LEN];
 
 	enum {
 		PHY_MODE_XAUI,
@@ -419,6 +418,7 @@ int	mvpp2_prs_mac_da_range_find(struct mvpp2_softc *, int, const uint8_t *,
 int	mvpp2_prs_mac_range_equals(struct mvpp2_prs_entry *, const uint8_t *,
 	    uint8_t *);
 int	mvpp2_prs_mac_da_accept(struct mvpp2_port *, const uint8_t *, int);
+void	mvpp2_prs_mac_del_all(struct mvpp2_port *);
 int	mvpp2_prs_tag_mode_set(struct mvpp2_softc *, int, int);
 int	mvpp2_prs_def_flow(struct mvpp2_port *);
 void	mvpp2_cls_flow_write(struct mvpp2_softc *, struct mvpp2_cls_flow_entry *);
@@ -457,13 +457,10 @@ mvpp2_attach(struct device *parent, struct device *self, void *aux)
 	}
 	sc->sc_iosize_base = faa->fa_reg[0].size;
 
-	if (!pmap_extract(pmap_kernel(), (vaddr_t)sc->sc_ioh_base,
-	    &sc->sc_ioh_paddr)) {
-		printf(": can't extract address\n");
-		bus_space_unmap(sc->sc_iot, sc->sc_ioh_base,
-		    sc->sc_iosize_base);
-		return;
-	}
+	sc->sc_ioh_paddr = bus_space_mmap(sc->sc_iot, faa->fa_reg[0].addr,
+	    0, PROT_READ | PROT_WRITE, 0);
+	KASSERT(sc->sc_ioh_paddr != -1);
+	sc->sc_ioh_paddr &= PMAP_PA_MASK;
 
 	if (bus_space_map(sc->sc_iot, faa->fa_reg[1].addr,
 	    faa->fa_reg[1].size, 0, &sc->sc_ioh_iface)) {
@@ -1357,7 +1354,9 @@ mvpp2_port_attach(struct device *parent, struct device *self, void *aux)
 
 	phy_mode = malloc(len, M_TEMP, M_WAITOK);
 	OF_getprop(sc->sc_node, "phy-mode", phy_mode, len);
-	if (!strncmp(phy_mode, "10gbase-kr", strlen("10gbase-kr")))
+	if (!strncmp(phy_mode, "10gbase-r", strlen("10gbase-r")))
+		sc->sc_phy_mode = PHY_MODE_10GBASER;
+	else if (!strncmp(phy_mode, "10gbase-kr", strlen("10gbase-kr")))
 		sc->sc_phy_mode = PHY_MODE_10GBASER;
 	else if (!strncmp(phy_mode, "2500base-x", strlen("2500base-x")))
 		sc->sc_phy_mode = PHY_MODE_2500BASEX;
@@ -1516,6 +1515,22 @@ mvpp2_port_attach(struct device *parent, struct device *self, void *aux)
 		ifmedia_set(&sc->sc_mii.mii_media, IFM_ETHER|IFM_AUTO);
 
 		if (sc->sc_inband_status) {
+			switch (sc->sc_phy_mode) {
+			case PHY_MODE_1000BASEX:
+				sc->sc_mii.mii_media_active =
+				    IFM_ETHER|IFM_1000_KX|IFM_FDX;
+				break;
+			case PHY_MODE_2500BASEX:
+				sc->sc_mii.mii_media_active =
+				    IFM_ETHER|IFM_2500_KX|IFM_FDX;
+				break;
+			case PHY_MODE_10GBASER:
+				sc->sc_mii.mii_media_active =
+				    IFM_ETHER|IFM_10G_KR|IFM_FDX;
+				break;
+			default:
+				break;
+			}
 			mvpp2_inband_statchg(sc);
 		} else {
 			sc->sc_mii.mii_media_status = IFM_AVALID|IFM_ACTIVE;
@@ -1986,9 +2001,11 @@ mvpp2_port_change(struct mvpp2_port *sc)
 			reg &= ~MVPP2_GMAC_CONFIG_MII_SPEED;
 			reg &= ~MVPP2_GMAC_CONFIG_GMII_SPEED;
 			reg &= ~MVPP2_GMAC_CONFIG_FULL_DUPLEX;
-			if (IFM_SUBTYPE(sc->sc_mii.mii_media_active) == IFM_2500_SX ||
+			if (IFM_SUBTYPE(sc->sc_mii.mii_media_active) == IFM_2500_KX ||
+			    IFM_SUBTYPE(sc->sc_mii.mii_media_active) == IFM_2500_SX ||
 			    IFM_SUBTYPE(sc->sc_mii.mii_media_active) == IFM_1000_CX ||
 			    IFM_SUBTYPE(sc->sc_mii.mii_media_active) == IFM_1000_LX ||
+			    IFM_SUBTYPE(sc->sc_mii.mii_media_active) == IFM_1000_KX ||
 			    IFM_SUBTYPE(sc->sc_mii.mii_media_active) == IFM_1000_SX ||
 			    IFM_SUBTYPE(sc->sc_mii.mii_media_active) == IFM_1000_T)
 				reg |= MVPP2_GMAC_CONFIG_GMII_SPEED;
@@ -2262,10 +2279,9 @@ mvpp2_up(struct mvpp2_port *sc)
 		sfp_enable(sc->sc_sfp);
 		rw_exit(&mvpp2_sff_lock);
 	}
-	
-	memcpy(sc->sc_cur_lladdr, sc->sc_lladdr, ETHER_ADDR_LEN);
+
 	mvpp2_prs_mac_da_accept(sc, etherbroadcastaddr, 1);
-	mvpp2_prs_mac_da_accept(sc, sc->sc_cur_lladdr, 1);
+	mvpp2_prs_mac_da_accept(sc, sc->sc_lladdr, 1);
 	mvpp2_prs_tag_mode_set(sc->sc, sc->sc_id, MVPP2_TAG_TYPE_MH);
 	mvpp2_prs_def_flow(sc);
 
@@ -2887,8 +2903,6 @@ mvpp2_down(struct mvpp2_port *sc)
 	for (i = 0; i < sc->sc_nrxq; i++)
 		mvpp2_rxq_hw_deinit(sc, &sc->sc_rxqs[i]);
 
-	mvpp2_prs_mac_da_accept(sc, sc->sc_cur_lladdr, 0);
-
 	if (sc->sc_sfp) {
 		rw_enter(&mvpp2_sff_lock, RW_WRITE);
 		sfp_disable(sc->sc_sfp);
@@ -3045,12 +3059,40 @@ mvpp2_rxq_short_pool_set(struct mvpp2_port *port, int lrxq, int pool)
 void
 mvpp2_iff(struct mvpp2_port *sc)
 {
-	/* FIXME: multicast handling */
+	struct arpcom *ac = &sc->sc_ac;
+	struct ifnet *ifp = &sc->sc_ac.ac_if;
+	struct ether_multi *enm;
+	struct ether_multistep step;
 
-	if (memcmp(sc->sc_cur_lladdr, sc->sc_lladdr, ETHER_ADDR_LEN) != 0) {
-		mvpp2_prs_mac_da_accept(sc, sc->sc_cur_lladdr, 0);
-		memcpy(sc->sc_cur_lladdr, sc->sc_lladdr, ETHER_ADDR_LEN);
-		mvpp2_prs_mac_da_accept(sc, sc->sc_cur_lladdr, 1);
+	ifp->if_flags &= ~IFF_ALLMULTI;
+
+	/* Removes all but broadcast and (new) lladdr */
+	mvpp2_prs_mac_del_all(sc);
+
+	if (ifp->if_flags & IFF_PROMISC) {
+		mvpp2_prs_mac_promisc_set(sc->sc, sc->sc_id,
+		    MVPP2_PRS_L2_UNI_CAST, 1);
+		mvpp2_prs_mac_promisc_set(sc->sc, sc->sc_id,
+		    MVPP2_PRS_L2_MULTI_CAST, 1);
+		return;
+	}
+
+	mvpp2_prs_mac_promisc_set(sc->sc, sc->sc_id,
+	    MVPP2_PRS_L2_UNI_CAST, 0);
+	mvpp2_prs_mac_promisc_set(sc->sc, sc->sc_id,
+	    MVPP2_PRS_L2_MULTI_CAST, 0);
+
+	if (ac->ac_multirangecnt > 0 ||
+	    ac->ac_multicnt > MVPP2_PRS_MAC_MC_FILT_MAX) {
+		ifp->if_flags |= IFF_ALLMULTI;
+		mvpp2_prs_mac_promisc_set(sc->sc, sc->sc_id,
+		    MVPP2_PRS_L2_MULTI_CAST, 1);
+	} else {
+		ETHER_FIRST_MULTI(step, ac, enm);
+		while (enm != NULL) {
+			mvpp2_prs_mac_da_accept(sc, enm->enm_addrlo, 1);
+			ETHER_NEXT_MULTI(step, enm);
+		}
 	}
 }
 
@@ -3109,7 +3151,7 @@ mvpp2_alloc_mbuf(struct mvpp2_softc *sc, bus_dmamap_t map)
 {
 	struct mbuf *m = NULL;
 
-	m = MCLGETI(NULL, M_DONTWAIT, NULL, MCLBYTES);
+	m = MCLGETL(NULL, M_DONTWAIT, MCLBYTES);
 	if (!m)
 		return (NULL);
 	m->m_len = m->m_pkthdr.len = MCLBYTES;
@@ -4330,7 +4372,7 @@ mvpp2_prs_mac_da_range_find(struct mvpp2_softc *sc, int pmap, const uint8_t *da,
 	struct mvpp2_prs_entry pe;
 	int tid;
 
-	for (tid = MVPP2_PE_FIRST_FREE_TID; tid <= MVPP2_PE_LAST_FREE_TID;
+	for (tid = MVPP2_PE_MAC_RANGE_START; tid <= MVPP2_PE_MAC_RANGE_END;
 	    tid++) {
 		uint32_t entry_pmap;
 
@@ -4366,8 +4408,8 @@ mvpp2_prs_mac_da_accept(struct mvpp2_port *port, const uint8_t *da, int add)
 		if (!add)
 			return 0;
 
-		tid = mvpp2_prs_tcam_first_free(sc, MVPP2_PE_FIRST_FREE_TID,
-		    MVPP2_PE_LAST_FREE_TID);
+		tid = mvpp2_prs_tcam_first_free(sc, MVPP2_PE_MAC_RANGE_START,
+		    MVPP2_PE_MAC_RANGE_END);
 		if (tid < 0)
 			return tid;
 
@@ -4415,6 +4457,40 @@ mvpp2_prs_mac_da_accept(struct mvpp2_port *port, const uint8_t *da, int add)
 	mvpp2_prs_hw_write(sc, &pe);
 
 	return 0;
+}
+
+void
+mvpp2_prs_mac_del_all(struct mvpp2_port *port)
+{
+	struct mvpp2_softc *sc = port->sc;
+	struct mvpp2_prs_entry pe;
+	uint32_t pmap;
+	int index, tid;
+
+	for (tid = MVPP2_PE_MAC_RANGE_START; tid <= MVPP2_PE_MAC_RANGE_END;
+	    tid++) {
+		uint8_t da[ETHER_ADDR_LEN], da_mask[ETHER_ADDR_LEN];
+
+		if (!sc->sc_prs_shadow[tid].valid ||
+		    (sc->sc_prs_shadow[tid].lu != MVPP2_PRS_LU_MAC) ||
+		    (sc->sc_prs_shadow[tid].udf != MVPP2_PRS_UDF_MAC_DEF))
+			continue;
+
+		mvpp2_prs_hw_read(sc, &pe, tid);
+		pmap = mvpp2_prs_tcam_port_map_get(&pe);
+
+		if (!(pmap & (1 << port->sc_id)))
+			continue;
+
+		for (index = 0; index < ETHER_ADDR_LEN; index++)
+			mvpp2_prs_tcam_data_byte_get(&pe, index, &da[index],
+			    &da_mask[index]);
+
+		if (ETHER_IS_BROADCAST(da) || ETHER_IS_EQ(da, port->sc_lladdr))
+			continue;
+
+		mvpp2_prs_mac_da_accept(port, da, 0);
+	}
 }
 
 int

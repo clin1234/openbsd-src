@@ -1,4 +1,4 @@
-/*	$OpenBSD: rsync.c,v 1.9 2020/09/12 15:46:48 claudio Exp $ */
+/*	$OpenBSD: rsync.c,v 1.24 2021/04/19 17:04:35 deraadt Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -15,6 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/queue.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
@@ -28,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <imsg.h>
 
 #include "extern.h"
 
@@ -43,110 +45,55 @@ struct	rsyncproc {
 };
 
 /*
- * Conforms to RFC 5781.
- * Note that "Source" is broken down into the module, path, and also
- * file type relevant to RPKI.
- * Any of the pointers (except "uri") may be NULL.
- * Returns zero on failure, non-zero on success.
+ * Return the base of a rsync URI (rsync://hostname/module). The
+ * caRepository provided by the RIR CAs point deeper than they should
+ * which would result in many rsync calls for almost every subdirectory.
+ * This is inefficent so instead crop the URI to a common base.
+ * The returned string needs to be freed by the caller.
  */
-int
-rsync_uri_parse(const char **hostp, size_t *hostsz,
-    const char **modulep, size_t *modulesz,
-    const char **pathp, size_t *pathsz,
-    enum rtype *rtypep, const char *uri)
+char *
+rsync_base_uri(const char *uri)
 {
-	const char	*host, *module, *path;
-	size_t		 sz;
-
-	/* Initialise all output values to NULL or 0. */
-
-	if (hostsz != NULL)
-		*hostsz = 0;
-	if (modulesz != NULL)
-		*modulesz = 0;
-	if (pathsz != NULL)
-		*pathsz = 0;
-	if (hostp != NULL)
-		*hostp = 0;
-	if (modulep != NULL)
-		*modulep = 0;
-	if (pathp != NULL)
-		*pathp = 0;
-	if (rtypep != NULL)
-		*rtypep = RTYPE_EOF;
+	const char *host, *module, *rest;
+	char *base_uri;
 
 	/* Case-insensitive rsync URI. */
-
-	if (strncasecmp(uri, "rsync://", 8)) {
+	if (strncasecmp(uri, "rsync://", 8) != 0) {
 		warnx("%s: not using rsync schema", uri);
-		return 0;
+		return NULL;
 	}
 
 	/* Parse the non-zero-length hostname. */
-
 	host = uri + 8;
 
 	if ((module = strchr(host, '/')) == NULL) {
 		warnx("%s: missing rsync module", uri);
-		return 0;
+		return NULL;
 	} else if (module == host) {
 		warnx("%s: zero-length rsync host", uri);
-		return 0;
+		return NULL;
 	}
-
-	if (hostp != NULL)
-		*hostp = host;
-	if (hostsz != NULL)
-		*hostsz = module - host;
 
 	/* The non-zero-length module follows the hostname. */
-
-	if (module[1] == '\0') {
-		warnx("%s: zero-length rsync module", uri);
-		return 0;
-	}
-
 	module++;
+	if (*module == '\0') {
+		warnx("%s: zero-length rsync module", uri);
+		return NULL;
+	}
 
 	/* The path component is optional. */
-
-	if ((path = strchr(module, '/')) == NULL) {
-		assert(*module != '\0');
-		if (modulep != NULL)
-			*modulep = module;
-		if (modulesz != NULL)
-			*modulesz = strlen(module);
-		return 1;
-	} else if (path == module) {
+	if ((rest = strchr(module, '/')) == NULL) {
+		if ((base_uri = strdup(uri)) == NULL)
+			err(1, NULL);
+		return base_uri;
+	} else if (rest == module) {
 		warnx("%s: zero-length module", uri);
-		return 0;
+		return NULL;
 	}
 
-	if (modulep != NULL)
-		*modulep = module;
-	if (modulesz != NULL)
-		*modulesz = path - module;
-
-	path++;
-	sz = strlen(path);
-
-	if (pathp != NULL)
-		*pathp = path;
-	if (pathsz != NULL)
-		*pathsz = sz;
-
-	if (rtypep != NULL && sz > 4) {
-		if (strcasecmp(path + sz - 4, ".roa") == 0)
-			*rtypep = RTYPE_ROA;
-		else if (strcasecmp(path + sz - 4, ".mft") == 0)
-			*rtypep = RTYPE_MFT;
-		else if (strcasecmp(path + sz - 4, ".cer") == 0)
-			*rtypep = RTYPE_CER;
-		else if (strcasecmp(path + sz - 4, ".crl") == 0)
-			*rtypep = RTYPE_CRL;
-	}
-
-	return 1;
+	if ((base_uri = strndup(uri, rest - uri)) == NULL)
+		err(1, NULL);
+	return base_uri;
 }
 
 static void
@@ -162,8 +109,6 @@ proc_child(int signal)
  * does so.
  * It then responds with the identifier of the repo that it updated.
  * It only exits cleanly when fd is closed.
- * FIXME: this should use buffered output to prevent deadlocks, but it's
- * very unlikely that we're going to fill our buffer, so whatever.
  * FIXME: limit the number of simultaneous process.
  * Currently, an attacker can trivially specify thousands of different
  * repositories and saturate our system.
@@ -171,21 +116,17 @@ proc_child(int signal)
 void
 proc_rsync(char *prog, char *bind_addr, int fd)
 {
-	size_t			 id, i, idsz = 0;
-	ssize_t			 ssz;
-	char			*host = NULL, *mod = NULL, *uri = NULL,
-				*dst = NULL, *path, *save, *cmd;
-	const char		*pp;
-	pid_t			 pid;
-	char			*args[32];
-	int			 st, rc = 0;
-	struct stat		 stt;
+	size_t			 i, idsz = 0;
+	int			 rc = 0;
 	struct pollfd		 pfd;
+	struct msgbuf		 msgq;
 	sigset_t		 mask, oldmask;
 	struct rsyncproc	*ids = NULL;
 
 	pfd.fd = fd;
-	pfd.events = POLLIN;
+
+	msgbuf_init(&msgq);
+	msgq.fd = fd;
 
 	/*
 	 * Unveil the command we want to run.
@@ -195,16 +136,20 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 	 */
 
 	if (strchr(prog, '/') == NULL) {
+		const char *pp;
+		char *save, *cmd, *path;
+		struct stat stt;
+
 		if (getenv("PATH") == NULL)
 			errx(1, "PATH is unset");
 		if ((path = strdup(getenv("PATH"))) == NULL)
-			err(1, "strdup");
+			err(1, NULL);
 		save = path;
 		while ((pp = strsep(&path, ":")) != NULL) {
 			if (*pp == '\0')
 				continue;
 			if (asprintf(&cmd, "%s/%s", pp, prog) == -1)
-				err(1, "asprintf");
+				err(1, NULL);
 			if (lstat(cmd, &stt) == -1) {
 				free(cmd);
 				continue;
@@ -217,12 +162,8 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 	} else if (unveil(prog, "x") == -1)
 		err(1, "%s: unveil", prog);
 
-	/* Unveil the repository directory and terminate unveiling. */
-
-	if (unveil(".", "c") == -1)
-		err(1, "unveil");
-	if (unveil(NULL, NULL) == -1)
-		err(1, "unveil");
+	if (pledge("stdio proc exec", NULL) == -1)
+		err(1, "pledge");
 
 	/* Initialise retriever for children exiting. */
 
@@ -236,6 +177,16 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 		err(1, NULL);
 
 	for (;;) {
+		char *uri = NULL, *dst = NULL;
+		ssize_t ssz;
+		size_t id;
+		pid_t pid;
+		int st;
+
+		pfd.events = POLLIN;
+		if (msgq.queued)
+			pfd.events |= POLLOUT;
+
 		if (ppoll(&pfd, 1, NULL, &oldmask) == -1) {
 			if (errno != EINTR)
 				err(1, "ppoll");
@@ -248,6 +199,7 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 			 */
 
 			while ((pid = waitpid(WAIT_ANY, &st, WNOHANG)) > 0) {
+				struct ibuf *b;
 				int ok = 1;
 
 				for (i = 0; i < idsz; i++)
@@ -265,8 +217,13 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 					ok = 0;
 				}
 
-				io_simple_write(fd, &ids[i].id, sizeof(size_t));
-				io_simple_write(fd, &ok, sizeof(ok));
+				b = ibuf_open(sizeof(size_t) + sizeof(ok));
+				if (b == NULL)
+					err(1, NULL);
+				io_simple_buffer(b, &ids[i].id, sizeof(size_t));
+				io_simple_buffer(b, &ok, sizeof(ok));
+				ibuf_close(&msgq, b);
+
 				free(ids[i].uri);
 				ids[i].uri = NULL;
 				ids[i].pid = 0;
@@ -276,6 +233,18 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 				err(1, "waitpid");
 			continue;
 		}
+
+		if (pfd.revents & POLLOUT) {
+			switch (msgbuf_write(&msgq)) {
+			case 0:
+				errx(1, "write: connection closed");
+			case -1:
+				err(1, "write");
+			}
+		}
+
+		if (!(pfd.revents & POLLIN))
+			continue;
 
 		/*
 		 * Read til the parent exits.
@@ -289,25 +258,10 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 
 		/* Read host and module. */
 
-		io_str_read(fd, &host);
-		io_str_read(fd, &mod);
-
-		/*
-		 * Create source and destination locations.
-		 * Build up the tree to this point because GPL rsync(1)
-		 * will not build the destination for us.
-		 */
-
-		if (mkdir(host, 0700) == -1 && EEXIST != errno)
-			err(1, "%s", host);
-
-		if (asprintf(&dst, "%s/%s", host, mod) == -1)
-			err(1, NULL);
-		if (mkdir(dst, 0700) == -1 && EEXIST != errno)
-			err(1, "%s", dst);
-
-		if (asprintf(&uri, "rsync://%s/%s", host, mod) == -1)
-			err(1, NULL);
+		io_str_read(fd, &dst);
+		io_str_read(fd, &uri);
+		assert(dst);
+		assert(uri);
 
 		/* Run process itself, wait for exit, check error. */
 
@@ -315,11 +269,16 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 			err(1, "fork");
 
 		if (pid == 0) {
+			char *args[32];
+
 			if (pledge("stdio exec", NULL) == -1)
 				err(1, "pledge");
 			i = 0;
 			args[i++] = (char *)prog;
 			args[i++] = "-rt";
+			args[i++] = "--no-motd";
+			args[i++] = "--timeout";
+			args[i++] = "180";
 			if (bind_addr != NULL) {
 				args[i++] = "--address";
 				args[i++] = (char *)bind_addr;
@@ -327,6 +286,7 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 			args[i++] = uri;
 			args[i++] = dst;
 			args[i] = NULL;
+			/* XXX args overflow not prevented */
 			execvp(args[0], args);
 			err(1, "%s: execvp", prog);
 		}
@@ -349,9 +309,7 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 
 		/* Clean up temporary values. */
 
-		free(mod);
 		free(dst);
-		free(host);
 	}
 
 	/* No need for these to be hanging around. */
@@ -361,7 +319,7 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 			free(ids[i].uri);
 		}
 
+	msgbuf_clear(&msgq);
 	free(ids);
 	exit(rc);
-	/* NOTREACHED */
 }

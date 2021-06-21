@@ -1,6 +1,6 @@
 define(MACHINE,powerpc64)dnl
 vers(__file__,
-	{-$OpenBSD: MAKEDEV.md,v 1.6 2020/10/24 21:10:41 kettenis Exp $-},
+	{-$OpenBSD: MAKEDEV.md,v 1.8 2021/02/12 10:26:34 jsg Exp $-},
 etc.MACHINE)dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
@@ -52,6 +52,7 @@ _DEV(uall)
 _DEV(ugen, 49)
 _DEV(uhid, 50)
 _DEV(fido, 51)
+_DEV(ujoy, 94)
 _DEV(ulpt, 65)
 _DEV(usb, 48)
 _TITLE(spec)
@@ -59,6 +60,7 @@ _DEV(au, 32)
 _DEV(bio, 80)
 _DEV(bpf, 9)
 _DEV(diskmap, 10)
+_DEV(dri, 87)
 _DEV(drm, 87)
 _DEV(dt, 13)
 _DEV(fdesc, 8)
@@ -102,6 +104,7 @@ twrget(all, au, audio, 0, 1, 2, 3)dnl
 target(all, bio)dnl
 target(all, cd, 0, 1)dnl
 target(all, diskmap)dnl
+target(all, dri)dnl
 target(all, drm, 0, 1, 2, 3)dnl
 target(all, ipmi, 0)dnl
 target(all, pty, 0)dnl

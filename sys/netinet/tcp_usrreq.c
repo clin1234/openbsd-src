@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_usrreq.c,v 1.177 2020/11/02 04:29:23 gnezdo Exp $	*/
+/*	$OpenBSD: tcp_usrreq.c,v 1.181 2021/04/30 13:52:48 bluhm Exp $	*/
 /*	$NetBSD: tcp_usrreq.c,v 1.20 1996/02/13 23:44:16 christos Exp $	*/
 
 /*
@@ -110,7 +110,9 @@ u_int	tcp_sendspace = TCP_SENDSPACE;
 u_int	tcp_recvspace = TCP_RECVSPACE;
 u_int	tcp_autorcvbuf_inc = 16 * 1024;
 
+static int pr_slowhz = PR_SLOWHZ;
 const struct sysctl_bounded_args tcpctl_vars[] = {
+	{ TCPCTL_SLOWHZ, &pr_slowhz, SYSCTL_INT_READONLY },
 	{ TCPCTL_RFC1323, &tcp_do_rfc1323, 0, 1 },
 	{ TCPCTL_KEEPINITTIME, &tcptv_keep_init, 1, 3 * TCPTV_KEEP_INIT },
 	{ TCPCTL_KEEPIDLE, &tcp_keepidle, 1, 5 * TCPTV_KEEP_IDLE },
@@ -997,9 +999,6 @@ tcp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (ENOTDIR);
 
 	switch (name[0]) {
-	case TCPCTL_SLOWHZ:
-		return (sysctl_rdint(oldp, oldlenp, newp, PR_SLOWHZ));
-
 	case TCPCTL_BADDYNAMIC:
 		NET_LOCK();
 		error = sysctl_struct(oldp, oldlenp, newp, newlen,
@@ -1057,8 +1056,8 @@ tcp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 
 	case TCPCTL_SYN_USE_LIMIT:
 		NET_LOCK();
-		error = sysctl_int(oldp, oldlenp, newp, newlen,
-		    &tcp_syn_use_limit);
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+		    &tcp_syn_use_limit, 0, INT_MAX);
 		if (!error && newp != NULL) {
 			/*
 			 * Global tcp_syn_use_limit is used when reseeding a
@@ -1075,22 +1074,19 @@ tcp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	case TCPCTL_SYN_HASH_SIZE:
 		NET_LOCK();
 		nval = tcp_syn_hash_size;
-		error = sysctl_int(oldp, oldlenp, newp, newlen, &nval);
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+		    &nval, 1, 100000);
 		if (!error && nval != tcp_syn_hash_size) {
-			if (nval < 1 || nval > 100000) {
-				error = EINVAL;
-			} else {
-				/*
-				 * If global hash size has been changed,
-				 * switch sets as soon as possible.  Then
-				 * the actual hash array will be reallocated.
-				 */
-				if (tcp_syn_cache[0].scs_size != nval)
-					tcp_syn_cache[0].scs_use = 0;
-				if (tcp_syn_cache[1].scs_size != nval)
-					tcp_syn_cache[1].scs_use = 0;
-				tcp_syn_hash_size = nval;
-			}
+			/*
+			 * If global hash size has been changed,
+			 * switch sets as soon as possible.  Then
+			 * the actual hash array will be reallocated.
+			 */
+			if (tcp_syn_cache[0].scs_size != nval)
+				tcp_syn_cache[0].scs_use = 0;
+			if (tcp_syn_cache[1].scs_size != nval)
+				tcp_syn_cache[1].scs_use = 0;
+			tcp_syn_hash_size = nval;
 		}
 		NET_UNLOCK();
 		return (error);
@@ -1108,7 +1104,7 @@ tcp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 /*
  * Scale the send buffer so that inflight data is not accounted against
  * the limit. The buffer will scale with the congestion window, if the
- * the receiver stops acking data the window will shrink and therefor
+ * the receiver stops acking data the window will shrink and therefore
  * the buffer size will shrink as well.
  * In low memory situation try to shrink the buffer to the initial size
  * disabling the send buffer scaling as long as the situation persists.

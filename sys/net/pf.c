@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf.c,v 1.1094 2020/07/24 18:17:15 mvs Exp $ */
+/*	$OpenBSD: pf.c,v 1.1118 2021/06/01 09:57:11 dlg Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -1122,12 +1122,6 @@ pf_find_state(struct pf_pdesc *pd, struct pf_state_key_cmp *key,
 	}
 
 	*state = s;
-	if (pd->dir == PF_OUT && s->rt_kif != NULL && s->rt_kif != pd->kif &&
-	    ((s->rule.ptr->rt == PF_ROUTETO &&
-	    s->rule.ptr->direction == PF_OUT) ||
-	    (s->rule.ptr->rt == PF_REPLYTO &&
-	    s->rule.ptr->direction == PF_IN)))
-		return (PF_PASS);
 
 	return (PF_MATCH);
 }
@@ -1186,7 +1180,8 @@ pf_state_export(struct pfsync_state *sp, struct pf_state *st)
 
 	/* copy from state */
 	strlcpy(sp->ifname, st->kif->pfik_name, sizeof(sp->ifname));
-	memcpy(&sp->rt_addr, &st->rt_addr, sizeof(sp->rt_addr));
+	sp->rt = st->rt;
+	sp->rt_addr = st->rt_addr;
 	sp->creation = htonl(getuptime() - st->creation);
 	expire = pf_state_expires(st);
 	if (expire <= getuptime())
@@ -1340,7 +1335,7 @@ pf_purge_expired_src_nodes(void)
 	PF_ASSERT_LOCKED();
 
 	for (cur = RB_MIN(pf_src_tree, &tree_src_tracking); cur; cur = next) {
-	next = RB_NEXT(pf_src_tree, &tree_src_tracking, cur);
+		next = RB_NEXT(pf_src_tree, &tree_src_tracking, cur);
 
 		if (cur->states == 0 && cur->expire <= getuptime()) {
 			next = RB_NEXT(pf_src_tree, &tree_src_tracking, cur);
@@ -1409,6 +1404,10 @@ pf_remove_divert_state(struct pf_state_key *sk)
 {
 	struct pf_state_item	*si;
 
+	PF_ASSERT_UNLOCKED();
+
+	PF_LOCK();
+	PF_STATE_ENTER_WRITE();
 	TAILQ_FOREACH(si, &sk->states, entry) {
 		if (sk == si->s->key[PF_SK_STACK] && si->s->rule.ptr &&
 		    (si->s->rule.ptr->divert.type == PF_DIVERT_TO ||
@@ -1417,6 +1416,8 @@ pf_remove_divert_state(struct pf_state_key *sk)
 			break;
 		}
 	}
+	PF_STATE_EXIT_WRITE();
+	PF_UNLOCK();
 }
 
 void
@@ -3081,7 +3082,10 @@ pf_match_tag(struct mbuf *m, struct pf_rule *r, int *tag)
 int
 pf_match_rcvif(struct mbuf *m, struct pf_rule *r)
 {
-	struct ifnet *ifp, *ifp0;
+	struct ifnet *ifp;
+#if NCARP > 0
+	struct ifnet *ifp0;
+#endif
 	struct pfi_kif *kif;
 
 	ifp = if_get(m->m_pkthdr.ph_ifidx);
@@ -3147,7 +3151,7 @@ pf_step_into_anchor(struct pf_test_ctx *ctx, struct pf_rule *r)
 	} else {
 		rv = pf_match_rule(ctx, &r->anchor->ruleset);
 		/*
-		 * Unless errors occured, stop iff any rule matched
+		 * Unless errors occurred, stop iff any rule matched
 		 * within quick anchors.
 		 */
 		if (rv != PF_TEST_FAIL && r->quick == PF_TEST_QUICK &&
@@ -3433,29 +3437,13 @@ pf_set_rt_ifp(struct pf_state *s, struct pf_addr *saddr, sa_family_t af,
 	struct pf_rule *r = s->rule.ptr;
 	int	rv;
 
-	s->rt_kif = NULL;
 	if (!r->rt)
 		return (0);
 
-	switch (af) {
-	case AF_INET:
-		rv = pf_map_addr(AF_INET, r, saddr, &s->rt_addr, NULL, sns,
-		    &r->route, PF_SN_ROUTE);
-		break;
-#ifdef INET6
-	case AF_INET6:
-		rv = pf_map_addr(AF_INET6, r, saddr, &s->rt_addr, NULL, sns,
-		    &r->route, PF_SN_ROUTE);
-		break;
-#endif /* INET6 */
-	default:
-		rv = 1;
-	}
-
-	if (rv == 0) {
-		s->rt_kif = r->route.kif;
-		s->natrule.ptr = r;
-	}
+	rv = pf_map_addr(af, r, saddr, &s->rt_addr, NULL, sns,
+	    &r->route, PF_SN_ROUTE);
+	if (rv == 0)
+		s->rt = r->rt;
 
 	return (rv);
 }
@@ -3953,20 +3941,6 @@ pf_test_rule(struct pf_pdesc *pd, struct pf_rule **rm, struct pf_state **sm,
 		m_copyback(pd->m, pd->off, pd->hdrlen, &pd->hdr, M_NOWAIT);
 	}
 
-#if NPFSYNC > 0
-	if (*sm != NULL && !ISSET((*sm)->state_flags, PFSTATE_NOSYNC) &&
-	    pd->dir == PF_OUT && pfsync_up()) {
-		/*
-		 * We want the state created, but we dont
-		 * want to send this in case a partner
-		 * firewall has to know about it to allow
-		 * replies through it.
-		 */
-		if (pfsync_defer(*sm, pd->m))
-			return (PF_DEFER);
-	}
-#endif	/* NPFSYNC > 0 */
-
 	if (r->rule_flag & PFRULE_ONCE) {
 		u_int32_t	rule_flag;
 
@@ -3982,6 +3956,20 @@ pf_test_rule(struct pf_pdesc *pd, struct pf_rule **rm, struct pf_state **sm,
 			SLIST_INSERT_HEAD(&pf_rule_gcl, r, gcle);
 		}
 	}
+
+#if NPFSYNC > 0
+	if (*sm != NULL && !ISSET((*sm)->state_flags, PFSTATE_NOSYNC) &&
+	    pd->dir == PF_OUT && pfsync_up()) {
+		/*
+		 * We want the state created, but we dont
+		 * want to send this in case a partner
+		 * firewall has to know about it to allow
+		 * replies through it.
+		 */
+		if (pfsync_defer(*sm, pd->m))
+			return (PF_DEFER);
+	}
+#endif	/* NPFSYNC > 0 */
 
 	return (action);
 
@@ -4161,7 +4149,7 @@ pf_create_state(struct pf_pdesc *pd, struct pf_rule *r, struct pf_rule *a,
 		s->tag = tag;
 	}
 	if (pd->proto == IPPROTO_TCP && (th->th_flags & (TH_SYN|TH_ACK)) ==
-	    TH_SYN && r->keep_state == PF_STATE_SYNPROXY) {
+	    TH_SYN && r->keep_state == PF_STATE_SYNPROXY && pd->dir == PF_IN) {
 		int rtid = pd->rdomain;
 		if (act->rtableid >= 0)
 			rtid = act->rtableid;
@@ -4200,11 +4188,6 @@ pf_translate(struct pf_pdesc *pd, struct pf_addr *saddr, u_int16_t sport,
     struct pf_addr *daddr, u_int16_t dport, u_int16_t virtual_type,
     int icmp_dir)
 {
-	/*
-	 * when called from bpf_mtap_pflog, there are extra constraints:
-	 * -mbuf is faked, m_data is the bpf buffer
-	 * -pd is not fully set up
-	 */
 	int	rewrite = 0;
 	int	afto = pd->af != pd->naf;
 
@@ -4219,18 +4202,17 @@ pf_translate(struct pf_pdesc *pd, struct pf_addr *saddr, u_int16_t sport,
 		break;
 
 	case IPPROTO_ICMP:
-		/* pf_translate() is also used when logging invalid packets */
 		if (pd->af != AF_INET)
 			return (0);
 
-		if (afto) {
 #ifdef INET6
+		if (afto) {
 			if (pf_translate_icmp_af(pd, AF_INET6, &pd->hdr.icmp))
 				return (0);
 			pd->proto = IPPROTO_ICMPV6;
 			rewrite = 1;
-#endif /* INET6 */
 		}
+#endif /* INET6 */
 		if (virtual_type == htons(ICMP_ECHO)) {
 			u_int16_t icmpid = (icmp_dir == PF_IN) ? sport : dport;
 			rewrite += pf_patch_16(pd,
@@ -4240,7 +4222,6 @@ pf_translate(struct pf_pdesc *pd, struct pf_addr *saddr, u_int16_t sport,
 
 #ifdef INET6
 	case IPPROTO_ICMPV6:
-		/* pf_translate() is also used when logging invalid packets */
 		if (pd->af != AF_INET6)
 			return (0);
 
@@ -5986,15 +5967,14 @@ pf_rtlabel_match(struct pf_addr *addr, sa_family_t af, struct pf_addr_wrap *aw,
 
 /* pf_route() may change pd->m, adjust local copies after calling */
 void
-pf_route(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
+pf_route(struct pf_pdesc *pd, struct pf_state *s)
 {
-	struct mbuf		*m0, *m1;
+	struct mbuf		*m0;
+	struct mbuf_list	 fml;
 	struct sockaddr_in	*dst, sin;
 	struct rtentry		*rt = NULL;
 	struct ip		*ip;
 	struct ifnet		*ifp = NULL;
-	struct pf_addr		 naddr;
-	struct pf_src_node	*sns[PF_SN_MAX];
 	int			 error = 0;
 	unsigned int		 rtableid;
 
@@ -6004,13 +5984,14 @@ pf_route(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
 		return;
 	}
 
-	if (r->rt == PF_DUPTO) {
+	if (s->rt == PF_DUPTO) {
 		if ((m0 = m_dup_pkt(pd->m, max_linkhdr, M_NOWAIT)) == NULL)
 			return;
 	} else {
-		if ((r->rt == PF_REPLYTO) == (r->direction == pd->dir))
+		if ((s->rt == PF_REPLYTO) == (s->direction == pd->dir))
 			return;
 		m0 = pd->m;
+		pd->m = NULL;
 	}
 
 	if (m0->m_len < sizeof(struct ip)) {
@@ -6021,48 +6002,45 @@ pf_route(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
 
 	ip = mtod(m0, struct ip *);
 
-	memset(&sin, 0, sizeof(sin));
-	dst = &sin;
-	dst->sin_family = AF_INET;
-	dst->sin_len = sizeof(*dst);
-	dst->sin_addr = ip->ip_dst;
-	rtableid = m0->m_pkthdr.ph_rtableid;
-
 	if (pd->dir == PF_IN) {
 		if (ip->ip_ttl <= IPTTLDEC) {
-			if (r->rt != PF_DUPTO)
+			if (s->rt != PF_DUPTO) {
 				pf_send_icmp(m0, ICMP_TIMXCEED,
 				    ICMP_TIMXCEED_INTRANS, 0,
-				    pd->af, r, pd->rdomain);
+				    pd->af, s->rule.ptr, pd->rdomain);
+			}
 			goto bad;
 		}
 		ip->ip_ttl -= IPTTLDEC;
 	}
 
-	if (s == NULL) {
-		memset(sns, 0, sizeof(sns));
-		if (pf_map_addr(AF_INET, r,
-		    (struct pf_addr *)&ip->ip_src,
-		    &naddr, NULL, sns, &r->route, PF_SN_ROUTE)) {
-			DPFPRINTF(LOG_ERR,
-			    "%s: pf_map_addr() failed", __func__);
-			goto bad;
-		}
+	memset(&sin, 0, sizeof(sin));
+	dst = &sin;
+	dst->sin_family = AF_INET;
+	dst->sin_len = sizeof(*dst);
+	dst->sin_addr = s->rt_addr.v4;
+	rtableid = m0->m_pkthdr.ph_rtableid;
 
-		if (!PF_AZERO(&naddr, AF_INET))
-			dst->sin_addr.s_addr = naddr.v4.s_addr;
-		ifp = r->route.kif ?
-		    r->route.kif->pfik_ifp : NULL;
-	} else {
-		if (!PF_AZERO(&s->rt_addr, AF_INET))
-			dst->sin_addr.s_addr =
-			    s->rt_addr.v4.s_addr;
-		ifp = s->rt_kif ? s->rt_kif->pfik_ifp : NULL;
+	rt = rtalloc_mpath(sintosa(dst), &ip->ip_src.s_addr, rtableid);
+	if (!rtisvalid(rt)) {
+		if (s->rt != PF_DUPTO) {
+			pf_send_icmp(m0, ICMP_UNREACH, ICMP_UNREACH_HOST,
+			    0, pd->af, s->rule.ptr, pd->rdomain);
+		}
+		ipstat_inc(ips_noroute);
+		goto bad;
 	}
+
+	ifp = if_get(rt->rt_ifidx);
 	if (ifp == NULL)
 		goto bad;
 
-	if (pd->kif->pfik_ifp != ifp) {
+	/* A locally generated packet may have invalid source address. */
+	if ((ntohl(ip->ip_src.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET &&
+	    (ifp->if_flags & IFF_LOOPBACK) == 0)
+		ip->ip_src = ifatoia(rt->rt_ifa)->ia_addr.sin_addr;
+
+	if (s->rt != PF_DUPTO && pd->dir == PF_IN) {
 		if (pf_test(AF_INET, PF_OUT, ifp, &m0) != PF_PASS)
 			goto bad;
 		else if (m0 == NULL)
@@ -6074,16 +6052,6 @@ pf_route(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
 		}
 		ip = mtod(m0, struct ip *);
 	}
-
-	rt = rtalloc(sintosa(dst), RT_RESOLVE, rtableid);
-	if (!rtisvalid(rt)) {
-		ipstat_inc(ips_noroute);
-		goto bad;
-	}
-	/* A locally generated packet may have invalid source address. */
-	if ((ntohl(ip->ip_src.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET &&
-	    (ifp->if_flags & IFF_LOOPBACK) == 0)
-		ip->ip_src = ifatoia(rt->rt_ifa)->ia_addr.sin_addr;
 
 	in_proto_cksum_out(m0, ifp);
 
@@ -6105,34 +6073,28 @@ pf_route(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
 	 */
 	if (ip->ip_off & htons(IP_DF)) {
 		ipstat_inc(ips_cantfrag);
-		if (r->rt != PF_DUPTO)
+		if (s->rt != PF_DUPTO)
 			pf_send_icmp(m0, ICMP_UNREACH, ICMP_UNREACH_NEEDFRAG,
-			    ifp->if_mtu, pd->af, r, pd->rdomain);
+			    ifp->if_mtu, pd->af, s->rule.ptr, pd->rdomain);
 		goto bad;
 	}
 
-	m1 = m0;
-	error = ip_fragment(m0, ifp, ifp->if_mtu);
-	if (error) {
-		m0 = NULL;
-		goto bad;
-	}
+	error = ip_fragment(m0, &fml, ifp, ifp->if_mtu);
+	if (error)
+		goto done;
 
-	for (m0 = m1; m0; m0 = m1) {
-		m1 = m0->m_nextpkt;
-		m0->m_nextpkt = 0;
-		if (error == 0)
-			error = ifp->if_output(ifp, m0, sintosa(dst), rt);
-		else
-			m_freem(m0);
+	while ((m0 = ml_dequeue(&fml)) != NULL) {
+		error = ifp->if_output(ifp, m0, sintosa(dst), rt);
+		if (error)
+			break;
 	}
-
-	if (error == 0)
+	if (error)
+		ml_purge(&fml);
+	else
 		ipstat_inc(ips_fragmented);
 
 done:
-	if (r->rt != PF_DUPTO)
-		pd->m = NULL;
+	if_put(ifp);
 	rtfree(rt);
 	return;
 
@@ -6144,15 +6106,13 @@ bad:
 #ifdef INET6
 /* pf_route6() may change pd->m, adjust local copies after calling */
 void
-pf_route6(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
+pf_route6(struct pf_pdesc *pd, struct pf_state *s)
 {
 	struct mbuf		*m0;
 	struct sockaddr_in6	*dst, sin6;
 	struct rtentry		*rt = NULL;
 	struct ip6_hdr		*ip6;
 	struct ifnet		*ifp = NULL;
-	struct pf_addr		 naddr;
-	struct pf_src_node	*sns[PF_SN_MAX];
 	struct m_tag		*mtag;
 	unsigned int		 rtableid;
 
@@ -6162,13 +6122,14 @@ pf_route6(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
 		return;
 	}
 
-	if (r->rt == PF_DUPTO) {
+	if (s->rt == PF_DUPTO) {
 		if ((m0 = m_dup_pkt(pd->m, max_linkhdr, M_NOWAIT)) == NULL)
 			return;
 	} else {
-		if ((r->rt == PF_REPLYTO) == (r->direction == pd->dir))
+		if ((s->rt == PF_REPLYTO) == (s->direction == pd->dir))
 			return;
 		m0 = pd->m;
+		pd->m = NULL;
 	}
 
 	if (m0->m_len < sizeof(struct ip6_hdr)) {
@@ -6178,46 +6139,47 @@ pf_route6(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
 	}
 	ip6 = mtod(m0, struct ip6_hdr *);
 
-	memset(&sin6, 0, sizeof(sin6));
-	dst = &sin6;
-	dst->sin6_family = AF_INET6;
-	dst->sin6_len = sizeof(*dst);
-	dst->sin6_addr = ip6->ip6_dst;
-	rtableid = m0->m_pkthdr.ph_rtableid;
-
 	if (pd->dir == PF_IN) {
 		if (ip6->ip6_hlim <= IPV6_HLIMDEC) {
-			if (r->rt != PF_DUPTO)
+			if (s->rt != PF_DUPTO) {
 				pf_send_icmp(m0, ICMP6_TIME_EXCEEDED,
 				    ICMP6_TIME_EXCEED_TRANSIT, 0,
-				    pd->af, r, pd->rdomain);
+				    pd->af, s->rule.ptr, pd->rdomain);
+			}
 			goto bad;
 		}
 		ip6->ip6_hlim -= IPV6_HLIMDEC;
 	}
 
-	if (s == NULL) {
-		memset(sns, 0, sizeof(sns));
-		if (pf_map_addr(AF_INET6, r, (struct pf_addr *)&ip6->ip6_src,
-		    &naddr, NULL, sns, &r->route, PF_SN_ROUTE)) {
-			DPFPRINTF(LOG_ERR,
-			    "%s: pf_map_addr() failed", __func__);
-			goto bad;
+	memset(&sin6, 0, sizeof(sin6));
+	dst = &sin6;
+	dst->sin6_family = AF_INET6;
+	dst->sin6_len = sizeof(*dst);
+	dst->sin6_addr = s->rt_addr.v6;
+	rtableid = m0->m_pkthdr.ph_rtableid;
+
+	rt = rtalloc_mpath(sin6tosa(dst), &ip6->ip6_src.s6_addr32[0],
+	    rtableid);
+	if (!rtisvalid(rt)) {
+		if (s->rt != PF_DUPTO) {
+			pf_send_icmp(m0, ICMP6_DST_UNREACH,
+			    ICMP6_DST_UNREACH_NOROUTE, 0,
+			    pd->af, s->rule.ptr, pd->rdomain);
 		}
-		if (!PF_AZERO(&naddr, AF_INET6))
-			pf_addrcpy((struct pf_addr *)&dst->sin6_addr,
-			    &naddr, AF_INET6);
-		ifp = r->route.kif ? r->route.kif->pfik_ifp : NULL;
-	} else {
-		if (!PF_AZERO(&s->rt_addr, AF_INET6))
-			pf_addrcpy((struct pf_addr *)&dst->sin6_addr,
-			    &s->rt_addr, AF_INET6);
-		ifp = s->rt_kif ? s->rt_kif->pfik_ifp : NULL;
+		ip6stat_inc(ip6s_noroute);
+		goto bad;
 	}
+
+	ifp = if_get(rt->rt_ifidx);
 	if (ifp == NULL)
 		goto bad;
 
-	if (pd->kif->pfik_ifp != ifp) {
+	/* A locally generated packet may have invalid source address. */
+	if (IN6_IS_ADDR_LOOPBACK(&ip6->ip6_src) &&
+	    (ifp->if_flags & IFF_LOOPBACK) == 0)
+		ip6->ip6_src = ifatoia6(rt->rt_ifa)->ia_addr.sin6_addr;
+
+	if (s->rt != PF_DUPTO && pd->dir == PF_IN) {
 		if (pf_test(AF_INET6, PF_OUT, ifp, &m0) != PF_PASS)
 			goto bad;
 		else if (m0 == NULL)
@@ -6228,18 +6190,6 @@ pf_route6(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
 			goto bad;
 		}
 	}
-
-	if (IN6_IS_SCOPE_EMBED(&dst->sin6_addr))
-		dst->sin6_addr.s6_addr16[1] = htons(ifp->if_index);
-	rt = rtalloc(sin6tosa(dst), RT_RESOLVE, rtableid);
-	if (!rtisvalid(rt)) {
-		ip6stat_inc(ip6s_noroute);
-		goto bad;
-	}
-	/* A locally generated packet may have invalid source address. */
-	if (IN6_IS_ADDR_LOOPBACK(&ip6->ip6_src) &&
-	    (ifp->if_flags & IFF_LOOPBACK) == 0)
-		ip6->ip6_src = ifatoia6(rt->rt_ifa)->ia_addr.sin6_addr;
 
 	in6_proto_cksum_out(m0, ifp);
 
@@ -6253,15 +6203,14 @@ pf_route6(struct pf_pdesc *pd, struct pf_rule *r, struct pf_state *s)
 		ifp->if_output(ifp, m0, sin6tosa(dst), rt);
 	} else {
 		ip6stat_inc(ip6s_cantfrag);
-		if (r->rt != PF_DUPTO)
+		if (s->rt != PF_DUPTO)
 			pf_send_icmp(m0, ICMP6_PACKET_TOO_BIG, 0,
-			    ifp->if_mtu, pd->af, r, pd->rdomain);
+			    ifp->if_mtu, pd->af, s->rule.ptr, pd->rdomain);
 		goto bad;
 	}
 
 done:
-	if (r->rt != PF_DUPTO)
-		pd->m = NULL;
+	if_put(ifp);
 	rtfree(rt);
 	return;
 
@@ -6270,7 +6219,6 @@ bad:
 	goto done;
 }
 #endif /* INET6 */
-
 
 /*
  * check TCP checksum and set mbuf flag
@@ -6855,7 +6803,9 @@ pf_counters_inc(int action, struct pf_pdesc *pd, struct pf_state *s,
 int
 pf_test(sa_family_t af, int fwdir, struct ifnet *ifp, struct mbuf **m0)
 {
+#if NCARP > 0
 	struct ifnet		*ifp0;
+#endif
 	struct pfi_kif		*kif;
 	u_short			 action, reason = 0;
 	struct pf_rule		*a = NULL, *r = &pf_default_rule;
@@ -6894,8 +6844,10 @@ pf_test(sa_family_t af, int fwdir, struct ifnet *ifp, struct mbuf **m0)
 	if ((*m0)->m_pkthdr.pf.flags & PF_TAG_GENERATED)
 		return (PF_PASS);
 
-	if ((*m0)->m_pkthdr.pf.flags & PF_TAG_DIVERTED_PACKET)
+	if ((*m0)->m_pkthdr.pf.flags & PF_TAG_DIVERTED_PACKET) {
+		(*m0)->m_pkthdr.pf.flags &= ~PF_TAG_DIVERTED_PACKET;
 		return (PF_PASS);
+	}
 
 	if ((*m0)->m_pkthdr.pf.flags & PF_TAG_REFRAGMENTED) {
 		(*m0)->m_pkthdr.pf.flags &= ~PF_TAG_REFRAGMENTED;
@@ -6986,7 +6938,7 @@ pf_test(sa_family_t af, int fwdir, struct ifnet *ifp, struct mbuf **m0)
 		PF_STATE_EXIT_READ();
 		if (action == PF_PASS || action == PF_AFRT) {
 #if NPFSYNC > 0
-			pfsync_update_state(s, &have_pf_lock);
+			pfsync_update_state(s);
 #endif /* NPFSYNC > 0 */
 			r = s->rule.ptr;
 			a = s->anchor.ptr;
@@ -7018,7 +6970,7 @@ pf_test(sa_family_t af, int fwdir, struct ifnet *ifp, struct mbuf **m0)
 		PF_STATE_EXIT_READ();
 		if (action == PF_PASS || action == PF_AFRT) {
 #if NPFSYNC > 0
-			pfsync_update_state(s, &have_pf_lock);
+			pfsync_update_state(s);
 #endif /* NPFSYNC > 0 */
 			r = s->rule.ptr;
 			a = s->anchor.ptr;
@@ -7094,7 +7046,7 @@ pf_test(sa_family_t af, int fwdir, struct ifnet *ifp, struct mbuf **m0)
 
 		if (action == PF_PASS || action == PF_AFRT) {
 #if NPFSYNC > 0
-			pfsync_update_state(s, &have_pf_lock);
+			pfsync_update_state(s);
 #endif /* NPFSYNC > 0 */
 			r = s->rule.ptr;
 			a = s->anchor.ptr;
@@ -7183,8 +7135,10 @@ done:
 		pf_state_key_link_inpcb(s->key[PF_SK_STACK],
 		    pd.m->m_pkthdr.pf.inp);
 
-	if (s && (pd.m->m_pkthdr.csum_flags & M_FLOWID) == 0)
+	if (s != NULL && !ISSET(pd.m->m_pkthdr.csum_flags, M_FLOWID)) {
 		pd.m->m_pkthdr.ph_flowid = bemtoh64(&s->id);
+		SET(pd.m->m_pkthdr.csum_flags, M_FLOWID);
+	}
 
 	/*
 	 * connections redirected to loopback should not match sockets
@@ -7266,20 +7220,32 @@ done:
 		pd.m->m_pkthdr.pf.flags |= PF_TAG_GENERATED;
 		switch (pd.naf) {
 		case AF_INET:
-			if (pd.dir == PF_IN)
+			if (pd.dir == PF_IN) {
+				if (ipforwarding == 0) {
+					ipstat_inc(ips_cantforward);
+					action = PF_DROP;
+					break;
+				}
 				ip_forward(pd.m, ifp, NULL, 1);
-			else
+			} else
 				ip_output(pd.m, NULL, NULL, 0, NULL, NULL, 0);
 			break;
 		case AF_INET6:
-			if (pd.dir == PF_IN)
+			if (pd.dir == PF_IN) {
+				if (ip6_forwarding == 0) {
+					ip6stat_inc(ip6s_cantforward);
+					action = PF_DROP;
+					break;
+				}
 				ip6_forward(pd.m, NULL, 1);
-			else
+			} else
 				ip6_output(pd.m, NULL, NULL, 0, NULL, NULL);
 			break;
 		}
-		pd.m = NULL;
-		action = PF_PASS;
+		if (action != PF_DROP) {
+			pd.m = NULL;
+			action = PF_PASS;
+		}
 		break;
 #endif /* INET6 */
 	case PF_DROP:
@@ -7287,14 +7253,14 @@ done:
 		pd.m = NULL;
 		break;
 	default:
-		if (r->rt) {
+		if (s && s->rt) {
 			switch (pd.af) {
 			case AF_INET:
-				pf_route(&pd, r, s);
+				pf_route(&pd, s);
 				break;
 #ifdef INET6
 			case AF_INET6:
-				pf_route6(&pd, r, s);
+				pf_route6(&pd, s);
 				break;
 #endif /* INET6 */
 			}
@@ -7402,11 +7368,26 @@ pf_inp_unlink(struct inpcb *inp)
 void
 pf_state_key_link_reverse(struct pf_state_key *sk, struct pf_state_key *skrev)
 {
-	/* Note that sk and skrev may be equal, then we refcount twice. */
-	KASSERT(sk->reverse == NULL);
-	KASSERT(skrev->reverse == NULL);
-	sk->reverse = pf_state_key_ref(skrev);
-	skrev->reverse = pf_state_key_ref(sk);
+	struct pf_state_key *old_reverse;
+
+	old_reverse = atomic_cas_ptr(&sk->reverse, NULL, skrev);
+	if (old_reverse != NULL)
+		KASSERT(old_reverse == skrev);
+	else {
+		pf_state_key_ref(skrev);
+
+		/*
+		 * NOTE: if sk == skrev, then KASSERT() below holds true, we
+		 * still want to grab a reference in such case, because
+		 * pf_state_key_unlink_reverse() does not check whether keys
+		 * are identical or not.
+		 */
+		old_reverse = atomic_cas_ptr(&skrev->reverse, NULL, sk);
+		if (old_reverse != NULL)
+			KASSERT(old_reverse == sk);
+
+		pf_state_key_ref(sk);
+	}
 }
 
 #if NPFLOG > 0

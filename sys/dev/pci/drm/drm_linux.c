@@ -1,4 +1,4 @@
-/*	$OpenBSD: drm_linux.c,v 1.66 2020/11/09 23:53:30 jsg Exp $	*/
+/*	$OpenBSD: drm_linux.c,v 1.79 2021/04/11 15:30:51 kettenis Exp $	*/
 /*
  * Copyright (c) 2013 Jonathan Gray <jsg@openbsd.org>
  * Copyright (c) 2015, 2016 Mark Kettenis <kettenis@openbsd.org>
@@ -109,15 +109,15 @@ long
 schedule_timeout(long timeout)
 {
 	struct sleep_state sls;
-	long deadline;
-	int wait, spl;
+	unsigned long deadline;
+	int wait, spl, timo = 0;
 
 	MUTEX_ASSERT_LOCKED(&sch_mtx);
 	KASSERT(!cold);
 
-	sleep_setup(&sls, sch_ident, sch_priority, "schto");
 	if (timeout != MAX_SCHEDULE_TIMEOUT)
-		sleep_setup_timeout(&sls, timeout);
+		timo = timeout;
+	sleep_setup(&sls, sch_ident, sch_priority, "schto", timo);
 
 	wait = (sch_proc == curproc && timeout > 0);
 
@@ -125,13 +125,11 @@ schedule_timeout(long timeout)
 	MUTEX_OLDIPL(&sch_mtx) = splsched();
 	mtx_leave(&sch_mtx);
 
-	sleep_setup_signal(&sls);
-
 	if (timeout != MAX_SCHEDULE_TIMEOUT)
-		deadline = ticks + timeout;
-	sleep_finish_all(&sls, wait);
+		deadline = jiffies + timeout;
+	sleep_finish(&sls, wait);
 	if (timeout != MAX_SCHEDULE_TIMEOUT)
-		timeout = deadline - ticks;
+		timeout = deadline - jiffies;
 
 	mtx_enter(&sch_mtx);
 	MUTEX_OLDIPL(&sch_mtx) = spl;
@@ -160,7 +158,8 @@ flush_workqueue(struct workqueue_struct *wq)
 	if (cold)
 		return;
 
-	taskq_barrier((struct taskq *)wq);
+	if (wq)
+		taskq_barrier((struct taskq *)wq);
 }
 
 bool
@@ -169,7 +168,8 @@ flush_work(struct work_struct *work)
 	if (cold)
 		return false;
 
-	taskq_barrier(work->tq);
+	if (work->tq)
+		taskq_barrier(work->tq);
 	return false;
 }
 
@@ -186,7 +186,8 @@ flush_delayed_work(struct delayed_work *dwork)
 		ret = true;
 	}
 
-	taskq_barrier(dwork->tq ? dwork->tq : (struct taskq *)system_wq);
+	if (dwork->tq)
+		taskq_barrier(dwork->tq);
 	return ret;
 }
 
@@ -564,7 +565,7 @@ memchr_inv(const void *s, int c, size_t n)
 		do {
 			if (*p++ != (unsigned char)c)
 				return ((void *)(p - 1));
-		}while (--n != 0);
+		} while (--n != 0);
 	}
 	return (NULL);
 }
@@ -597,13 +598,6 @@ struct idr_entry *idr_entry_cache;
 void
 idr_init(struct idr *idr)
 {
-	static int initialized;
-
-	if (!initialized) {
-		pool_init(&idr_pool, sizeof(struct idr_entry), 0, IPL_TTY, 0,
-		    "idrpl", NULL);
-		initialized = 1;
-	}
 	SPLAY_INIT(&idr->tree);
 }
 
@@ -630,8 +624,7 @@ idr_preload(unsigned int gfp_mask)
 }
 
 int
-idr_alloc(struct idr *idr, void *ptr, int start, int end,
-    unsigned int gfp_mask)
+idr_alloc(struct idr *idr, void *ptr, int start, int end, gfp_t gfp_mask)
 {
 	int flags = (gfp_mask & GFP_NOWAIT) ? PR_NOWAIT : PR_WAITOK;
 	struct idr_entry *id;
@@ -657,8 +650,10 @@ idr_alloc(struct idr *idr, void *ptr, int start, int end,
 	id->id = begin = start;
 #endif
 	while (SPLAY_INSERT(idr_tree, &idr->tree, id)) {
-		if (++id->id == end)
+		if (id->id == end)
 			id->id = start;
+		else
+			id->id++;
 		if (id->id == begin) {
 			pool_put(&idr_pool, id);
 			return -ENOSPC;
@@ -669,7 +664,7 @@ idr_alloc(struct idr *idr, void *ptr, int start, int end,
 }
 
 void *
-idr_replace(struct idr *idr, void *ptr, int id)
+idr_replace(struct idr *idr, void *ptr, unsigned long id)
 {
 	struct idr_entry find, *res;
 	void *old;
@@ -684,7 +679,7 @@ idr_replace(struct idr *idr, void *ptr, int id)
 }
 
 void *
-idr_remove(struct idr *idr, int id)
+idr_remove(struct idr *idr, unsigned long id)
 {
 	struct idr_entry find, *res;
 	void *ptr = NULL;
@@ -700,7 +695,7 @@ idr_remove(struct idr *idr, int id)
 }
 
 void *
-idr_find(struct idr *idr, int id)
+idr_find(struct idr *idr, unsigned long id)
 {
 	struct idr_entry find, *res;
 
@@ -752,38 +747,26 @@ SPLAY_GENERATE(idr_tree, idr_entry, entry, idr_cmp);
 void
 ida_init(struct ida *ida)
 {
-	ida->counter = 0;
+	idr_init(&ida->idr);
 }
 
 void
 ida_destroy(struct ida *ida)
 {
-}
-
-void
-ida_remove(struct ida *ida, int id)
-{
+	idr_destroy(&ida->idr);
 }
 
 int
 ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
-    int flags)
+    gfp_t gfp_mask)
 {
-	if (end <= 0)
-		end = INT_MAX;
-
-	if (start > ida->counter)
-		ida->counter = start;
-
-	if (ida->counter >= end)
-		return -ENOSPC;
-
-	return ida->counter++;
+	return idr_alloc(&ida->idr, NULL, start, end, gfp_mask);
 }
 
 void
-ida_simple_remove(struct ida *ida, int id)
+ida_simple_remove(struct ida *ida, unsigned int id)
 {
+	idr_remove(&ida->idr, id);
 }
 
 int
@@ -838,8 +821,10 @@ xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
 	xid->id = begin = start;
 
 	while (SPLAY_INSERT(xarray_tree, &xa->xa_tree, xid)) {
-		if (++xid->id == limit)
+		if (xid->id == limit)
 			xid->id = start;
+		else
+			xid->id++;
 		if (xid->id == begin) {
 			pool_put(&xa_pool, xid);
 			return -EBUSY;
@@ -909,6 +894,7 @@ sg_free_table(struct sg_table *table)
 {
 	free(table->sgl, M_DRM,
 	    table->orig_nents * sizeof(struct scatterlist));
+	table->sgl = NULL;
 }
 
 size_t
@@ -1340,9 +1326,12 @@ long
 dma_fence_default_wait(struct dma_fence *fence, bool intr, signed long timeout)
 {
 	long ret = timeout ? timeout : 1;
+	unsigned long end;
 	int err;
 	struct default_wait_cb cb;
 	bool was_set;
+
+	KASSERT(timeout <= INT_MAX);
 
 	if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags))
 		return ret;
@@ -1371,14 +1360,14 @@ dma_fence_default_wait(struct dma_fence *fence, bool intr, signed long timeout)
 	cb.proc = curproc;
 	list_add(&cb.base.node, &fence->cb_list);
 
-	while (!test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags)) {
-		err = msleep(curproc, fence->lock, intr ? PCATCH : 0, "dmafence",
-		    timeout);
+	end = jiffies + timeout;
+	for (ret = timeout; ret > 0; ret = MAX(0, end - jiffies)) {
+		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags))
+			break;
+		err = msleep(curproc, fence->lock, intr ? PCATCH : 0,
+		    "dmafence", ret);
 		if (err == EINTR || err == ERESTART) {
 			ret = -ERESTARTSYS;
-			break;
-		} else if (err == EWOULDBLOCK) {
-			ret = 0;
 			break;
 		}
 	}
@@ -1413,8 +1402,11 @@ dma_fence_wait_any_timeout(struct dma_fence **fences, uint32_t count,
     bool intr, long timeout, uint32_t *idx)
 {
 	struct default_wait_cb *cb;
+	long ret = timeout;
+	unsigned long end;
 	int i, err;
-	int ret = timeout;
+
+	KASSERT(timeout <= INT_MAX);
 
 	if (timeout == 0) {
 		for (i = 0; i < count; i++) {
@@ -1442,17 +1434,13 @@ dma_fence_wait_any_timeout(struct dma_fence **fences, uint32_t count,
 		}
 	}
 
-	while (ret > 0) {
+	end = jiffies + timeout;
+	for (ret = timeout; ret > 0; ret = MAX(0, end - jiffies)) {
 		if (dma_fence_test_signaled_any(fences, count, idx))
 			break;
-
-		err = tsleep(curproc, intr ? PCATCH : 0,
-		    "dfwat", timeout);
+		err = tsleep(curproc, intr ? PCATCH : 0, "dfwat", ret);
 		if (err == EINTR || err == ERESTART) {
 			ret = -ERESTARTSYS;
-			break;
-		} else if (err == EWOULDBLOCK) {
-			ret = 0;
 			break;
 		}
 	}
@@ -1772,13 +1760,19 @@ get_dma_buf(struct dma_buf *dmabuf)
 enum pci_bus_speed
 pcie_get_speed_cap(struct pci_dev *pdev)
 {
-	pci_chipset_tag_t	pc = pdev->pc;
-	pcitag_t		tag = pdev->tag;
+	pci_chipset_tag_t	pc;
+	pcitag_t		tag;
 	int			pos ;
 	pcireg_t		xcap, lnkcap = 0, lnkcap2 = 0;
 	pcireg_t		id;
 	enum pci_bus_speed	cap = PCI_SPEED_UNKNOWN;
 	int			bus, device, function;
+
+	if (pdev == NULL)
+		return PCI_SPEED_UNKNOWN;
+
+	pc = pdev->pc;
+	tag = pdev->tag;
 
 	if (!pci_get_capability(pc, tag, PCI_CAP_PCIEXPRESS,
 	    &pos, NULL)) 
@@ -1850,20 +1844,12 @@ pcie_get_width_cap(struct pci_dev *pdev)
 }
 
 int
-default_wake_function(struct wait_queue_entry *wqe, unsigned int mode,
+autoremove_wake_function(struct wait_queue_entry *wqe, unsigned int mode,
     int sync, void *key)
 {
 	wakeup(wqe);
 	if (wqe->proc)
 		wake_up_process(wqe->proc);
-	return 0;
-}
-
-int
-autoremove_wake_function(struct wait_queue_entry *wqe, unsigned int mode,
-    int sync, void *key)
-{
-	default_wake_function(wqe, mode, sync, key);
 	list_del_init(&wqe->entry);
 	return 0;
 }
@@ -1944,28 +1930,35 @@ struct taskq *taskletq;
 void
 drm_linux_init(void)
 {
-	if (system_wq == NULL) {
-		system_wq = (struct workqueue_struct *)
-		    taskq_create("drmwq", 4, IPL_HIGH, 0);
-	}
-	if (system_highpri_wq == NULL) {
-		system_highpri_wq = (struct workqueue_struct *)
-		    taskq_create("drmhpwq", 4, IPL_HIGH, 0);
-	}
-	if (system_unbound_wq == NULL) {
-		system_unbound_wq = (struct workqueue_struct *)
-		    taskq_create("drmubwq", 4, IPL_HIGH, 0);
-	}
-	if (system_long_wq == NULL) {
-		system_long_wq = (struct workqueue_struct *)
-		    taskq_create("drmlwq", 4, IPL_HIGH, 0);
-	}
+	system_wq = (struct workqueue_struct *)
+	    taskq_create("drmwq", 4, IPL_HIGH, 0);
+	system_highpri_wq = (struct workqueue_struct *)
+	    taskq_create("drmhpwq", 4, IPL_HIGH, 0);
+	system_unbound_wq = (struct workqueue_struct *)
+	    taskq_create("drmubwq", 4, IPL_HIGH, 0);
+	system_long_wq = (struct workqueue_struct *)
+	    taskq_create("drmlwq", 4, IPL_HIGH, 0);
 
-	if (taskletq == NULL)
-		taskletq = taskq_create("drmtskl", 1, IPL_HIGH, 0);
+	taskletq = taskq_create("drmtskl", 1, IPL_HIGH, 0);
 
 	init_waitqueue_head(&bit_waitq);
 	init_waitqueue_head(&var_waitq);
+
+	pool_init(&idr_pool, sizeof(struct idr_entry), 0, IPL_TTY, 0,
+	    "idrpl", NULL);
+}
+
+void
+drm_linux_exit(void)
+{
+	pool_destroy(&idr_pool);
+
+	taskq_destroy(taskletq);
+
+	taskq_destroy((struct taskq *)system_long_wq);
+	taskq_destroy((struct taskq *)system_unbound_wq);
+	taskq_destroy((struct taskq *)system_highpri_wq);
+	taskq_destroy((struct taskq *)system_wq);
 }
 
 #define PCIE_ECAP_RESIZE_BAR	0x15

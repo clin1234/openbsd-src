@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.72 2020/10/29 21:49:58 tobhe Exp $	*/
+/*	$OpenBSD: config.c,v 1.79 2021/05/13 15:20:48 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -84,8 +84,7 @@ config_free_kex(struct iked_kex *kex)
 	ibuf_release(kex->kex_inonce);
 	ibuf_release(kex->kex_rnonce);
 
-	if (kex->kex_dhgroup != NULL)
-		group_free(kex->kex_dhgroup);
+	group_free(kex->kex_dhgroup);
 	ibuf_release(kex->kex_dhiexchange);
 	ibuf_release(kex->kex_dhrexchange);
 
@@ -118,6 +117,7 @@ config_free_sa(struct iked *env, struct iked_sa *sa)
 	config_free_fragments(&sa->sa_fragments);
 	config_free_proposals(&sa->sa_proposals, 0);
 	config_free_childsas(env, &sa->sa_childsas, NULL, NULL);
+	sa_configure_iface(env, sa, 0);
 	sa_free_flows(env, &sa->sa_flows);
 
 	if (sa->sa_addrpool) {
@@ -140,8 +140,7 @@ config_free_sa(struct iked *env, struct iked_sa *sa)
 	ibuf_release(sa->sa_inonce);
 	ibuf_release(sa->sa_rnonce);
 
-	if (sa->sa_dhgroup != NULL)
-		group_free(sa->sa_dhgroup);
+	group_free(sa->sa_dhgroup);
 	ibuf_release(sa->sa_dhiexchange);
 	ibuf_release(sa->sa_dhrexchange);
 
@@ -259,6 +258,15 @@ config_add_proposal(struct iked_proposals *head, unsigned int id,
 }
 
 void
+config_free_proposal(struct iked_proposals *head, struct iked_proposal *prop)
+{
+	TAILQ_REMOVE(head, prop, prop_entry);
+	if (prop->prop_nxforms)
+		free(prop->prop_xforms);
+	free(prop);
+}
+
+void
 config_free_proposals(struct iked_proposals *head, unsigned int proto)
 {
 	struct iked_proposal	*prop, *proptmp;
@@ -270,10 +278,7 @@ config_free_proposals(struct iked_proposals *head, unsigned int proto)
 
 		log_debug("%s: free %p", __func__, prop);
 
-		TAILQ_REMOVE(head, prop, prop_entry);
-		if (prop->prop_nxforms)
-			free(prop->prop_xforms);
-		free(prop);
+		config_free_proposal(head, prop);
 	}
 }
 
@@ -326,7 +331,7 @@ config_free_childsas(struct iked *env, struct iked_childsas *head,
 	}
 }
 
-struct iked_transform *
+int
 config_add_transform(struct iked_proposal *prop, unsigned int type,
     unsigned int id, unsigned int length, unsigned int keylength)
 {
@@ -353,7 +358,7 @@ config_add_transform(struct iked_proposal *prop, unsigned int type,
 		break;
 	default:
 		log_debug("%s: invalid transform type %d", __func__, type);
-		return (NULL);
+		return (-2);
 	}
 
 	for (i = 0; i < prop->prop_nxforms; i++) {
@@ -361,7 +366,7 @@ config_add_transform(struct iked_proposal *prop, unsigned int type,
 		if (xform->xform_type == type &&
 		    xform->xform_id == id &&
 		    xform->xform_length == length)
-			return (xform);
+			return (0);
 	}
 
 	for (i = 0; i < prop->prop_nxforms; i++) {
@@ -384,7 +389,7 @@ config_add_transform(struct iked_proposal *prop, unsigned int type,
 
 	if ((xform = reallocarray(prop->prop_xforms,
 	    prop->prop_nxforms + 1, sizeof(*xform))) == NULL) {
-		return (NULL);
+		return (-1);
 	}
 
 	prop->prop_xforms = xform;
@@ -398,11 +403,11 @@ config_add_transform(struct iked_proposal *prop, unsigned int type,
 	xform->xform_score = score;
 	xform->xform_map = map;
 
-	return (xform);
+	return (0);
 }
 
 struct iked_transform *
-config_findtransform(struct iked_proposals *props, uint8_t type,
+config_findtransform_ext(struct iked_proposals *props, uint8_t type, int id,
     unsigned int proto)
 {
 	struct iked_proposal	*prop;
@@ -416,12 +421,22 @@ config_findtransform(struct iked_proposals *props, uint8_t type,
 			continue;
 		for (i = 0; i < prop->prop_nxforms; i++) {
 			xform = prop->prop_xforms + i;
+			/* optional lookup of specific transform */
+			if (id >= 0 && xform->xform_id != id)
+				continue;
 			if (xform->xform_type == type)
 				return (xform);
 		}
 	}
 
 	return (NULL);
+}
+
+struct iked_transform *
+config_findtransform(struct iked_proposals *props, uint8_t type,
+    unsigned int proto)
+{
+	return config_findtransform_ext(props, type, -1, proto);
 }
 
 struct iked_user *
@@ -509,13 +524,20 @@ config_setreset(struct iked *env, unsigned int mode, enum privsep_procid id)
 int
 config_getreset(struct iked *env, struct imsg *imsg)
 {
-	struct iked_policy	*pol, *poltmp;
-	struct iked_sa		*sa;
-	struct iked_user	*usr;
 	unsigned int		 mode;
 
 	IMSG_SIZE_CHECK(imsg, &mode);
 	memcpy(&mode, imsg->data, sizeof(mode));
+
+	return (config_doreset(env, mode));
+}
+
+int
+config_doreset(struct iked *env, unsigned int mode)
+{
+	struct iked_policy	*pol, *poltmp;
+	struct iked_sa		*sa;
+	struct iked_user	*usr;
 
 	if (mode == RESET_ALL || mode == RESET_POLICY) {
 		log_debug("%s: flushing policies", __func__);
@@ -612,13 +634,13 @@ config_getsocket(struct iked *env, struct imsg *imsg,
 }
 
 int
-config_setpfkey(struct iked *env, enum privsep_procid id)
+config_setpfkey(struct iked *env)
 {
 	int	 s;
 
 	if ((s = pfkey_socket()) == -1)
 		return (-1);
-	proc_compose_imsg(&env->sc_ps, id, -1,
+	proc_compose_imsg(&env->sc_ps, PROC_IKEV2, -1,
 	    IMSG_PFKEY_SOCKET, -1, s, NULL, 0);
 	return (0);
 }
@@ -772,7 +794,7 @@ config_getpolicy(struct iked *env, struct imsg *imsg)
 
 			if (config_add_transform(prop, xf.xform_type,
 			    xf.xform_id, xf.xform_length,
-			    xf.xform_keylength) == NULL)
+			    xf.xform_keylength) != 0)
 				fatal("config_getpolicy: add transform");
 		}
 	}
@@ -874,6 +896,8 @@ config_getstatic(struct iked *env, struct imsg *imsg)
 	log_debug("%s: %sfragmentation", __func__, env->sc_frag ? "" : "no ");
 	log_debug("%s: %smobike", __func__, env->sc_mobike ? "" : "no ");
 	log_debug("%s: nattport %u", __func__, env->sc_nattport);
+	log_debug("%s: %sstickyaddress", __func__,
+	    env->sc_stickyaddress ? "" : "no ");
 
 	return (0);
 }
