@@ -1,4 +1,4 @@
-/*	$OpenBSD: fdisk.c,v 1.110 2021/06/21 02:05:30 krw Exp $	*/
+/*	$OpenBSD: fdisk.c,v 1.113 2021/06/25 19:24:53 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -16,7 +16,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
+#include <sys/param.h>	/* DEV_BSIZE */
 #include <sys/disklabel.h>
 
 #include <err.h>
@@ -62,6 +62,7 @@ main(int argc, char *argv[])
 {
 	ssize_t len;
 	int ch, fd, efi, error;
+	unsigned int bps;
 	int e_flag = 0, g_flag = 0, i_flag = 0, u_flag = 0;
 	int verbosity = TERSE;
 	int c_arg = 0, h_arg = 0, s_arg = 0;
@@ -123,13 +124,13 @@ main(int argc, char *argv[])
 			parse_b(optarg, &b_sectors, &b_offset, &b_type);
 			break;
 		case 'l':
-			l_arg = strtonum(optarg, 64, UINT32_MAX, &errstr);
+			l_arg = strtonum(optarg, BLOCKALIGNMENT, UINT32_MAX, &errstr);
 			if (errstr)
-				errx(1, "Block argument %s [64..%u].", errstr,
-				    UINT32_MAX);
-			disk.cylinders = l_arg / 64;
+				errx(1, "Block argument %s [%u..%u].", errstr,
+				    BLOCKALIGNMENT, UINT32_MAX);
+			disk.cylinders = l_arg / BLOCKALIGNMENT;
 			disk.heads = 1;
-			disk.sectors = 64;
+			disk.sectors = BLOCKALIGNMENT;
 			disk.size = l_arg;
 			break;
 		case 'y':
@@ -155,6 +156,24 @@ main(int argc, char *argv[])
 
 	disk.name = argv[0];
 	DISK_open(A_flag || i_flag || u_flag || e_flag);
+	bps = DL_BLKSPERSEC(&dl);
+	if (b_sectors > 0) {
+		if (b_sectors % bps != 0)
+			b_sectors += bps - b_sectors % bps;
+		if (b_offset % bps != 0)
+			b_offset += bps - b_offset % bps;
+		b_sectors = DL_BLKTOSEC(&dl, b_sectors);
+		b_offset = DL_BLKTOSEC(&dl, b_offset);
+	}
+	if (l_arg > 0) {
+		if (l_arg % bps != 0)
+			l_arg += bps - l_arg % bps;
+		l_arg = DL_BLKTOSEC(&dl, l_arg);
+		disk.cylinders = l_arg / BLOCKALIGNMENT;
+		disk.heads = 1;
+		disk.sectors = BLOCKALIGNMENT;
+		disk.size = l_arg;
+	}
 
 	/* "proc exec" for man page display */
 	if (pledge("stdio rpath wpath disklabel proc exec", NULL) == -1)
