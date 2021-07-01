@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore.S,v 1.8 2021/06/26 17:38:40 kettenis Exp $	*/
+/*	$OpenBSD: locore.S,v 1.12 2021/06/29 21:27:53 kettenis Exp $	*/
 
 /*-
  * Copyright (c) 2015-2018 Ruslan Bukin <br@bsdpad.com>
@@ -47,15 +47,12 @@
 	.globl	kernbase
 	.set	kernbase, KERNBASE
 
-	/* Trap entries */
-	.text
-
 	/* Reset vector */
 	.text
 	.globl _start_kern_bootstrap
 _start_kern_bootstrap:
 
-		/* Set the global pointer */
+	/* Set the global pointer */
 .option push
 .option norelax
 	lla	gp, __global_pointer$
@@ -68,37 +65,18 @@ _start_kern_bootstrap:
 	li	t2, KERNBASE	//KERNBASE is virtual addr
 	sub	s9, t2, t1	//s9 = physmem base of kernel
 
-	//registers passed by bbl.
 	/*
-	 * a0 = hart id
-	 * a1 = dtbp
+	 * EFIBOOT passes:
+	 * a0 = esym
+	 * a1 = 0
+	 * a2 = dtb
 	 */
 
-	bnez a1, 1f
-	// no dtb, we assume we were booted via efiboot
 	la t0, esym
 	add a3, a0, t1
 	sd a3, 0(t0)
-	li a0, 0
 	mv a1, a2
 
-1:
-	/* Pick a hart to run the boot process. */
-	lla	t0, hart_lottery
-	li	t1, 1
-	//atomic memory operation, read-modify-write:
-	//only the first hart can read 0 and modify it to 1,
-	//all other harts will read 1.
-	amoadd.w t2, t1, (t0)
-
-	/*
-	 * We must jump to mpentry in the non-BSP case because the offset is
-	 * too large to fit in a 12-bit branch immediate.
-	 */
-	beqz	t2, 1f
-	j	mpentry
-
-1:	//only one hart(which just won the lottery) runs the main boot procedure.
 	/*
 	 * Page tables
 	 */
@@ -193,7 +171,7 @@ _start_kern_bootstrap:
 	lla	s1, pagetable_l2_devmap
 
 	//calc PTE based on pa
-	mv	s2, a1			//passed by bbl
+	mv	s2, a1			//dtb
 	li	t0, 0xffffffffffe00000
 	and	s2, s2, t0
 	srli	s2, s2, PAGE_SHIFT	//12
@@ -238,7 +216,6 @@ va:
 	sd	x0, (s8)	// s8 is addr of pte for identity mapped kernel
 	sfence.vma		// Flush the TLB. Goodbye identity mapped kernel!
 
-
 	/* Setup supervisor trap vector */
 	la	t0, cpu_exception_handler
 	csrw	stvec, t0
@@ -261,10 +238,6 @@ va:
 	sd	zero, 0(s0)
 	addi	s0, s0, 8
 	bltu	s0, s1, 1b
-
-	/* Store boot hart id. */
-	la	t0, boot_hart	//the hart we booted on.
-	sw	a0, 0(t0)	//all above logic runs on this a0 hart.
 
 	/* Fill riscv_bootparams */
 	addi	sp, sp, -RISCV_BOOTPARAMS_SIZEOF
@@ -289,6 +262,17 @@ va:
 	mv	a0, sp			//stack setup, can call C now!
 	call	_C_LABEL(initriscv)	// Off we go, defined in machdep.c
 	call	_C_LABEL(main)		//defined in openbsd/kern/init_main.c
+
+/*
+ * Get the physical address the kernel is loaded to. Returned in s9.
+ */
+get_physmem:
+	lla	t0, virt_map	/* physical address of virt_map */
+	ld	t1, 0(t0)	/* virtual address of virt_map */
+	sub	t1, t1, t0	/* calculate phys->virt delta */
+	li	t2, KERNBASE
+	sub	s9, t2, t1	/* s9 = physmem base */
+	ret
 
 	.data
 	.align	4
@@ -317,8 +301,6 @@ _C_LABEL(sigcoderet):
 	li	t0, SYS_exit
 	ecall
 END(sigcode)
-	/* This may be copied to the stack, keep it 16-byte aligned */
-	.align	3
 	.globl _C_LABEL(esigcode)
 _C_LABEL(esigcode):
 
@@ -340,58 +322,37 @@ pagetable_l2_devmap:
 	.align 3
 virt_map:
 	.quad	virt_map
-hart_lottery:
-	.space	4
 
 	.globl init_pt_va
 init_pt_va:
 	.quad pagetable_l2	/* XXX: Keep page tables VA */
 
-#ifndef MULTIPROCESSOR
-ENTRY(mpentry)
-1:
-	wfi
-	j	1b
-END(mpentry)
-#else
-/*
- * mpentry(unsigned long)
- *
- * Called by a core / hart when it is being brought online.
- * XXX: [CMPE] This needs to be updated
- */
-ENTRY(mpentry)
-	/*
-	 * Calculate the offset to __riscv_boot_ap
-	 * for the current core, cpuid is in a0.
-	 */
-	li	t1, 4			//t1 = 4, each core occupies a word
-	mulw	t1, t1, a0		//t1 = a0*4, offset in Bytes for #a0 core
-	/* Get the pointer */
-	lla	t0, __riscv_boot_ap
-	add	t0, t0, t1		//t0 = starting addr for current core
+#ifdef MULTIPROCESSOR
 
-1:
-	/* Wait the kernel to be ready */
-	lw	t1, 0(t0)		//when kernel is ready, 0(t0) should NOT euqal 0
-	beqz	t1, 1b			//see __riscv_boot_ap
+	.text
+	.globl cpu_hatch
+cpu_hatch:
+	ld	tp, CI_SELF(a1)
+	ld	a2, CI_SATP(a1)
 
-	/* Setup stack pointer */	//now kernel is ready
-	lla	t0, secondary_stacks	//pa, size: #core x #pages/kernel x pg_size
-	li	t1, (PAGE_SIZE * KSTACK_PAGES)	// size of kernel stack for one core
-	mulw	t2, t1, a0			//offset for this hart
-	add	t0, t0, t2			//end of stack for this hart
-	add	t0, t0, t1			//start of stack for this hart
-	sub	t0, t0, s9			//s9 is phymem base, t0 is now relative addr
-	li	t1, KERNBASE			//t1 is virtual addr
-	add	sp, t0, t1			//now sp is set to the right virtual address.
+	/* Set the global pointer */
+.option push
+.option norelax
+	lla	gp, __global_pointer$
+.option pop
+
+	/* Setup stack pointer */
+	ld	sp, CI_INITSTACK_END(a1)
+
+	/* Get the kernel's load address */
+	jal	get_physmem
 
 	/* Setup supervisor trap vector */
-	lla	t0, mpva			//mpva is phymem addr of the handler array
-	sub	t0, t0, s9			//get the relative addr
+	lla	t0, mpva
+	sub	t0, t0, s9
 	li	t1, KERNBASE
-	add	t0, t0, t1			//get the virtual addr
-	csrw	stvec, t0			//set the CSR
+	add	t0, t0, t1
+	csrw	stvec, t0
 
 	/* Set page tables base register */
 	lla	s2, pagetable_l1
@@ -415,10 +376,12 @@ mpva:
 
 	/* Ensure sscratch is zero */
 	li	t0, 0
-	csrw	sscratch, t0		//Scratch Register for Supervisor Mode Trap Handler
+	csrw	sscratch, t0
 
-	call	init_secondary
-END(mpentry)
+	/* Switch to real kernel page tables */
+	csrw	satp, a2
+	sfence.vma
+
+	call	_C_LABEL(cpu_start_secondary)
+
 #endif
-
-

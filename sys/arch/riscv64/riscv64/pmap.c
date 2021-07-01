@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.12 2021/05/18 12:26:31 deraadt Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.15 2021/06/30 07:39:05 jsg Exp $	*/
 
 /*
  * Copyright (c) 2019-2020 Brian Bamsch <bbamsch@google.com>
@@ -29,6 +29,7 @@
 #include "machine/pmap.h"
 #include "machine/cpufunc.h"
 #include "machine/riscvreg.h"
+#include "machine/sbi.h"
 
 void pmap_set_satp(struct proc *);
 void pmap_free_asid(pmap_t);
@@ -44,6 +45,20 @@ void pmap_free_asid(pmap_t);
 static inline void
 tlb_flush(pmap_t pm, vaddr_t va)
 {
+#ifdef MULTIPROCESSOR
+	CPU_INFO_ITERATOR cii;
+	struct cpu_info *ci;
+	unsigned long hart_mask = 0;
+
+	CPU_INFO_FOREACH(cii, ci) {
+		if (ci == curcpu())
+			continue;
+		hart_mask |= (1UL << ci->ci_hartid);
+	}
+
+	sbi_remote_sfence_vma(&hart_mask, va, PAGE_SIZE);
+#endif
+
 	if (pm == pmap_kernel()) {
 		// Flush Translations for VA across all ASIDs
 		cpu_tlb_flush_page_all(va);
@@ -52,6 +67,26 @@ tlb_flush(pmap_t pm, vaddr_t va)
 		cpu_tlb_flush_page_asid(va, SATP_ASID(pm->pm_satp));
 		cpu_tlb_flush_page_asid(va, SATP_ASID(pm->pm_satp) | ASID_USER);
 	}
+}
+
+static inline void
+icache_flush(void)
+{
+#ifdef MULTIPROCESSOR
+	CPU_INFO_ITERATOR cii;
+	struct cpu_info *ci;
+	unsigned long hart_mask = 0;
+
+	CPU_INFO_FOREACH(cii, ci) {
+		if (ci == curcpu())
+			continue;
+		hart_mask |= (1UL << ci->ci_hartid);
+	}
+
+	sbi_remote_fence_i(&hart_mask);
+#endif
+
+	fence_i();
 }
 
 struct pmap kernel_pmap_;
@@ -518,7 +553,7 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 		need_sync = ((pg->pg_flags & PG_PMAP_EXE) == 0);
 		atomic_setbits_int(&pg->pg_flags, PG_PMAP_EXE);
 		if (need_sync)
-			fence_i();
+			icache_flush();
 	}
 
 	error = 0;
@@ -1570,7 +1605,7 @@ pmap_init(void)
 void
 pmap_proc_iflush(struct process *pr, vaddr_t va, vsize_t len)
 {
-	fence_i();
+	icache_flush();
 }
 
 void
@@ -1765,7 +1800,7 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, vm_prot_t ftype)
 		need_sync = ((pg->pg_flags & PG_PMAP_EXE) == 0);
 		atomic_setbits_int(&pg->pg_flags, PG_PMAP_EXE);
 		if (need_sync)
-			fence_i();
+			icache_flush();
 	}
 
 	retcode = 1;
