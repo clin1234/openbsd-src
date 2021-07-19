@@ -1,4 +1,4 @@
-/*	$OpenBSD: gpt.h,v 1.13 2021/06/28 19:50:30 krw Exp $	*/
+/*	$OpenBSD: gpt.h,v 1.17 2021/07/18 15:28:37 krw Exp $	*/
 /*
  * Copyright (c) 2015 Markus Muller <mmu@grummel.net>
  * Copyright (c) 2015 Kenneth R Westerback <krw@openbsd.org>
@@ -16,19 +16,19 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-void		GPT_read(int);
-int		GPT_get_lba_start(unsigned int);
-int		GPT_get_lba_end(unsigned int);
+int		GPT_read(const int);
+int		GPT_get_lba_start(const unsigned int);
+int		GPT_get_lba_end(const unsigned int);
 
-int		GPT_init(int, uint32_t);
+int		GPT_init(const int);
 int		GPT_write(void);
 void		GPT_zap_headers(void);
-void		GPT_print(char *, int);
-void		GPT_print_part(int, char *, int);
-void		GPT_print_parthdr(int);
+void		GPT_print(const char *, const int);
+void		GPT_print_part(const int, const char *, const int);
+void		GPT_print_parthdr(const int);
 
-extern struct gpt_header gh;
-extern struct gpt_partition gp[NGPTPARTITIONS];
+extern struct gpt_header	gh;
+extern struct gpt_partition	gp[NGPTPARTITIONS];
 
 #define	ANYGPT		0
 #define	PRIMARYGPT	1

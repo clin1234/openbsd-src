@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-new-session.c,v 1.136 2021/06/10 07:24:45 nicm Exp $ */
+/* $OpenBSD: cmd-new-session.c,v 1.138 2021/07/13 10:38:57 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -102,6 +102,11 @@ cmd_new_session_exec(struct cmd *self, struct cmdq_item *item)
 	if (tmp != NULL) {
 		name = format_single(item, tmp, c, NULL, NULL, NULL);
 		newname = session_check_name(name);
+		if (newname == NULL) {
+			cmdq_error(item, "invalid session: %s", name);
+			free(name);
+			return (CMD_RETURN_ERROR);
+		}
 		free(name);
 	}
 	if (args_has(args, 'A')) {
@@ -134,8 +139,14 @@ cmd_new_session_exec(struct cmd *self, struct cmdq_item *item)
 			prefix = xstrdup(sg->name);
 		else if (groupwith != NULL)
 			prefix = xstrdup(groupwith->name);
-		else
+		else {
 			prefix = session_check_name(group);
+			if (prefix == NULL) {
+				cmdq_error(item, "invalid session group: %s",
+				    group);
+				goto fail;
+			}
+		}
 	}
 
 	/* Set -d if no client. */
@@ -269,7 +280,8 @@ cmd_new_session_exec(struct cmd *self, struct cmdq_item *item)
 	memset(&sc, 0, sizeof sc);
 	sc.item = item;
 	sc.s = s;
-	sc.tc = c;
+	if (!detached)
+		sc.tc = c;
 
 	sc.name = args_get(args, 'n');
 	sc.argc = args->argc;

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.110 2020/12/22 06:03:36 djm Exp $
+#	$OpenBSD: Makefile,v 1.113 2021/07/19 02:46:34 dtucker Exp $
 
 .ifndef SKIP_UNIT
 SUBDIR=		unittests
@@ -12,6 +12,7 @@ REGRESS_TARGETS=	t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12
 
 LTESTS= 	connect \
 		proxy-connect \
+		sshfp-connect \
 		connect-privsep \
 		connect-uri \
 		proto-version \
@@ -35,8 +36,11 @@ LTESTS= 	connect \
 		agent-subprocess \
 		keyscan \
 		keygen-change \
+		keygen-comment \
 		keygen-convert \
+		keygen-knownhosts \
 		keygen-moduli \
+		keygen-sshfp \
 		key-options \
 		scp \
 		scp-uri \
@@ -75,7 +79,6 @@ LTESTS= 	connect \
 		multipubkey \
 		limit-keytype \
 		hostkey-agent \
-		keygen-knownhosts \
 		hostkey-rotate \
 		principals-command \
 		cert-file \
@@ -84,7 +87,6 @@ LTESTS= 	connect \
 		allow-deny-users \
 		authinfo \
 		sshsig \
-		keygen-comment \
 		knownhosts-command
 
 INTEROP_TESTS=	putty-transfer putty-ciphers putty-kex conch-ciphers

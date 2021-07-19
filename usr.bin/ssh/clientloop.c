@@ -1,4 +1,4 @@
-/* $OpenBSD: clientloop.c,v 1.364 2021/05/26 01:47:24 djm Exp $ */
+/* $OpenBSD: clientloop.c,v 1.367 2021/07/16 09:00:23 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -110,9 +110,6 @@ extern Options options;
 
 /* Flag indicating that stdin should be redirected from /dev/null. */
 extern int stdin_null_flag;
-
-/* Flag indicating that no shell has been requested */
-extern int no_shell_flag;
 
 /* Flag indicating that ssh should daemonise after authentication is complete */
 extern int fork_after_authentication_flag;
@@ -564,7 +561,7 @@ client_wait_until_can_do_something(struct ssh *ssh,
 			fatal_fr(r, "sshbuf_putf");
 		quit_pending = 1;
 	} else if (options.server_alive_interval > 0 && !FD_ISSET(connection_in,
-	     *readsetp) && monotime() >= server_alive_time)
+	    *readsetp) && monotime() >= server_alive_time)
 		/*
 		 * ServerAlive check is needed. We can't rely on the select
 		 * timing out since traffic on the client side such as port
@@ -1353,6 +1350,10 @@ client_loop(struct ssh *ssh, int have_pty, int escape_char_arg,
 		if (quit_pending)
 			break;
 
+		/* A timeout may have triggered rekeying */
+		if ((r = ssh_packet_check_rekey(ssh)) != 0)
+			fatal_fr(r, "cannot start rekeying");
+
 		/*
 		 * Send as much buffered packet data as possible to the
 		 * sender.
@@ -1402,7 +1403,7 @@ client_loop(struct ssh *ssh, int have_pty, int escape_char_arg,
 	 * exit status to be returned.  In that case, clear error code if the
 	 * connection was deliberately terminated at this end.
 	 */
-	if (no_shell_flag && received_signal == SIGTERM) {
+	if (options.session_type == SESSION_TYPE_NONE && received_signal == SIGTERM) {
 		received_signal = 0;
 		exit_status = 0;
 	}
@@ -2571,7 +2572,7 @@ client_stop_mux(void)
 	 * If we are in persist mode, or don't have a shell, signal that we
 	 * should close when all active channels are closed.
 	 */
-	if (options.control_persist || no_shell_flag) {
+	if (options.control_persist || options.session_type == SESSION_TYPE_NONE) {
 		session_closed = 1;
 		setproctitle("[stopped mux]");
 	}

@@ -1,4 +1,4 @@
-/* $OpenBSD: pfkeyv2.c,v 1.215 2021/05/30 21:01:27 bluhm Exp $ */
+/* $OpenBSD: pfkeyv2.c,v 1.218 2021/07/14 22:39:26 tobhe Exp $ */
 
 /*
  *	@(#)COPYRIGHT	1.1 (NRL) 17 January 1995
@@ -249,6 +249,8 @@ pfkey_init(void)
 	    IPL_SOFTNET, PR_WAITOK, "pkpcb", NULL);
 	pool_init(&ipsec_policy_pool, sizeof(struct ipsec_policy), 0,
 	    IPL_SOFTNET, 0, "ipsec policy", NULL);
+	pool_init(&ipsec_acquire_pool, sizeof(struct ipsec_acquire), 0,
+	    IPL_SOFTNET, 0, "ipsec acquire", NULL);
 }
 
 
@@ -859,6 +861,11 @@ pfkeyv2_get(struct tdb *tdb, void **headers, void **buffer, int *lenp,
 	if (tdb->tdb_udpencap_port)
 		i += sizeof(struct sadb_x_udpencap);
 
+	i += sizeof(struct sadb_x_replay);
+
+	if (tdb->tdb_mtu > 0)
+		i+= sizeof(struct sadb_x_mtu);
+
 	if (tdb->tdb_rdomain != tdb->tdb_rdomain_post)
 		i += sizeof(struct sadb_x_rdomain);
 
@@ -950,6 +957,14 @@ pfkeyv2_get(struct tdb *tdb, void **headers, void **buffer, int *lenp,
 	if (tdb->tdb_udpencap_port) {
 		headers[SADB_X_EXT_UDPENCAP] = p;
 		export_udpencap(&p, tdb);
+	}
+
+	headers[SADB_X_EXT_REPLAY] = p;
+	export_replay(&p, tdb);
+
+	if (tdb->tdb_mtu > 0) {
+		headers[SADB_X_EXT_MTU] = p;
+		export_mtu(&p, tdb);
 	}
 
 	/* Export rdomain switch, if present */

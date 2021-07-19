@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_iwx.c,v 1.62 2021/06/30 09:47:57 stsp Exp $	*/
+/*	$OpenBSD: if_iwx.c,v 1.69 2021/07/18 13:07:13 stsp Exp $	*/
 
 /*
  * Copyright (c) 2014, 2016 genua gmbh <info@genua.de>
@@ -248,7 +248,9 @@ int	iwx_firmware_store_section(struct iwx_softc *, enum iwx_ucode_type,
 int	iwx_set_default_calib(struct iwx_softc *, const void *);
 void	iwx_fw_info_free(struct iwx_fw_info *);
 int	iwx_read_firmware(struct iwx_softc *);
+uint32_t iwx_read_prph_unlocked(struct iwx_softc *, uint32_t);
 uint32_t iwx_read_prph(struct iwx_softc *, uint32_t);
+void	iwx_write_prph_unlocked(struct iwx_softc *, uint32_t, uint32_t);
 void	iwx_write_prph(struct iwx_softc *, uint32_t, uint32_t);
 int	iwx_read_mem(struct iwx_softc *, uint32_t, void *, int);
 int	iwx_write_mem(struct iwx_softc *, uint32_t, const void *, int);
@@ -287,6 +289,7 @@ void	iwx_apm_stop(struct iwx_softc *);
 int	iwx_allow_mcast(struct iwx_softc *);
 void	iwx_init_msix_hw(struct iwx_softc *);
 void	iwx_conf_msix_hw(struct iwx_softc *, int);
+int	iwx_clear_persistence_bit(struct iwx_softc *);
 int	iwx_start_hw(struct iwx_softc *);
 void	iwx_stop_device(struct iwx_softc *);
 void	iwx_nic_config(struct iwx_softc *);
@@ -407,6 +410,8 @@ int	iwx_rs_rval2idx(uint8_t);
 uint16_t iwx_rs_ht_rates(struct iwx_softc *, struct ieee80211_node *, int);
 int	iwx_rs_init(struct iwx_softc *, struct iwx_node *);
 int	iwx_enable_data_tx_queues(struct iwx_softc *);
+int	iwx_phy_ctxt_update(struct iwx_softc *, struct iwx_phy_ctxt *,
+	    struct ieee80211_channel *, uint8_t, uint8_t, uint32_t);
 int	iwx_auth(struct iwx_softc *);
 int	iwx_deauth(struct iwx_softc *);
 int	iwx_assoc(struct iwx_softc *);
@@ -1342,23 +1347,35 @@ iwx_read_firmware(struct iwx_softc *sc)
 }
 
 uint32_t
-iwx_read_prph(struct iwx_softc *sc, uint32_t addr)
+iwx_read_prph_unlocked(struct iwx_softc *sc, uint32_t addr)
 {
-	iwx_nic_assert_locked(sc);
 	IWX_WRITE(sc,
 	    IWX_HBUS_TARG_PRPH_RADDR, ((addr & 0x000fffff) | (3 << 24)));
 	IWX_BARRIER_READ_WRITE(sc);
 	return IWX_READ(sc, IWX_HBUS_TARG_PRPH_RDAT);
 }
 
-void
-iwx_write_prph(struct iwx_softc *sc, uint32_t addr, uint32_t val)
+uint32_t
+iwx_read_prph(struct iwx_softc *sc, uint32_t addr)
 {
 	iwx_nic_assert_locked(sc);
+	return iwx_read_prph_unlocked(sc, addr);
+}
+
+void
+iwx_write_prph_unlocked(struct iwx_softc *sc, uint32_t addr, uint32_t val)
+{
 	IWX_WRITE(sc,
 	    IWX_HBUS_TARG_PRPH_WADDR, ((addr & 0x000fffff) | (3 << 24)));
 	IWX_BARRIER_WRITE(sc);
 	IWX_WRITE(sc, IWX_HBUS_TARG_PRPH_WDAT, val);
+}
+
+void
+iwx_write_prph(struct iwx_softc *sc, uint32_t addr, uint32_t val)
+{
+	iwx_nic_assert_locked(sc);
+	iwx_write_prph_unlocked(sc, addr, val);
 }
 
 void
@@ -2214,12 +2231,36 @@ iwx_conf_msix_hw(struct iwx_softc *sc, int stopped)
 }
 
 int
+iwx_clear_persistence_bit(struct iwx_softc *sc)
+{
+	uint32_t hpm, wprot;
+
+	hpm = iwx_read_prph_unlocked(sc, IWX_HPM_DEBUG);
+	if (hpm != 0xa5a5a5a0 && (hpm & IWX_PERSISTENCE_BIT)) {
+		wprot = iwx_read_prph_unlocked(sc, IWX_PREG_PRPH_WPROT_22000);
+		if (wprot & IWX_PREG_WFPM_ACCESS) {
+			printf("%s: cannot clear persistence bit\n",
+			    DEVNAME(sc));
+			return EPERM;
+		}
+		iwx_write_prph_unlocked(sc, IWX_HPM_DEBUG,
+		    hpm & ~IWX_PERSISTENCE_BIT);
+	}
+
+	return 0;
+}
+
+int
 iwx_start_hw(struct iwx_softc *sc)
 {
 	int err;
 	int t = 0;
 
 	err = iwx_prepare_card_hw(sc);
+	if (err)
+		return err;
+
+	err = iwx_clear_persistence_bit(sc);
 	if (err)
 		return err;
 
@@ -5171,6 +5212,17 @@ iwx_add_sta_cmd(struct iwx_softc *sc, struct iwx_node *in, int update)
 		    |= htole32(IWX_STA_FLG_MAX_AGG_SIZE_MSK |
 		    IWX_STA_FLG_AGG_MPDU_DENS_MSK);
 
+		if (iwx_mimo_enabled(sc)) {
+			if (in->in_ni.ni_rxmcs[1] != 0) {
+				add_sta_cmd.station_flags |=
+				    htole32(IWX_STA_FLG_MIMO_EN_MIMO2);
+			}
+			if (in->in_ni.ni_rxmcs[2] != 0) {
+				add_sta_cmd.station_flags |=
+				    htole32(IWX_STA_FLG_MIMO_EN_MIMO3);
+			}
+		}
+
 		add_sta_cmd.station_flags
 		    |= htole32(IWX_STA_FLG_MAX_AGG_SIZE_64K);
 		switch (ic->ic_ampdu_params & IEEE80211_AMPDU_PARAM_SS) {
@@ -5282,7 +5334,12 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
 			chan->v1.iter_count = 1;
 			chan->v1.iter_interval = htole16(0);
 		}
-		if (n_ssids != 0 && !bgscan)
+		/*
+		 * Firmware may become unresponsive when asked to send
+		 * a directed probe request on a passive channel.
+		 */
+		if (n_ssids != 0 && !bgscan &&
+		    (c->ic_flags & IEEE80211_CHAN_PASSIVE) == 0)
 			chan->flags = htole32(1 << 0); /* select SSID 0 */
 		chan++;
 		nchan++;
@@ -6319,6 +6376,47 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
 }
 
 int
+iwx_phy_ctxt_update(struct iwx_softc *sc, struct iwx_phy_ctxt *phyctxt,
+    struct ieee80211_channel *chan, uint8_t chains_static,
+    uint8_t chains_dynamic, uint32_t apply_time)
+{
+	uint16_t band_flags = (IEEE80211_CHAN_2GHZ | IEEE80211_CHAN_5GHZ);
+	int err;
+
+	if (isset(sc->sc_enabled_capa,
+	    IWX_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT) &&
+	    (phyctxt->channel->ic_flags & band_flags) !=
+	    (chan->ic_flags & band_flags)) {
+		err = iwx_phy_ctxt_cmd(sc, phyctxt, chains_static,
+		    chains_dynamic, IWX_FW_CTXT_ACTION_REMOVE, apply_time);
+		if (err) {
+			printf("%s: could not remove PHY context "
+			    "(error %d)\n", DEVNAME(sc), err);
+			return err;
+		}
+		phyctxt->channel = chan;
+		err = iwx_phy_ctxt_cmd(sc, phyctxt, chains_static,
+		    chains_dynamic, IWX_FW_CTXT_ACTION_ADD, apply_time);
+		if (err) {
+			printf("%s: could not remove PHY context "
+			    "(error %d)\n", DEVNAME(sc), err);
+			return err;
+		}
+	} else {
+		phyctxt->channel = chan;
+		err = iwx_phy_ctxt_cmd(sc, phyctxt, chains_static,
+		    chains_dynamic, IWX_FW_CTXT_ACTION_MODIFY, apply_time);
+		if (err) {
+			printf("%s: could not update PHY context (error %d)\n",
+			    DEVNAME(sc), err);
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+int
 iwx_auth(struct iwx_softc *sc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
@@ -6328,16 +6426,16 @@ iwx_auth(struct iwx_softc *sc)
 
 	splassert(IPL_NET);
 
-	if (ic->ic_opmode == IEEE80211_M_MONITOR)
-		sc->sc_phyctxt[0].channel = ic->ic_ibss_chan;
-	else
-		sc->sc_phyctxt[0].channel = in->in_ni.ni_chan;
-	err = iwx_phy_ctxt_cmd(sc, &sc->sc_phyctxt[0], 1, 1,
-	    IWX_FW_CTXT_ACTION_MODIFY, 0);
-	if (err) {
-		printf("%s: could not update PHY context (error %d)\n",
-		    DEVNAME(sc), err);
-		return err;
+	if (ic->ic_opmode == IEEE80211_M_MONITOR) {
+		err = iwx_phy_ctxt_update(sc, &sc->sc_phyctxt[0],
+		    ic->ic_ibss_chan, 1, 1, 0);
+		if (err)
+			return err;
+	} else {
+		err = iwx_phy_ctxt_update(sc, &sc->sc_phyctxt[0],
+		    in->in_ni.ni_chan, 1, 1, 0);
+		if (err)
+			return err;
 	}
 	in->in_phyctxt = &sc->sc_phyctxt[0];
 
@@ -6461,6 +6559,12 @@ iwx_deauth(struct iwx_softc *sc)
 		sc->sc_flags &= ~IWX_FLAG_MAC_ACTIVE;
 	}
 
+	/* Move unused PHY context to a default channel. */
+	err = iwx_phy_ctxt_update(sc, &sc->sc_phyctxt[0],
+	    &ic->ic_channels[1], 1, 1, 0);
+	if (err)
+		return err;
+
 	return 0;
 }
 
@@ -6535,11 +6639,10 @@ iwx_run(struct iwx_softc *sc)
 	if ((ic->ic_opmode == IEEE80211_M_MONITOR ||
 	    (in->in_ni.ni_flags & IEEE80211_NODE_HT)) &&
 	    iwx_mimo_enabled(sc)) {
-		err = iwx_phy_ctxt_cmd(sc, &sc->sc_phyctxt[0],
-		    2, 2, IWX_FW_CTXT_ACTION_MODIFY, 0);
+		err = iwx_phy_ctxt_update(sc, &sc->sc_phyctxt[0],
+		    in->in_ni.ni_chan, 2, 2, 0);
 		if (err) {
-			printf("%s: failed to update PHY\n",
-			    DEVNAME(sc));
+			printf("%s: failed to update PHY\n", DEVNAME(sc));
 			return err;
 		}
 	}
@@ -6655,8 +6758,8 @@ iwx_run_stop(struct iwx_softc *sc)
 	/* Reset Tx chains in case MIMO was enabled. */
 	if ((in->in_ni.ni_flags & IEEE80211_NODE_HT) &&
 	    iwx_mimo_enabled(sc)) {
-		err = iwx_phy_ctxt_cmd(sc, &sc->sc_phyctxt[0], 1, 1,
-		    IWX_FW_CTXT_ACTION_MODIFY, 0);
+		err = iwx_phy_ctxt_update(sc, &sc->sc_phyctxt[0],
+		   in->in_ni.ni_chan, 1, 1, 0);
 		if (err) {
 			printf("%s: failed to update PHY\n", DEVNAME(sc));
 			return err;
@@ -6677,11 +6780,16 @@ iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
     struct ieee80211_key *k)
 {
 	struct iwx_softc *sc = ic->ic_softc;
+	struct iwx_node *in = (void *)ni;
 	struct iwx_setkey_task_arg *a;
+	int err;
 
 	if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
 		/* Fallback to software crypto for other ciphers. */
-		return (ieee80211_set_key(ic, ni, k));
+		err = ieee80211_set_key(ic, ni, k);
+		if (!err && (k->k_flags & IEEE80211_KEY_GROUP))
+			in->in_flags |= IWX_NODE_FLAG_HAVE_GROUP_KEY;
+		return err;
 	}
 
 	if (sc->setkey_nkeys >= nitems(sc->setkey_arg))
@@ -7148,7 +7256,8 @@ iwx_send_soc_conf(struct iwx_softc *sc)
 			    IWX_SOC_FLAGS_LTR_APPLY_DELAY_MASK);
 		scan_cmd_ver = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP,
 		    IWX_SCAN_REQ_UMAC);
-		if (scan_cmd_ver >= 2 && sc->sc_low_latency_xtal)
+		if (scan_cmd_ver != IWX_FW_CMD_VER_UNKNOWN &&
+		    scan_cmd_ver >= 2 && sc->sc_low_latency_xtal)
 			flags |= IWX_SOC_CONFIG_CMD_FLAGS_LOW_LATENCY;
 	}
 	cmd.flags = htole32(flags);
@@ -7295,9 +7404,11 @@ iwx_init_hw(struct iwx_softc *sc)
 	if (err)
 		return err;
 
-	err = iwx_send_dqa_cmd(sc);
-	if (err)
-		return err;
+	if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_DQA_SUPPORT)) {
+		err = iwx_send_dqa_cmd(sc);
+		if (err)
+			return err;
+	}
 
 	/* Add auxiliary station for scanning */
 	err = iwx_add_aux_sta(sc);
@@ -7307,12 +7418,13 @@ iwx_init_hw(struct iwx_softc *sc)
 		goto err;
 	}
 
-	for (i = 0; i < 1; i++) {
+	for (i = 0; i < IWX_NUM_PHY_CTX; i++) {
 		/*
 		 * The channel used here isn't relevant as it's
 		 * going to be overwritten in the other flows.
 		 * For now use the first channel we have.
 		 */
+		sc->sc_phyctxt[i].id = i;
 		sc->sc_phyctxt[i].channel = &ic->ic_channels[1];
 		err = iwx_phy_ctxt_cmd(sc, &sc->sc_phyctxt[i], 1, 1,
 		    IWX_FW_CTXT_ACTION_ADD, 0);

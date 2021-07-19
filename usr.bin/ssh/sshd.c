@@ -1,4 +1,4 @@
-/* $OpenBSD: sshd.c,v 1.576 2021/06/10 03:14:14 dtucker Exp $ */
+/* $OpenBSD: sshd.c,v 1.578 2021/07/19 02:21:50 dtucker Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -1635,15 +1635,13 @@ main(int ac, char **av)
 	parse_server_config(&options, rexeced_flag ? "rexec" : config_file_name,
 	    cfg, &includes, NULL);
 
+#ifdef WITH_OPENSSL
 	if (options.moduli_file != NULL)
 		dh_set_moduli_file(options.moduli_file);
+#endif
 
 	/* Fill in default values for those options not explicitly set. */
 	fill_default_server_options(&options);
-
-	/* challenge-response is implemented via keyboard interactive */
-	if (options.challenge_response_authentication)
-		options.kbd_interactive_authentication = 1;
 
 	/* Check that options are sensible */
 	if (options.authorized_keys_command_user == NULL &&

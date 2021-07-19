@@ -1,4 +1,4 @@
-/*	$OpenBSD: disk.h,v 1.23 2021/06/25 19:24:53 krw Exp $	*/
+/*	$OpenBSD: disk.h,v 1.30 2021/07/16 13:26:04 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -20,23 +20,24 @@
 #define _DISK_H
 
 struct disk {
-	char	 *name;
-	int	  fd;
-	uint32_t cylinders;
-	uint32_t heads;
-	uint32_t sectors;
-	uint32_t size;
+	struct prt	 dk_bootprt;
+	char		*dk_name;
+	int		 dk_fd;
+	uint32_t	 dk_cylinders;
+	uint32_t	 dk_heads;
+	uint32_t	 dk_sectors;
+	uint32_t	 dk_size;
 };
 
 /* Align partition starts/sizes on 32K-byte boundaries. */
 #define	BLOCKALIGNMENT	64
 
-void  DISK_open(int);
-int  DISK_printgeometry(char *);
-char *DISK_readsector(off_t);
-int DISK_writesector(char *, off_t);
+void		 DISK_open(const char *, const int);
+void		 DISK_printgeometry(const char *);
+char		*DISK_readsector(const uint64_t);
+int		 DISK_writesector(const char *, const uint64_t);
 
-extern struct disk disk;
-extern struct disklabel dl;
+extern struct disk		disk;
+extern struct disklabel		dl;
 
 #endif /* _DISK_H */

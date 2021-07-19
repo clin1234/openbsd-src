@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.23 2021/06/30 22:20:56 kettenis Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.25 2021/07/02 14:50:18 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
@@ -404,7 +404,6 @@ doreset:
 	/* NOTREACHED */
 }
 
-//Copied from ARM64, removed some registers. XXX
 void
 setregs(struct proc *p, struct exec_package *pack, u_long stack,
     register_t *retval)
@@ -467,7 +466,6 @@ cpu_dump_mempagecnt(void)
 	return 0;
 }
 
-//Copied from ARM64
 /*
  * These variables are needed by /sbin/savecore
  */
@@ -509,7 +507,6 @@ dumpconf(void)
 	dumpsize = cpu_dump_mempagecnt();
 }
 
-//copied from arm64/sys_machdep.h
 int
 sys_sysarch(struct proc *p, void *v, register_t *retval)
 {
@@ -544,36 +541,27 @@ int	pmap_bootstrap_bs_map(bus_space_tag_t, bus_addr_t,
 void
 initriscv(struct riscv_bootparams *rbp)
 {
-	long kernbase = (long)_start & ~PAGE_MASK;
-	long kvo = rbp->kern_delta;
 	paddr_t memstart, memend;
+	paddr_t ramstart, ramend;
+	paddr_t start, end;
 	vaddr_t vstart;
 	void *config = (void *)rbp->dtbp_virt;
 	void *fdt = NULL;
 	paddr_t fdt_start = (paddr_t)rbp->dtbp_phys;
 	size_t fdt_size;
+	struct fdt_reg reg;
+	void *node;
 	EFI_PHYSICAL_ADDRESS system_table = 0;
 	int (*map_func_save)(bus_space_tag_t, bus_addr_t, bus_size_t, int,
 	    bus_space_handle_t *);
-	paddr_t ramstart, ramend;
-	paddr_t start, end;
 	int i;
 
 	/* Set the per-CPU pointer. */
 	__asm volatile("mv tp, %0" :: "r"(&cpu_info_primary));
 
-	// NOTE that 1GB of ram is mapped in by default in
-	// the bootstrap memory config, so nothing is necessary
-	// until pmap_bootstrap_finalize is called??
-
-	//NOTE: FDT is already mapped (rbp->dtbp_virt => rbp->dtbp_phys)
-	// Initialize the Flattened Device Tree
 	if (!fdt_init(config) || fdt_get_size(config) == 0)
 		panic("initriscv: no FDT");
 	fdt_size = fdt_get_size(config);
-
-	struct fdt_reg reg;
-	void *node;
 
 	node = fdt_find_node("/cpus");
 	if (node != NULL) {
@@ -682,15 +670,12 @@ initriscv(struct riscv_bootparams *rbp)
 	}
 
 	/* The bootloader has loaded us into a 64MB block. */
-	memstart = KERNBASE + kvo;
+	memstart = rbp->kern_phys;
 	memend = memstart + 64 * 1024 * 1024;
 
-	/* XXX */
-	kernbase = KERNBASE;
-
 	/* Bootstrap enough of pmap to enter the kernel proper. */
-	vstart = pmap_bootstrap(kvo, rbp->kern_l1pt,
-	    kernbase, esym, memstart, memend, ramstart, ramend);
+	vstart = pmap_bootstrap(rbp->kern_phys - KERNBASE, rbp->kern_l1pt,
+	    KERNBASE, esym, memstart, memend, ramstart, ramend);
 
 	proc0paddr = (struct user *)rbp->kern_stack;
 

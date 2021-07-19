@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.171 2020/07/23 17:34:53 schwarze Exp $
+# $OpenBSD: Makefile,v 1.181 2021/07/12 15:56:54 schwarze Exp $
 
 .include <bsd.own.mk>
 
@@ -14,14 +14,17 @@ MAN=	\
 	ASN1_TIME_set.3 \
 	ASN1_TYPE_get.3 \
 	ASN1_generate_nconf.3 \
+	ASN1_get_object.3 \
 	ASN1_item_d2i.3 \
 	ASN1_item_new.3 \
+	ASN1_parse_dump.3 \
 	ASN1_put_object.3 \
 	ASN1_time_parse.3 \
 	AUTHORITY_KEYID_new.3 \
 	BASIC_CONSTRAINTS_new.3 \
 	BF_set_key.3 \
 	BIO_ctrl.3 \
+	BIO_dump.3 \
 	BIO_f_base64.3 \
 	BIO_f_buffer.3 \
 	BIO_f_cipher.3 \
@@ -299,6 +302,7 @@ MAN=	\
 	X509_STORE_set_verify_cb_func.3 \
 	X509_STORE_set1_param.3 \
 	X509_VERIFY_PARAM_set_flags.3 \
+	X509_add1_trust_object.3 \
 	X509_check_ca.3 \
 	X509_check_host.3 \
 	X509_check_issued.3 \
@@ -307,6 +311,7 @@ MAN=	\
 	X509_cmp.3 \
 	X509_cmp_time.3 \
 	X509_digest.3 \
+	X509_find_by_subject.3 \
 	X509_get_pubkey.3 \
 	X509_get_serialNumber.3 \
 	X509_get_subject_name.3 \
@@ -314,9 +319,14 @@ MAN=	\
 	X509_get0_notBefore.3 \
 	X509_get0_signature.3 \
 	X509_get1_email.3 \
+	X509_keyid_set1.3 \
 	X509_new.3 \
+	X509_print_ex.3 \
 	X509_sign.3 \
+	X509_signature_dump.3 \
 	X509_verify_cert.3 \
+	X509V3_EXT_print.3 \
+	X509V3_extensions_print.3 \
 	X509v3_get_ext_by_NID.3 \
 	crypto.3 \
 	d2i_ASN1_NULL.3 \

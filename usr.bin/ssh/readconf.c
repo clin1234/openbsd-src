@@ -1,4 +1,4 @@
-/* $OpenBSD: readconf.c,v 1.357 2021/06/08 22:06:12 djm Exp $ */
+/* $OpenBSD: readconf.c,v 1.359 2021/07/13 23:48:36 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -131,7 +131,7 @@ typedef enum {
 	oForwardAgent, oForwardX11, oForwardX11Trusted, oForwardX11Timeout,
 	oGatewayPorts, oExitOnForwardFailure,
 	oPasswordAuthentication,
-	oChallengeResponseAuthentication, oXAuthLocation,
+	oXAuthLocation,
 	oIdentityFile, oHostname, oPort, oRemoteForward, oLocalForward,
 	oPermitRemoteOpen,
 	oCertificateFile, oAddKeysToAgent, oIdentityAgent,
@@ -153,7 +153,8 @@ typedef enum {
 	oTunnel, oTunnelDevice,
 	oLocalCommand, oPermitLocalCommand, oRemoteCommand,
 	oVisualHostKey,
-	oKexAlgorithms, oIPQoS, oRequestTTY, oIgnoreUnknown, oProxyUseFdpass,
+	oKexAlgorithms, oIPQoS, oRequestTTY, oSessionType,
+	oIgnoreUnknown, oProxyUseFdpass,
 	oCanonicalDomains, oCanonicalizeHostname, oCanonicalizeMaxDots,
 	oCanonicalizeFallbackLocal, oCanonicalizePermittedCNAMEs,
 	oStreamLocalBindMask, oStreamLocalBindUnlink, oRevokedHostKeys,
@@ -214,12 +215,12 @@ static struct {
 	{ "passwordauthentication", oPasswordAuthentication },
 	{ "kbdinteractiveauthentication", oKbdInteractiveAuthentication },
 	{ "kbdinteractivedevices", oKbdInteractiveDevices },
+	{ "challengeresponseauthentication", oKbdInteractiveAuthentication }, /* alias */
+	{ "skeyauthentication", oKbdInteractiveAuthentication }, /* alias */
+	{ "tisauthentication", oKbdInteractiveAuthentication },  /* alias */
 	{ "pubkeyauthentication", oPubkeyAuthentication },
 	{ "dsaauthentication", oPubkeyAuthentication },		    /* alias */
 	{ "hostbasedauthentication", oHostbasedAuthentication },
-	{ "challengeresponseauthentication", oChallengeResponseAuthentication },
-	{ "skeyauthentication", oChallengeResponseAuthentication }, /* alias */
-	{ "tisauthentication", oChallengeResponseAuthentication },  /* alias */
 	{ "identityfile", oIdentityFile },
 	{ "identityfile2", oIdentityFile },			/* obsolete */
 	{ "identitiesonly", oIdentitiesOnly },
@@ -283,6 +284,7 @@ static struct {
 	{ "kexalgorithms", oKexAlgorithms },
 	{ "ipqos", oIPQoS },
 	{ "requesttty", oRequestTTY },
+	{ "sessiontype", oSessionType },
 	{ "proxyusefdpass", oProxyUseFdpass },
 	{ "canonicaldomains", oCanonicalDomains },
 	{ "canonicalizefallbacklocal", oCanonicalizeFallbackLocal },
@@ -858,6 +860,12 @@ static const struct multistate multistate_requesttty[] = {
 	{ "auto",			REQUEST_TTY_AUTO },
 	{ NULL, -1 }
 };
+static const struct multistate multistate_sessiontype[] = {
+	{ "none",			SESSION_TYPE_NONE },
+	{ "subsystem",			SESSION_TYPE_SUBSYSTEM },
+	{ "default",			SESSION_TYPE_DEFAULT },
+	{ NULL, -1 }
+};
 static const struct multistate multistate_canonicalizehostname[] = {
 	{ "true",			SSH_CANONICALISE_YES },
 	{ "false",			SSH_CANONICALISE_NO },
@@ -1083,10 +1091,6 @@ parse_time:
 
 	case oHostbasedAuthentication:
 		intptr = &options->hostbased_authentication;
-		goto parse_flag;
-
-	case oChallengeResponseAuthentication:
-		intptr = &options->challenge_response_authentication;
 		goto parse_flag;
 
 	case oGssAuthentication:
@@ -1931,6 +1935,11 @@ parse_pubkey_algos:
 		multistate_ptr = multistate_requesttty;
 		goto parse_multistate;
 
+	case oSessionType:
+		intptr = &options->session_type;
+		multistate_ptr = multistate_sessiontype;
+		goto parse_multistate;
+
 	case oIgnoreUnknown:
 		charptr = &options->ignored_unknown;
 		goto parse_string;
@@ -2272,7 +2281,6 @@ initialize_options(Options * options)
 	options->fwd_opts.streamlocal_bind_mask = (mode_t)-1;
 	options->fwd_opts.streamlocal_bind_unlink = -1;
 	options->pubkey_authentication = -1;
-	options->challenge_response_authentication = -1;
 	options->gss_authentication = -1;
 	options->gss_deleg_creds = -1;
 	options->password_authentication = -1;
@@ -2354,6 +2362,7 @@ initialize_options(Options * options)
 	options->ip_qos_interactive = -1;
 	options->ip_qos_bulk = -1;
 	options->request_tty = -1;
+	options->session_type = -1;
 	options->proxy_use_fdpass = -1;
 	options->ignored_unknown = NULL;
 	options->num_canonical_domains = 0;
@@ -2426,8 +2435,6 @@ fill_default_options(Options * options)
 		options->fwd_opts.streamlocal_bind_unlink = 0;
 	if (options->pubkey_authentication == -1)
 		options->pubkey_authentication = 1;
-	if (options->challenge_response_authentication == -1)
-		options->challenge_response_authentication = 1;
 	if (options->gss_authentication == -1)
 		options->gss_authentication = 0;
 	if (options->gss_deleg_creds == -1)
@@ -2540,6 +2547,8 @@ fill_default_options(Options * options)
 		options->ip_qos_bulk = IPTOS_DSCP_CS1;
 	if (options->request_tty == -1)
 		options->request_tty = REQUEST_TTY_AUTO;
+	if (options->session_type == -1)
+		options->session_type = SESSION_TYPE_DEFAULT;
 	if (options->proxy_use_fdpass == -1)
 		options->proxy_use_fdpass = 0;
 	if (options->canonicalize_max_dots == -1)
@@ -3049,6 +3058,8 @@ fmt_intarg(OpCodes code, int val)
 		return fmt_multistate_int(val, multistate_tunnel);
 	case oRequestTTY:
 		return fmt_multistate_int(val, multistate_requesttty);
+	case oSessionType:
+		return fmt_multistate_int(val, multistate_sessiontype);
 	case oCanonicalizeHostname:
 		return fmt_multistate_int(val, multistate_canonicalizehostname);
 	case oAddKeysToAgent:
@@ -3186,7 +3197,6 @@ dump_client_config(Options *o, const char *host)
 	dump_cfg_fmtint(oBatchMode, o->batch_mode);
 	dump_cfg_fmtint(oCanonicalizeFallbackLocal, o->canonicalize_fallback_local);
 	dump_cfg_fmtint(oCanonicalizeHostname, o->canonicalize_hostname);
-	dump_cfg_fmtint(oChallengeResponseAuthentication, o->challenge_response_authentication);
 	dump_cfg_fmtint(oCheckHostIP, o->check_host_ip);
 	dump_cfg_fmtint(oCompression, o->compression);
 	dump_cfg_fmtint(oControlMaster, o->control_master);
@@ -3211,6 +3221,7 @@ dump_client_config(Options *o, const char *host)
 	dump_cfg_fmtint(oProxyUseFdpass, o->proxy_use_fdpass);
 	dump_cfg_fmtint(oPubkeyAuthentication, o->pubkey_authentication);
 	dump_cfg_fmtint(oRequestTTY, o->request_tty);
+	dump_cfg_fmtint(oSessionType, o->session_type);
 	dump_cfg_fmtint(oStreamLocalBindUnlink, o->fwd_opts.streamlocal_bind_unlink);
 	dump_cfg_fmtint(oStrictHostKeyChecking, o->strict_host_key_checking);
 	dump_cfg_fmtint(oTCPKeepAlive, o->tcp_keep_alive);
